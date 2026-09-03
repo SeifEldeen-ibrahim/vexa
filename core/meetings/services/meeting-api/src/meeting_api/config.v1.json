@@ -87,7 +87,16 @@
    "class": "defaulted",
    "default": "(unset — the internal lifecycle-callback header is then not attached)",
    "secret": true,
-   "description": "shared secret for internal service-to-service calls (x-internal-secret on the self-driven lifecycle callback)"
+   "description": "shared secret for internal service-to-service calls (x-internal-secret on the self-driven lifecycle callback). Unset is a documented degrade; a PUBLISHED PLACEHOLDER is not — it is the whole internal tier handed to anyone who read the repository (F95), so the boot refuses it.",
+   "forbidden_values": [
+     "vexa-internal-secret",
+     "lite-internal-secret",
+     "changeme",
+     "change-me",
+     "CHANGE-ME",
+     "default",
+     "secret"
+   ]
   },
   {
    "key": "DEFAULT_BOT_NAME",
@@ -292,7 +301,7 @@
    "key": "DB_WRITER_INTERVAL_S",
    "class": "defaulted",
    "default": "10",
-   "description": "db-writer cadence (seconds) — each tick flushes immutable live segments from the redis hash meeting:{id}:segments into the transcriptions table and drains proc:meeting:{id} notes into meeting.data (the restored 0.10 flush loop)",
+   "description": "db-writer cadence (seconds) — each tick flushes immutable live segments from the redis hash meeting:{id}:segments into the transcriptions table (the restored 0.10 flush loop)",
    "targets": []
   },
   {
@@ -328,13 +337,6 @@
    "class": "defaulted",
    "default": "3600",
    "description": "TTL (seconds) re-armed on the live segment hash meeting:{id}:segments at every append — an abandoned hash cannot linger forever once flushed (0.10 parity)",
-   "targets": []
-  },
-  {
-   "key": "PROC_PENDING_GRACE_SEC",
-   "class": "defaulted",
-   "default": "120",
-   "description": "bounded grace (s) for draining a finalized meeting's processed_pending entries after its view_end marker — the copilot's final post-session beat must land within this window or the drain is abandoned with a warning (ADR-0027 Train 2)",
    "targets": []
   },
   {

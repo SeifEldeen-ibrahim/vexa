@@ -1,17 +1,22 @@
 {
   "name": "@vexa/transcribe-whisper",
   "version": "0.1.0",
-  "description": "Shared stt.v1 egress — PCM window → hosted Whisper segments, with the low-confidence STT filter at source.",
+  "description": "Shared stt.v1 egress \u2014 PCM window \u2192 hosted Whisper segments, with the low-confidence STT filter at source.",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "exports": {
-    ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" }
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
   },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsc",
-    "test": "tsx src/confidence.test.ts && tsx src/errors.test.ts && tsx src/model.test.ts && tsx src/granularities.test.ts",
+    "test": "tsx src/confidence.test.ts && tsx src/errors.test.ts && tsx src/model.test.ts && tsx src/granularities.test.ts && tsx src/short-window.test.ts",
     "check:isolation": "node scripts/check-isolation.js"
   },
   "devDependencies": {

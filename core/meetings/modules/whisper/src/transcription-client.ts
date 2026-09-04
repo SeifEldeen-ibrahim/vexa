@@ -1,6 +1,10 @@
 import { log } from './log.js';
 import { isLowConfidenceSegment } from './confidence.js';
 
+/** The shortest window worth sending: the floor hosted STT backends price a clip at
+ *  (Groq rejects anything below 0.01 s with a non-retryable 400). */
+const MIN_AUDIO_SECONDS = 0.05;
+
 export interface TranscriptionWord {
   word: string;
   start: number;
@@ -125,6 +129,13 @@ export class TranscriptionClient {
    * Retries on transient failures (503, network errors).
    */
   async transcribe(audioData: Float32Array, language?: string, prompt?: string): Promise<TranscriptionResult> {
+    // A window shorter than the shortest clip any backend will price is not a transcription
+    // request — hosted STT rejects it (Groq: "Audio file is too short", HTTP 400), and a
+    // bad_request is non-retryable, so a run of slivers walks the meeting into stt_degraded.
+    // An empty result is the honest answer: there is no speech here to return.
+    if (audioData.length / this.sampleRate < MIN_AUDIO_SECONDS) {
+      return { text: '', language: language || 'unknown', language_probability: 0, duration: 0, segments: [] };
+    }
     const wavBuffer = this.float32ToWav(audioData);
 
     for (let attempt = 0; attempt <= this.maxRetries; attempt++) {

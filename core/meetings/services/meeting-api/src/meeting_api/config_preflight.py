@@ -224,13 +224,18 @@ def _http_probe(spec: dict, env: Mapping[str, str], timeout: float) -> dict:
     body = b""
     content_type = None
     if (spec.get("payload") or "") == "audio":
-        content_type, body = audio_probe_body(spec.get("payload_model") or "whisper-1")
+        _model_key = spec.get("payload_model_key")
+        _model = (env.get(_model_key) or "").strip() if _model_key else ""
+        content_type, body = audio_probe_body(_model or spec.get("payload_model") or "whisper-1")
     req = urllib.request.Request(url, data=body, method=(spec.get("method") or "POST"))
     if content_type:
         req.add_header("Content-Type", content_type)
     token = (env.get(spec["auth_key"]) or "").strip() if spec.get("auth_key") else ""
     if token:
         req.add_header("Authorization", f"Bearer {token}")
+    # A default python-urllib User-Agent is rejected by CDN bot filters (Cloudflare 1010),
+    # which reads as an auth failure against a backend the bot itself reaches fine.
+    req.add_header("User-Agent", "Mozilla/5.0 (compatible; VexaConfigProbe/1.0)")
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:  # noqa: S310 — declared endpoint
             status = int(r.status)

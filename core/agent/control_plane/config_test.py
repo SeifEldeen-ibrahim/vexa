@@ -161,10 +161,16 @@ def _transcribe_probe(endpoint: str, token: str) -> tuple:
     """POST the shared audio probe body — the same request the boot preflight makes."""
     from control_plane.config_preflight import audio_probe_body
 
-    content_type, body = audio_probe_body()
+    # Ask with the DEPLOYMENT'S model, not the `whisper-1` default: a backend that validates
+    # model ids (Groq, vLLM) answers 404 model_not_found to a model it does not serve, and the
+    # Test button then reports a broken backend that transcribes meetings fine. A default
+    # python-urllib User-Agent is likewise rejected by CDN bot filters (Cloudflare 1010) as a
+    # 403, which reads as a bad token. Both mirror the boot preflight.
+    content_type, body = audio_probe_body((os.getenv("TRANSCRIPTION_MODEL") or "").strip() or "whisper-1")
     req = urllib.request.Request(
         endpoint, data=body, method="POST",
-        headers={"Content-Type": content_type, "Authorization": f"Bearer {token}"})
+        headers={"Content-Type": content_type, "Authorization": f"Bearer {token}",
+                 "User-Agent": "Mozilla/5.0 (compatible; VexaConfigProbe/1.0)"})
     try:
         with urllib.request.urlopen(req, timeout=_STT_PROBE_TIMEOUT) as r:
             return r.status, r.read().decode("utf-8", "replace")

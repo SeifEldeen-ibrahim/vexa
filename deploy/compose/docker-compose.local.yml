@@ -1,0 +1,13 @@
+# Local fork overlay — pins the services we build from THIS checkout, so the stack runs our
+# fixes instead of the published :v012 bytes. Everything not named here still comes from the
+# published images. Used by `make local` (deploy/compose/Makefile), never by `make all`.
+#
+# Rebuild a service after editing its source:
+#   IMAGE_TAG=local docker compose -p vexa-v012 build <service>
+# The meeting bot is not a compose service — it is spawned by the runtime from BROWSER_IMAGE
+# in .env; rebuild it with `make -C deploy/compose bot BOT_IMAGE=vexa/vexa-bot:local`.
+services:
+  meeting-api:
+    image: vexaai/v012-meeting-api:local
+  agent-api:
+    image: vexaai/v012-agent-api:local

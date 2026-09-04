@@ -14,7 +14,9 @@ COMPOSE  = docker compose -p $(PROJECT) -f docker-compose.yml
 REPO_ROOT := $(abspath ../..)
 BOT_IMAGE ?= vexa/vexa-bot:dev
 
-.PHONY: stack-test stack-test-bot stack-test-mock stack-test-v010 dashboard-harness provision-token up dev digest-audit down build ps logs bot _preflight _bot_check _creds_check _access
+LOCAL = $(COMPOSE) -f docker-compose.local.yml
+
+.PHONY: stack-test stack-test-bot stack-test-mock stack-test-v010 dashboard-harness provision-token up dev local digest-audit down build ps logs bot _preflight _bot_check _creds_check _access
 
 ## provision-token — mint (idempotently) the self-host dashboard's API token (compose bring-up step 2).
 ## Needs ADMIN_TOKEN (the stack admin secret). Prints ONLY the token, so it pipes into the deploy:
@@ -78,6 +80,18 @@ up:
 	 _bi=$$(printf '%s' "$$_bi" | sed "s/\$${IMAGE_TAG}/$$_tag/; s/\$$IMAGE_TAG/$$_tag/"); \
 	 case "$$_bi" in vexaai/*) docker pull "$$_bi";; esac
 	$(COMPOSE) up -d --no-build
+	@$(MAKE) --no-print-directory _bot_check
+	@$(MAKE) --no-print-directory _creds_check
+	@$(MAKE) --no-print-directory _access
+
+## local — bring the stack up on OUR fork's images (docker-compose.local.yml) without pulling.
+## Services we patched run the :local tag built from this checkout; everything else runs the
+## published :v012 images already on the host. This is the day-to-day entrypoint for the fork —
+## `make all` still exists and still runs the pristine published stack.
+local:
+	@$(MAKE) --no-print-directory _preflight
+	@[ -f .env ] || { echo "→ no .env found; seeding from .env.example"; cp .env.example .env; }
+	$(LOCAL) up -d --no-build
 	@$(MAKE) --no-print-directory _bot_check
 	@$(MAKE) --no-print-directory _creds_check
 	@$(MAKE) --no-print-directory _access

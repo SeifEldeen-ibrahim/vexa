@@ -14,6 +14,7 @@
  * │    • Pipeline       → capture bridge → @vexa/{gmeet,mixed}-pipeline → @vexa/transcribe-whisper ✅ WIRED (L4 capture · L2/L3 lane)
  * │    • RecordingSink  → per-chunk upload to inv.recordingUploadUrl (master assembled server-side) ✅ WIRED (L4 upload · L3 sink)
  * │    • Speak          → acts.v1 `speak`/`speak_stop` → meeting-UI mic + VM TTS chain          ✅ WIRED (L4)
+ * │    • Chat           → acts.v1 `chat_send`/`chat_read` → the meeting's own chat panel        ✅ WIRED (L4)
  * └─ The browser/capture/recording-upload/speak legs are BROWSER- or VM-resident → L4-gated
  *    (proven by the O6 VM run, not unit tests). The lane + assembler cores are L2/L3-proven.
  *
@@ -35,7 +36,7 @@ import { createBotRecordingSink } from './recording.js';
 import { createCaptureSignalRecorder, startBotLogSidecar, wrapTranscribeWithTap, wrapTranscriptWithSnapshot, type CaptureSignalRecorder } from './telemetry.js';
 import { uploadSignalTapes } from './signal-upload.js';
 import { createSttFaultReporter } from './stt-faults.js';
-import { launchBrowser, startCaptureBridge, startRecording, restartMixedCapture, createSpeakController, type BrowserSession, type SpeakController } from './capture-bridge.js';
+import { launchBrowser, startCaptureBridge, startRecording, restartMixedCapture, createSpeakController, createChatController, type BrowserSession, type SpeakController, type ChatController } from './capture-bridge.js';
 import { createRemoteAudioActivityTap, createSilenceAlonenessSource, resolveAloneSilenceWindowMs } from './aloneness.js';
 import { installSignalHandlers } from './signals.js';
 import type {
@@ -116,12 +117,15 @@ function teeActs(source: ActsSource, voice: (act: Act) => void | Promise<void>):
   };
 }
 
-/** The bot's voice-act handler: route acts.v1 speak / speak_stop to the SpeakController. The
+/** The bot's interactive-act handler: route acts.v1 speak / speak_stop to the SpeakController and
+ *  chat_send / chat_read to the ChatController. The
  *  other voice acts (chat/screen/avatar) are out of this increment's scope. */
-function voiceHandler(speak: SpeakController): (act: Act) => Promise<void> {
+function voiceHandler(speak: SpeakController, chat?: ChatController): (act: Act) => Promise<void> {
   return async (act) => {
     if (act.action === 'speak') await speak.speak(act.text, act.voice);
     else if (act.action === 'speak_stop') await speak.stop();
+    else if (act.action === 'chat_send') await chat?.send(act.text);
+    else if (act.action === 'chat_read') await chat?.read();
   };
 }
 
@@ -180,6 +184,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<number
     client: transcriptClient,
     meetingId,
     nativeMeetingId: inv.nativeMeetingId,
+    ownerUserId: inv.ownerUserId,
     // Teams is the current blast radius. Its CSRC lanes need the same complete per-speaker pending
     // snapshot the Dashboard already consumes for GMeet-style live rendering. Leave every sibling
     // platform on the existing wire until this is proven on STAGE and deliberately imported back.
@@ -263,7 +268,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<number
         .then((requested) => console.log(`[bot] capture restart ${requested ? 'requested' : 'not applicable (no mixed rescan)'}`))
         .catch((e) => console.error(`[bot] capture restart failed: ${String(e)}`));
     };
-    // In-meeting chat (jitsi lane) → a transcript.v1 `chat` segment: the sender is the
+    // In-meeting chat (jitsi + google_meet) → a transcript.v1 `chat` segment: the sender is the
     // speaker, the wall clock is the timing (epoch seconds, like the audio lanes), and
     // `completed` is immediate — a chat line has no draft phase.
     let chatSeq = 0;
@@ -294,9 +299,11 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<number
         console.error(`[bot] live-pipeline: ${stage} failed (non-fatal, bot stays seated): ${serr(e)}`);
       },
     });
-    // Voice: tee acts so `speak`/`speak_stop` reach the SpeakController (gated on voiceAgentEnabled).
+    // Interactive: tee acts so `speak`/`speak_stop` reach the SpeakController and
+    // `chat_send`/`chat_read` the ChatController (both gated on voiceAgentEnabled).
     const speak = createSpeakController(session.page, inv);
-    acts = teeActs(liveActs, voiceHandler(speak));
+    const chat = createChatController(session.page, inv);
+    acts = teeActs(liveActs, voiceHandler(speak, chat));
   } catch (e) {
     console.error(`[bot] browser launch/capture wiring failed — falling back to clean terminal failed: ${String(e)}`);
     join = noBrowserJoinDriver(String(e));

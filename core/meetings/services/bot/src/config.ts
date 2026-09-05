@@ -65,6 +65,9 @@ export interface Invocation {
   token?: string;
   connectionId?: string;
   meeting_id?: number;
+  /** The meeting owner's user id, stamped by the control plane. Carried onto every published
+   *  segment so a consumer can attribute the meeting without a lookup. */
+  ownerUserId?: number;
   container_name?: string;
   redisUrl: string;
   meetingApiCallbackUrl?: string;
@@ -86,7 +89,7 @@ export interface Invocation {
   // ── lifecycle timeouts ──
   automaticLeave?: AutomaticLeave;
   reconnectionIntervalMs?: number;
-  // ── voice agent (gates acts.v1 voice commands; DEFERRED in this increment) ──
+  // ── voice agent (gates the acts.v1 interactive family: speak / chat_send / screen / avatar) ──
   voiceAgentEnabled?: boolean;
   defaultAvatarUrl?: string;
   videoReceiveEnabled?: boolean;

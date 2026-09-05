@@ -39,6 +39,11 @@ export interface RedisTranscriptSinkOptions {
   /** The native meeting code (e.g. `abc-defg-hij`). Stamped on the segment so the agent watcher keys
    *  on the native id WITHOUT a /meetings lookup (P23: one writer, no re-derivation). */
   nativeMeetingId?: string;
+  /** The meeting owner's user id (invocation.v1 `ownerUserId`). Stamped for the same reason as the
+   *  native id and by the same rule: the control plane KNOWS it at spawn, so it travels with the
+   *  data instead of being re-derived by every consumer. Absent when the control plane predates the
+   *  field — consumers fail closed rather than assume an owner. */
+  ownerUserId?: number;
   /** Live WebSocket envelope. `speaker-snapshot` is the Dashboard's GMeet-compatible contract:
    * each message replaces the complete pending set for one stable speaker key while confirmed
    * rows remain additive. Keep the legacy one-segment envelope as the default for every platform
@@ -50,7 +55,7 @@ export interface RedisTranscriptSinkOptions {
  *  mutable channel for one segment (best-effort fan-out; rejections propagate to the engine,
  *  which decides whether a publish failure is fatal). */
 export function createRedisTranscriptSink(opts: RedisTranscriptSinkOptions): TranscriptSink {
-  const { client, meetingId, nativeMeetingId, liveEnvelope = 'segment' } = opts;
+  const { client, meetingId, nativeMeetingId, ownerUserId, liveEnvelope = 'segment' } = opts;
   const channel = mutableChannel(meetingId);
   const pendingBySpeakerKey = new Map<string, Map<string, TranscriptSegment>>();
 
@@ -90,7 +95,8 @@ export function createRedisTranscriptSink(opts: RedisTranscriptSinkOptions): Tra
     // Emit that, not a flat segment, so the bot's transcripts actually reach the collector. (The
     // mock-bot L3 lane caught the flat form: O6 read the raw stream directly and never exercised the collector.)
     const payload = JSON.stringify({
-      type: 'transcription', meeting_id: meetingId, native_meeting_id: nativeMeetingId, segments: [segment],
+      type: 'transcription', meeting_id: meetingId, native_meeting_id: nativeMeetingId,
+      ...(ownerUserId != null ? { owner_user_id: ownerUserId } : {}), segments: [segment],
     });
     await client.xAdd(TRANSCRIPTION_STREAM, '*', { payload });
 

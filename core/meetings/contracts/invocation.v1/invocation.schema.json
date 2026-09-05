@@ -46,6 +46,7 @@
         "automaticLeave": { "$ref": "#/$defs/AutomaticLeave" },
         "reconnectionIntervalMs": { "type": "integer" },
         "voiceAgentEnabled": { "type": "boolean", "description": "gates the acts.v1 voice commands" },
+        "ownerUserId": { "type": "integer", "description": "the meeting owner's user id, carried so a consumer can attribute the meeting without a lookup; absent on invocations from a control plane that predates it, and a consumer MUST fail closed rather than assume a subject" },
         "defaultAvatarUrl": { "type": "string", "format": "uri" },
         "videoReceiveEnabled": { "type": "boolean" },
         "cameraEnabled": { "type": "boolean" },

@@ -18,6 +18,8 @@
  * THE CONTRACT (what capture-bridge.ts calls on window.VexaBrowserUtils):
  *   • createGmeetCapture({ log, onAudio })        — gmeet lane per-channel PCM
  *   • createGmeetSpeakers({ log })                — gmeet lane glow → litNames()
+ *   • createGmeetChat({ log, onMessage, selfName }) — gmeet chat reader (→ __vexaChatMessage)
+ *   • sendGmeetChatMessage(text)                  — gmeet chat send (acts.v1 chat_send)
  *   • createMixedAudioCapture(stream, onPcm)      — mixed lane (zoom/teams)
  *   • createCsrcPoll({ onTransition, … })         — mixed lane transport sensor (CSRC transitions)
  * We additionally expose the rest of the gmeet capture surface
@@ -68,6 +70,10 @@ import {
   pickBoundName,
   GmeetChannelBinder,
   createPcmCaptureNode,
+  createGmeetChat,
+  sendGmeetChatMessage,
+  ensureGmeetChatOpen,
+  isGmeetChatOpen,
 } from ${JSON.stringify(GMEET)};
 import {
   createMixedAudioCapture,
@@ -97,6 +103,10 @@ const VexaBrowserUtils = {
   // ── gmeet lane (per-participant capture + glow attribution) ──
   createGmeetCapture,        // capture-bridge.ts: w.VexaBrowserUtils.createGmeetCapture
   createGmeetSpeakers,       // capture-bridge.ts: w.VexaBrowserUtils.createGmeetSpeakers (litNames())
+  createGmeetChat,           // capture-bridge.ts: w.VexaBrowserUtils.createGmeetChat (read → __vexaChatMessage)
+  sendGmeetChatMessage,      // capture-bridge.ts: acts.v1 chat_send reaches this page-side
+  ensureGmeetChatOpen,       // the panel must be OPEN or the message list is unmounted
+  isGmeetChatOpen,
   createGmeetCaptureV1,      // the v1 producer (source-bound glow name)
   pickBoundName,
   GmeetChannelBinder,

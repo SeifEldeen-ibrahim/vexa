@@ -107,6 +107,24 @@ def _resolve_transcribe_enabled(value: Optional[object]) -> bool:
         raise HTTPException(status_code=422, detail=str(e))
 
 
+def _resolve_voice_agent_enabled(value: Optional[object]) -> bool:
+    """Gate for the acts.v1 INTERACTIVE command family (``speak``/``speak_stop``,
+    ``chat_send``/``chat_read``, screen, avatar) — same shared resolver, same 422 skin.
+
+    Defaults to ``false``: an interactive bot can TYPE INTO and SPEAK IN the customer's meeting, so
+    it is opt-in per deployment (``VOICE_AGENT_ENABLED``) and per request, never on by accident.
+
+    Until this existed, ``voiceAgentEnabled`` was a sealed ``invocation.v1`` field that NOTHING
+    produced, so the bot's gate (capture-bridge's SpeakController) refused every command it was
+    given. That is why "speak is proven at the bot layer but unreachable" — the API layer was only
+    half the story; a correctly-published act was dropped at the bot too."""
+    try:
+        return resolve_spawn_flag("VOICE_AGENT_ENABLED", value, default=False,
+                                  field="voice_agent_enabled")
+    except InvalidFlagValue as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+
 def _resolve_automatic_leave(value: Optional[object]) -> dict:
     """Translate the public snake_case timeout names into invocation.v1's camelCase shape.
 
@@ -453,6 +471,7 @@ def build_router(
                 transcription_tier=body.get("transcription_tier", "realtime"),
                 recording_enabled=_resolve_recording_enabled(body.get("recording_enabled")),
                 transcribe_enabled=transcribe_enabled,
+                voice_agent_enabled=_resolve_voice_agent_enabled(body.get("voice_agent_enabled")),
                 automatic_leave=_resolve_automatic_leave(body.get("automatic_leave")),
                 # P3c — continue_meeting is accepted off the OPEN api.v1 request body (MeetingCreate
                 # has no additionalProperties:false), so the wire is not rejected; documenting it as

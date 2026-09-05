@@ -8,7 +8,12 @@
   meeting chat and the answer arrives there — grounded in the live transcript, in the same
   conversation thread the Terminal's Assistant tab shows, so you can carry on in either. Opt-in per
   deployment (`VEXA_MEET_CHAT_ENABLED`), and the bot must be sent with the interactive family enabled
-  (`VOICE_AGENT_ENABLED`). See [Interactive bots](/interactive-bots).
+  (`VOICE_AGENT_ENABLED`).
+  **Anyone in the meeting can ask it, and it answers as you** — so by default it is grounded in that
+  meeting's transcript *only* and runs with no tools, and cannot read your workspace at all. A live
+  meeting's toolbar has a per-meeting toggle to widen that to your workspace (read-only, past
+  meetings' notes included) when the room is people you trust with it. See
+  [Interactive bots](/interactive-bots).
 - **The bot reads and writes Google Meet chat.** Messages typed in the meeting are captured into the
   transcript alongside speech, and `POST /bots/{platform}/{native_meeting_id}/chat` — declared in the
   public API since 0.12 but never served — now sends a message into a live meeting. Reading and

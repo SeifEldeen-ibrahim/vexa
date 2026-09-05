@@ -58,11 +58,31 @@ to an unmounted surface returns `404` on every deployment.
   or the transcript API.
 
 <Warning>
-**Anyone in the meeting can address the assistant.** The `@vexa` prefix decides whether a line is
-meant for the bot; it is not a permission check, and a guest in the room can type it. Turns
-triggered from the meeting chat therefore run with **read-only** workspace access — they can read
-and answer, never write. Treat what participants type as untrusted input, because it is.
+**Anyone in the meeting can address the assistant, and it answers as you.** The `@vexa` prefix
+decides whether a line is *meant* for the bot; it is not a permission check, and a guest in the room
+can type it. The turn runs under the meeting owner's identity — so whatever it can read, it can read
+**aloud into a room you do not control**.
+
+That is why the default is narrow: a meeting-chat turn is grounded in **that meeting's transcript
+only**, and is dispatched with **no tools**, so it cannot open a file even in a workspace that is
+mounted. There is nothing private in scope to leak.
+
+Read-only mounts alone would *not* be enough here. They stop a participant changing your workspace;
+they do nothing about one asking the assistant to read your notes out to the room.
 </Warning>
+
+### Letting it see more than the meeting
+
+On a live meeting the Terminal shows a toggle: **`@vexa: transcript only`** ⇄ **`@vexa: workspace`**.
+
+Granting `workspace` lets that meeting's assistant also read your workspace, read-only — which
+includes **past meetings' notes**, since the copilot writes those regardless of this setting. Grant
+it when the room is people you trust with that material, and remember that everyone in the room can
+then ask for it.
+
+The grant is **per meeting**, expires after 12 hours, and is off again for the next meeting — a room
+you trusted last week is not the room you are in today. Anything that goes wrong reading the grant
+(store unreachable, unknown value) falls back to transcript-only.
 
 **Don't have a key yet?** Hosted: sign in at [vexa.ai/signin](https://vexa.ai/signin) with a Google
 account and copy your key from [your account page](https://vexa.ai/account) — free credit, no card

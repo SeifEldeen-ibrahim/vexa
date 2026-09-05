@@ -89,6 +89,19 @@ spec:
                   name: {{ include "vexa.adminTokenSecretName" . }}
                   key: VEXA_BOT_API_KEY
                   optional: true
+            # The in-meeting chat assistant. OFF by default: any participant in a meeting can
+            # address it, so it is an untrusted-input surface and its turns are read-only.
+            - name: VEXA_MEET_CHAT_ENABLED
+              value: {{ .Values.agentApi.meetChat.enabled | default false | quote }}
+            - name: VEXA_MEET_CHAT_PREFIX
+              value: {{ .Values.agentApi.meetChat.prefix | default "@vexa" | quote }}
+            - name: VEXA_MEET_CHAT_ALWAYS
+              value: {{ .Values.agentApi.meetChat.always | default false | quote }}
+            - name: VEXA_MEET_CHAT_MIN_INTERVAL_S
+              value: {{ .Values.agentApi.meetChat.minIntervalSeconds | default 5 | quote }}
+            # The responder answers to this name as well as to the prefix.
+            - name: DEFAULT_BOT_NAME
+              value: {{ .Values.meetingApi.defaultBotName | default "" | quote }}
             - name: VEXA_AGENT_DEFAULT_SUBJECT
               value: {{ .Values.agentApi.defaultSubject | default "u_live" | quote }}
             - name: VEXA_AGENT_MODEL

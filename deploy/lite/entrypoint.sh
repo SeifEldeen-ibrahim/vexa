@@ -84,6 +84,14 @@ export AGENT_WORKER_COMMAND="${AGENT_WORKER_COMMAND:-/usr/local/bin/vexa-agent-w
 export VEXA_AGENT_DEFAULT_SUBJECT="${VEXA_AGENT_DEFAULT_SUBJECT:-u_live}"
 export VEXA_DISPATCH_SIGNING_KEY="${VEXA_DISPATCH_SIGNING_KEY:-dev-dispatch-signing-key}"
 export VEXA_BOT_API_KEY="${VEXA_BOT_API_KEY:-}"
+# The in-meeting chat assistant ("@vexa <question>" typed in a meeting's own chat). Off by default:
+# any participant can address it, so it is an untrusted-input surface.
+export VEXA_MEET_CHAT_ENABLED="${VEXA_MEET_CHAT_ENABLED:-false}"
+export VEXA_MEET_CHAT_PREFIX="${VEXA_MEET_CHAT_PREFIX:-@vexa}"
+export VEXA_MEET_CHAT_ALWAYS="${VEXA_MEET_CHAT_ALWAYS:-false}"
+export VEXA_MEET_CHAT_MIN_INTERVAL_S="${VEXA_MEET_CHAT_MIN_INTERVAL_S:-5}"
+# Gates the acts.v1 interactive family (chat_send/chat_read, speak) on every bot spawn.
+export VOICE_AGENT_ENABLED="${VOICE_AGENT_ENABLED:-false}"
 export VEXA_AGENT_MODEL="${VEXA_AGENT_MODEL:-}"
 export VEXA_MEETING_MODEL="${VEXA_MEETING_MODEL:-}"
 # HOST_CLAUDE_CREDENTIALS (config.v1 `model_inference`): path of a claude credentials JSON as seen

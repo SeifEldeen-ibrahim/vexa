@@ -96,6 +96,12 @@
    "description": "server-side bot participant name used by POST /bots when bot_name is omitted"
   },
   {
+    "key": "VOICE_AGENT_ENABLED",
+    "class": "defaulted",
+    "default": "false",
+    "description": "gates the acts.v1 interactive family (chat_send/chat_read, speak, screen, avatar) on every spawn; a request's voice_agent_enabled overrides it"
+  },
+  {
    "key": "TRANSCRIPTION_SERVICE_URL",
    "class": "capability",
    "capability": "stt",

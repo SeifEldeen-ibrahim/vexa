@@ -56,8 +56,9 @@ function writeLocal(key: string, value: string): void {
   }
 }
 
-/** The stored prefs. `botName` is "" when the user has typed none — NOT a fallback string, so the
- *  caller can tell "use the deployment default" from "the user chose the word Vexa". */
+/** The stored prefs. `botName` is "" when the user has typed none — NOT a fallback string, so a
+ *  caller can distinguish two different intents: leave the naming to the deployment, or use the
+ *  literal name Vexa because someone typed it. */
 export function readJoinPrefs(): JoinPrefs {
   const lang = (readLocal(LANGUAGE_KEY) ?? "").trim();
   return {

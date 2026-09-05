@@ -172,6 +172,10 @@ adminApi:
 # Meetings + recordings (compose: meeting-api → :8080).
 meetingApi:
   enabled: true
+  # Gates the acts.v1 interactive family (chat_send/chat_read, and speak once it is wired) on every
+  # spawn. OFF by default: an interactive bot can type into and speak in a customer's meeting, so it
+  # is opt-in per deployment and per request (`voice_agent_enabled` on POST /bots).
+  voiceAgentEnabled: false
   replicaCount: 2
   # Keep the process alive briefly after Kubernetes marks the Pod terminating. This gives
   # EndpointSlice/kube-proxy enough time to stop routing fresh connections to the old IP before
@@ -288,6 +292,15 @@ runtime:
 # Agent control plane — /invocations dispatch + /api/chat SSE (compose: agent-api → :8100).
 agentApi:
   enabled: true
+  # The in-meeting chat assistant: a participant typing "@vexa <question>" in a meeting's own chat
+  # gets an answer there, in the same thread the Assistant tab shows. OFF by default because ANY
+  # participant — including an external guest — can address it; its turns run read-only, and the
+  # prefix is a spam filter rather than a permission check.
+  meetChat:
+    enabled: false
+    prefix: "@vexa"
+    always: false               # true = treat EVERY chat line as addressed; a dedicated room only
+    minIntervalSeconds: 5       # bounds a participant pasting the address repeatedly
   replicaCount: 1               # shares a workspace store with spawned workers; keep single for RWO PVC
   image:
     repository: vexaai/v012-agent-api

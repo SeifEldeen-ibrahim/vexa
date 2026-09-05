@@ -240,6 +240,36 @@
       "description": "API key this control plane presents to the gateway (mint one via admin-api / `make all`)"
     },
     {
+      "key": "VEXA_MEET_CHAT_ENABLED",
+      "class": "defaulted",
+      "default": "false",
+      "description": "answer '@vexa <question>' typed in a meeting's own chat, in the Assistant tab's thread; off by default because ANY participant can address it"
+    },
+    {
+      "key": "VEXA_MEET_CHAT_PREFIX",
+      "class": "defaulted",
+      "default": "@vexa",
+      "description": "the address marking a meeting-chat line as a question for the bot (a spam filter, not a permission check)"
+    },
+    {
+      "key": "VEXA_MEET_CHAT_ALWAYS",
+      "class": "defaulted",
+      "default": "false",
+      "description": "treat EVERY meeting-chat line as addressed to the bot - a dedicated room only"
+    },
+    {
+      "key": "VEXA_MEET_CHAT_MIN_INTERVAL_S",
+      "class": "defaulted",
+      "default": "5",
+      "description": "minimum seconds between meeting-chat turns for one meeting; bounds a participant pasting the address repeatedly"
+    },
+    {
+      "key": "DEFAULT_BOT_NAME",
+      "class": "defaulted",
+      "default": "Vexa",
+      "description": "the bot's display name; the meeting-chat responder answers to it alongside the prefix"
+    },
+    {
       "key": "HOST_CLAUDE_CREDENTIALS",
       "class": "capability",
       "capability": "model_inference",

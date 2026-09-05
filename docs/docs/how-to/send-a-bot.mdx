@@ -139,6 +139,23 @@ Detection is **per window** (one STT call, a few seconds of one speaker's audio)
 code-switching *within* a window takes the window's language; switching between utterances lands on
 the segment boundary. A window whose language could not be determined has `language: null`.
 
+<Tip>
+**Prefer forcing the language when you know it.** A transcription window is only a few seconds long,
+and detection on that little audio is unreliable — a single-language English meeting can come back
+with segments labelled Spanish, German or Portuguese, especially on smaller Whisper models. Pinning
+`language` removes the guess entirely.
+</Tip>
+
+### From the Terminal
+
+The join composer's **Options** row carries the same two knobs: the **bot name** attendees will see,
+and the **language**. Both are remembered in your browser and applied to every bot you send —
+including *Send now* and *Re-send* on a meeting row.
+
+Leave the bot name **blank** to let the deployment name it: `POST /bots` is then sent without
+`bot_name`, so the operator's `DEFAULT_BOT_NAME` applies and can be changed with a restart rather
+than a rebuild. Typing a name overrides it for your browser only.
+
 ### Capture-only (no STT)
 
 Default spawns **require** a configured transcription backend. Without `TRANSCRIPTION_SERVICE_URL`

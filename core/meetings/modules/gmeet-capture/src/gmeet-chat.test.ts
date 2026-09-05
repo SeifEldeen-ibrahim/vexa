@@ -19,6 +19,7 @@ import {
   sendGmeetChatMessage,
   ensureGmeetChatOpen,
   isGmeetChatOpen,
+  wasSentByUs,
   type GmeetChatMessage,
 } from './gmeet-chat.js';
 
@@ -126,6 +127,55 @@ console.log('gmeet-chat: reading');
   });
   check('survives a throwing onMessage', reached);
   chat.destroy();
+}
+
+// ── the two defects the live meeting found ──────────────────────────────────
+console.log('gmeet-chat: live-found defects');
+{
+  // The sender fallback used to be nested inside `if (!text)`, so a row whose BODY matched a
+  // selector never had its sender recovered — live, EVERY message came back "Unknown".
+  mount(panel('<div data-message-id="1" data-message-text="the body text"><span>Ada Lovelace</span></div>'));
+  const seen: GmeetChatMessage[] = [];
+  const chat = createGmeetChat({ onMessage: (m) => seen.push(m), autoOpen: false });
+  check('recovers the sender even when the body matched a selector', seen[0]?.sender === 'Ada Lovelace');
+  check('still carries the right body', seen[0]?.text === 'the body text');
+  chat.destroy();
+}
+
+{
+  // Live, a message's author came out as "keep" — the Google Keep action label inside the row.
+  mount(panel('<div data-message-id="1" data-message-text="hello"><span>keep</span><span>Ada</span></div>'));
+  const seen: GmeetChatMessage[] = [];
+  const chat = createGmeetChat({ onMessage: (m) => seen.push(m), autoOpen: false });
+  check('skips UI chrome when guessing the sender', seen[0]?.sender === 'Ada');
+  chat.destroy();
+}
+
+{
+  // ECHO: Meet gave the bot's own reply no resolvable author, so the NAME guard let it read itself
+  // back. The text guard is the one that has to hold.
+  const { document } = mount(
+    '<div role="log" aria-live="polite"></div>' +
+    '<textarea aria-label="Send a message to everyone"></textarea>',
+  );
+  const seen: GmeetChatMessage[] = [];
+  const chat = createGmeetChat({ onMessage: (m) => seen.push(m), selfName: 'Vexa', autoOpen: false });
+  sendGmeetChatMessage('Doing well, thanks for asking!');
+  check('remembers what it sent', wasSentByUs('Doing well, thanks for asking!'));
+  // Meet echoes it back into the panel with NO resolvable sender (exactly what happened live).
+  document.querySelector('[role="log"]')!.innerHTML =
+    '<div data-message-id="9" data-message-text="Doing well, thanks for asking!"></div>';
+  const chat2 = createGmeetChat({ onMessage: (m) => seen.push(m), selfName: 'Vexa', autoOpen: false });
+  check('does NOT read its own message back, despite an unresolved sender',
+    !seen.some((m) => m.text === 'Doing well, thanks for asking!'));
+  chat.destroy(); chat2.destroy();
+}
+
+{
+  mount('<textarea aria-label="Send a message to everyone"></textarea>');
+  sendGmeetChatMessage('exact text');
+  check('matches an echo whose whitespace Meet collapsed', wasSentByUs('exact   text'));
+  check('does not claim an unrelated message as its own', !wasSentByUs('something else entirely'));
 }
 
 // ── panel state ─────────────────────────────────────────────────────────────

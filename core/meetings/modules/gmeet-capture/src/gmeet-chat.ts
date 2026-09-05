@@ -91,6 +91,43 @@ export const gmeetChatSendSelectors: string[] = [
   'button[aria-label*="Send message" i]',
 ];
 
+/** Text this module has SENT, with a timestamp. The reader drops these on the way back in.
+ *
+ *  Suppressing by sender name alone is not enough and was proved so live: Meet renders the bot's own
+ *  message with no resolvable author, so it read its own reply back as an unknown participant. The
+ *  text a moment after we typed it is the reliable signal; the name is the unreliable one. */
+const sentRecently = new Map<string, number>();
+const SENT_TTL_MS = 60_000;
+
+function rememberSent(text: string): void {
+  const now = Date.now();
+  sentRecently.set(text.trim(), now);
+  for (const [k, t] of sentRecently) if (now - t > SENT_TTL_MS) sentRecently.delete(k);
+}
+
+/** Did THIS bot type `text` in the last minute? Compared on a normalised form, because Meet
+ *  collapses whitespace and may truncate what it renders back. */
+export function wasSentByUs(text: string): boolean {
+  const norm = (v: string) => v.trim().replace(/\s+/g, ' ').toLowerCase();
+  const probe = norm(text);
+  if (!probe) return false;
+  const now = Date.now();
+  for (const [k, t] of sentRecently) {
+    if (now - t > SENT_TTL_MS) { sentRecently.delete(k); continue; }
+    const mine = norm(k);
+    if (mine === probe || mine.startsWith(probe) || probe.startsWith(mine)) return true;
+  }
+  return false;
+}
+
+/** Short leaf texts Meet renders INSIDE a message row that are UI, not a person. Without this the
+ *  leaf-text fallback picks the first one it meets — live, that made a message's author "keep"
+ *  (the Google Keep save action). */
+const CHROME_WORDS = new Set([
+  'keep', 'save', 'copy', 'pin', 'pinned', 'more', 'options', 'delete', 'reply', 'you',
+  'send', 'edit', 'report', 'translate', 'jump to bottom', 'everyone',
+]);
+
 function firstMatch(root: ParentNode, selectors: string[]): Element | null {
   for (const sel of selectors) {
     const el = root.querySelector(sel);
@@ -133,6 +170,7 @@ export function sendGmeetChatMessage(text: string): boolean {
     const input = firstMatch(document, gmeetChatInputSelectors) as HTMLElement | null;
     if (!input) return false;
     input.focus();
+    rememberSent(body);   // before the keystrokes: the reader may observe it the same tick
     if (input.getAttribute('contenteditable') === 'true') {
       input.textContent = body;
       input.dispatchEvent(new Event('input', { bubbles: true }));
@@ -165,6 +203,7 @@ export function createGmeetChat(opts: GmeetChatOptions): GmeetChat {
   const recent: GmeetChatMessage[] = [];
   let matchedContainer: string | null = null;
   let container: Element | null = null;
+  let dumped = false;
 
   const textOf = (root: Element, selectors: string[]): string => {
     for (const sel of selectors) {
@@ -193,17 +232,23 @@ export function createGmeetChat(opts: GmeetChatOptions): GmeetChat {
         sender = cur.getAttribute?.('data-sender-name') || textOf(cur, gmeetChatSenderSelectors);
       }
     }
-    // Body fallback: the largest leaf text in the row.
+    // Leaf-text fallbacks. These run INDEPENDENTLY: the sender fallback used to be nested inside
+    // `if (!text)`, so a row whose BODY matched a selector never got its sender recovered — every
+    // message came back "Unknown". (Found live; the unit fixtures all had data-sender-name.)
+    const frags = (!text || !sender)
+      ? Array.from(node.querySelectorAll('*'))
+          .map((e) => (e.childElementCount === 0 ? (e.textContent || '').trim() : ''))
+          .filter((t) => t.length > 0)
+      : [];
     if (!text) {
-      const frags = Array.from(node.querySelectorAll('*'))
-        .map((e) => (e.childElementCount === 0 ? (e.textContent || '').trim() : ''))
-        .filter((t) => t.length > 0);
       if (!frags.length) return null;
       text = frags.reduce((a, b) => (b.length > a.length ? b : a), '');
-      if (!sender) {
-        const short = frags.find((f) => f !== text && f.length <= 40 && !/^\d{1,2}:\d{2}/.test(f));
-        if (short) sender = short;
-      }
+    }
+    if (!sender) {
+      const body = text;
+      sender = frags.find((f) =>
+        f !== body && f.length <= 40 && !CHROME_WORDS.has(f.trim().toLowerCase())
+        && !/^\d{1,2}:\d{2}/.test(f) && /[A-Za-z]/.test(f)) || '';
     }
     // Meet appends a timestamp to the sender row ("Ada 10:42").
     sender = (sender || '').replace(/\s*\d{1,2}:\d{2}\s*(AM|PM)?\s*$/i, '').trim() || 'Unknown';
@@ -231,6 +276,16 @@ export function createGmeetChat(opts: GmeetChatOptions): GmeetChat {
     seenHashes.add(hash);
     recent.push(msg);
     if (recent.length > 30) recent.shift();
+    // The first row we ever extract gets its structure logged: when a selector stops matching, the
+    // log says what the DOM actually looks like instead of costing a rebuild to find out.
+    if (!dumped) {
+      dumped = true;
+      log(`first message row structure: ${JSON.stringify(dumpNode(node)).slice(0, 900)}`);
+      log(`extracted sender=${JSON.stringify(msg.sender)} from the row above`);
+    }
+    // Echo control, two independent guards. The text guard is the load-bearing one — Meet gave the
+    // bot's own reply no resolvable author, so the name guard alone let it read itself back.
+    if (wasSentByUs(msg.text)) { log(`chat (our own send, not emitted) ${msg.text.slice(0, 60)}`); return; }
     if (isSelf(msg.sender)) { log(`chat (self, not emitted) ${msg.text.slice(0, 60)}`); return; }
     log(`chat ${msg.sender}: ${msg.text.slice(0, 60)}`);
     try { opts.onMessage(msg); } catch { /* never break capture */ }

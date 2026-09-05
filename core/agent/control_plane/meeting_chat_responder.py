@@ -96,6 +96,22 @@ def chunk_reply(text: str, *, size: int = REPLY_CHUNK_CHARS, max_chunks: int = R
     return [c for c in chunks if c]
 
 
+#: Characters a chat session id may contain. The session id flows into the unit id and from there
+#: into a DOCKER CONTAINER NAME, which docker restricts to ``[a-zA-Z0-9][a-zA-Z0-9_.-]*``. A `:` or
+#: `/` in the session makes the spawn fail with a 400 the agent sees only as a 502 — so the id is
+#: built safe at the source rather than sanitised at the point it breaks.
+_SESSION_SAFE = re.compile(r"[^A-Za-z0-9_.-]+")
+
+
+def meeting_session_id(platform: str, meeting_key: str) -> str:
+    """The chat-thread id for a meeting: readable in the Assistant tab, legal as a container name.
+
+    Keyed on the meetings-domain ROW id, never the native code — the native code collides across
+    users and across one user's re-sends of the same link."""
+    safe = lambda v: _SESSION_SAFE.sub("-", str(v or "").strip()).strip("-.") or "unknown"
+    return f"meet-{safe(platform)}-{safe(meeting_key)}"
+
+
 def addressed_question(text: str, *, bot_name: str, prefix: str, always: bool = False) -> Optional[str]:
     """The question a chat line is asking the bot, or ``None`` when it is not addressed to it.
 
@@ -122,14 +138,16 @@ class MeetingChatResponder:
     """Turns an addressed in-meeting chat message into an agent turn and a reply in that chat.
 
     Every collaborator is injected so the whole flow is provable offline:
-      ``run_turn(subject, session, focus, prompt) -> str``  — one agent turn, returns the reply text.
+      ``run_turn(subject, session, focus, prompt, title) -> str`` — one agent turn, returns the reply
+        text. ``title`` names the thread in the Assistant tab and is the QUESTION alone, not the
+        prompt: titling from the prompt put this module's own instructions in the thread list.
       ``post_reply(platform, native, text) -> bool``        — deliver one message into the meeting.
     """
 
     def __init__(
         self,
         *,
-        run_turn: Callable[[str, str, dict, str], str],
+        run_turn: Callable[[str, str, dict, str, str], str],
         post_reply: Callable[[str, str, str], bool],
         bot_name: str = "Vexa",
         prefix: str = "@vexa",
@@ -197,9 +215,8 @@ class MeetingChatResponder:
     # ── the turn (pool thread) ─────────────────────────────────────────────────────────────────
     def _answer(self, meeting_key: str, platform: str, native: str, subject: str, sender: str, question: str) -> None:
         try:
-            # The SAME thread identity the Terminal's Assistant tab shows, keyed on the ROW id so two
-            # owners of one native code never share a conversation.
-            session = f"meet:{platform}/{meeting_key}"
+            # The SAME thread identity the Terminal's Assistant tab shows.
+            session = meeting_session_id(platform, meeting_key)
             focus = {
                 "kind": "meeting",
                 "platform": platform,
@@ -208,12 +225,15 @@ class MeetingChatResponder:
                 "status": "active",
             }
             # Name the asker: several people share this chat, so "who wants this" is part of the ask.
+            # A sender the reader could not resolve is "Unknown", which reads as a name — say
+            # "Someone" instead rather than putting a fake name in front of the model.
+            who = "Someone" if sender.strip().lower() in ("", "unknown") else sender
             prompt = (
-                f"{sender} asked in the meeting chat: {question}\n\n"
+                f"{who} asked in the meeting chat: {question}\n\n"
                 "Answer them in the meeting chat. Be brief — a few sentences at most, plain text, no "
                 "markdown formatting. If the transcript does not contain the answer, say so plainly."
             )
-            reply = self._run_turn(subject, session, focus, prompt)
+            reply = self._run_turn(subject, session, focus, prompt, question)
             body = strip_markdown(reply or "")
             if not body:
                 self._log(f"meet-chat: empty reply for {platform}/{native} — posting nothing")

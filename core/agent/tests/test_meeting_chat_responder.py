@@ -15,12 +15,18 @@ import time
 
 import pytest
 
+import re
+
 from control_plane.meeting_chat_responder import (
     MeetingChatResponder,
     addressed_question,
     chunk_reply,
+    meeting_session_id,
     strip_markdown,
 )
+
+#: What docker accepts as a container name. The session id ends up inside one.
+DOCKER_NAME = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]*$")
 
 
 class _Recorder:
@@ -34,8 +40,8 @@ class _Recorder:
         self.entered = threading.Event()
         self.release = threading.Event()
 
-    def run_turn(self, subject, session, focus, prompt):
-        self.turns.append((subject, session, focus, prompt))
+    def run_turn(self, subject, session, focus, prompt, title=""):
+        self.turns.append((subject, session, focus, prompt, title))
         self.entered.set()
         if self._delay:
             time.sleep(self._delay)
@@ -134,6 +140,22 @@ def test_the_turn_is_attributed_to_the_owner_off_the_segment():
     r.close()
 
 
+def test_the_session_id_is_legal_as_a_docker_container_name():
+    """Found live: `meet:google_meet/27` reached `docker create` as
+    `vexa-worker-6-chat-meet:google_meet/27` and was rejected 400 — which the agent saw only as a
+    502 Bad Gateway from the runtime. The id must be safe at the SOURCE, not sanitised downstream."""
+    sid = meeting_session_id("google_meet", "27")
+    assert sid == "meet-google_meet-27"
+    assert DOCKER_NAME.match(sid), sid
+    assert ":" not in sid and "/" not in sid
+
+
+def test_the_session_id_survives_hostile_platform_and_key_values():
+    for platform, key in [("google/meet", "2:7"), ("", ""), ("../etc", "a b"), ("--", "..")]:
+        sid = meeting_session_id(platform, key)
+        assert DOCKER_NAME.match(sid), (platform, key, sid)
+
+
 def test_the_session_is_keyed_on_the_row_id_not_the_native_code():
     """B-12. The native code collides across users AND across one user's re-sends — the same
     collision that leaked transcripts before the carrier was re-keyed. Two owners on one Meet link
@@ -145,7 +167,7 @@ def test_the_session_is_keyed_on_the_row_id_not_the_native_code():
     _offer(r, "@vexa hi", owner="2", key="22")
     _settle(rec, 2)
     sessions = {t[1] for t in rec.turns}
-    assert sessions == {"meet:google_meet/11", "meet:google_meet/22"}
+    assert sessions == {"meet-google_meet-11", "meet-google_meet-22"}
     # and the native code appears in NEITHER session id
     assert not any("abc-defg-hij" in s for s in sessions)
     r.close()
@@ -156,10 +178,23 @@ def test_the_turn_is_grounded_in_the_meeting_and_names_the_asker():
     r = _responder(rec)
     _offer(r, "@vexa what did we decide?", sender="Grace")
     _settle(rec)
-    _subject, _session, focus, prompt = rec.turns[0]
+    _subject, _session, focus, prompt, _title = rec.turns[0]
     assert focus["kind"] == "meeting" and focus["meeting_id"] == "7"
     assert focus["native_id"] == "abc-defg-hij" and focus["status"] == "active"
     assert "Grace" in prompt and "what did we decide?" in prompt
+
+
+def test_the_thread_is_titled_with_the_question_not_the_prompt_scaffolding():
+    """Live, the Assistant tab showed the thread as "Someone asked in the meeting chat: how are you
+    Answer them …" — this module's own instructions leaking into the thread list."""
+    rec = _Recorder()
+    r = _responder(rec)
+    _offer(r, "@vexa what did we decide about pricing?")
+    _settle(rec)
+    title = rec.turns[0][4]
+    assert title == "what did we decide about pricing?"
+    assert "Answer them" not in title and "meeting chat" not in title
+    r.close()
 
 
 def test_offer_never_blocks_the_calling_thread():

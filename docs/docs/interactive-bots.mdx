@@ -4,19 +4,28 @@ description: "Speaking, chatting, screen-sharing bots — what is actually reach
 ---
 
 <Warning>
-**Honest status:** the interactive capability family this page once advertised is **partially available
-in 0.12**. Chat *read* works. Speak, chat *write*, screen share and avatar are contract-sealed but not
-reachable through the API today. The API shape for interactive capabilities is under active design —
+**Honest status:** the interactive family is **partly available**. In-meeting **chat — read and
+write — works on Google Meet**, and the assistant can answer questions asked in the meeting chat.
+Speak is proven at the bot layer but still unreachable through the API; screen share and avatar are
+contract-sealed and unimplemented. The API shape for the remaining surfaces is still under design —
 it is **not** a straight restoration of the pre-0.12 endpoints.
 </Warning>
+
+<Note>
+Every interactive command is gated by **`VOICE_AGENT_ENABLED`**, off by default. A bot that can type
+into and speak in your meeting is opt-in per deployment and per request — send it with
+`"voice_agent_enabled": true` on `POST /bots`, or set `VOICE_AGENT_ENABLED=true` for the deployment.
+A bot sent without it ignores every interactive command and says so in its logs.
+</Note>
 
 ## Per-surface status (0.12, verified against the tree)
 
 | Surface | Contract (`api.v1`) | Reachable today | Notes |
 |---|---|---|---|
-| Chat **read** | sealed | ✅ `GET /bots/{platform}/{native_meeting_id}/chat` | mounted and served |
-| **Speak** | sealed | ❌ 404 | proven live at the bot layer (acts.v1 `speak` → TTS → virtual mic), **not wired at the API layer** — tracked in [#514](https://github.com/Vexa-ai/vexa/issues/514) |
-| Chat **write** | sealed | ❌ 404 | Teams chat write is prepared as [#500](https://github.com/Vexa-ai/vexa/issues/500) |
+| Chat **capture** | — | ✅ in the transcript | messages typed in the meeting arrive as transcript segments (Google Meet, Jitsi) |
+| Chat **write** | sealed | ✅ `POST /bots/{platform}/{native_meeting_id}/chat` | Google Meet; needs `VOICE_AGENT_ENABLED`. Returns `202` — the command is published to the bot, not confirmed delivered |
+| Chat **read** | sealed | ✅ `GET /bots/{platform}/{native_meeting_id}/chat` | mounted and served, but always an **empty list** — the durable record of a meeting's chat is its transcript |
+| **Speak** | sealed | ❌ 404 | proven live at the bot layer (acts.v1 `speak` → TTS → virtual mic), not wired at the API layer — tracked in [#514](https://github.com/Vexa-ai/vexa/issues/514) |
 | Screen share | sealed | ❌ 404 | planned back in 0.12.x |
 | Avatar / virtual camera | sealed | ❌ 404 | planned back in 0.12.x |
 
@@ -25,10 +34,35 @@ to an unmounted surface returns `404` on every deployment.
 
 ## What you can do today
 
-- **Read the meeting chat** while a bot is in the room: `GET /bots/{platform}/{native_meeting_id}/chat`
-  with a `bot`-scoped API key.
+- **Send a message into a live meeting** (Google Meet):
+
+  ```bash
+  curl -X POST https://api.cloud.vexa.ai/bots/google_meet/abc-defg-hij/chat \
+    -H "X-API-Key: $VEXA_API_KEY" -H "Content-Type: application/json" \
+    -d '{"text": "Sharing the notes doc after this call."}'
+  ```
+
+  `202` means the command reached the bot, not that the message was typed — the bot may have left,
+  or been sent without `VOICE_AGENT_ENABLED`. Its logs say which. Messages are capped at 500
+  characters, Google Meet's own composer limit.
+
+- **Read what was typed in the meeting** from the transcript: chat messages appear as ordinary
+  transcript segments, attributed to their sender, alongside speech.
+
+- **Let the assistant answer in the meeting chat.** With `VEXA_MEET_CHAT_ENABLED=true`, a participant
+  typing `@vexa <question>` gets an answer in that chat, grounded in the live transcript. The
+  exchange appears in the Terminal's Assistant tab as a normal conversation thread, so anyone can
+  carry it on there. `VEXA_MEET_CHAT_PREFIX` changes the address.
+
 - **Capture and transcribe** as usual — the interactive gaps do not affect transcription, recordings,
   or the transcript API.
+
+<Warning>
+**Anyone in the meeting can address the assistant.** The `@vexa` prefix decides whether a line is
+meant for the bot; it is not a permission check, and a guest in the room can type it. Turns
+triggered from the meeting chat therefore run with **read-only** workspace access — they can read
+and answer, never write. Treat what participants type as untrusted input, because it is.
+</Warning>
 
 **Don't have a key yet?** Hosted: sign in at [vexa.ai/signin](https://vexa.ai/signin) with a Google
 account and copy your key from [your account page](https://vexa.ai/account) — free credit, no card

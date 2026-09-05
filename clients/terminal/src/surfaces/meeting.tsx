@@ -16,7 +16,8 @@ import { resolveJoinError, serviceDenialFromError, type ServiceDenialPresentatio
 import { ServiceDenialPanel } from "./ServiceDenialPanel";
 import { useLiveMeetings, useLiveMeetingsConnection, useLiveMeetingsLoaded, liveMeetingsNow, refreshMeetings } from "./liveMeetings";
 import { usePreviewPinTab } from "./previewPinTab";
-import { defaultBotName } from "./defaultBotName";
+import { joinBody } from "./joinPrefs";
+import { JoinOptions, initialJoinPrefs } from "../ui-kit/JoinOptions";
 import { parseMeetingInput } from "./meetingId";
 import { getJitsiHosts } from "./jitsiHosts";
 import { mintTranscriptShare, mintInvite, listSharedMemberships, type Membership } from "./workspaceApi";
@@ -337,13 +338,13 @@ export function actionsFor(m: MeetingMock): RowAction[] {
   const send = (onFailure?: MeetingActionFailureHandler) =>
     runMeetingAction({ actionId: "send", actionLabel: "Send now", native }, fetch("/api/bots", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
+      // joinBody is the ONE producer of a POST /bots body (bot name + forced language ride with it).
+      body: JSON.stringify(joinBody({
         platform: platformSlug, native_meeting_id: native,
         // the row's real link when it has one (zoom/teams NEED it); gmeet can be constructed
         ...(m.meeting_url ? { meeting_url: m.meeting_url }
           : platformSlug === "google_meet" ? { meeting_url: `https://meet.google.com/${native}` } : {}),
-        bot_name: defaultBotName(),
-      }),
+      })),
     }), onFailure);
   // Delete a PLANNED row — ROW-id addressed (a link-less plan has no platform/native path).
   const del = (onFailure?: MeetingActionFailureHandler) =>
@@ -707,6 +708,9 @@ function MeetingsList() {
   const [sent, setSent] = useState<null | "sending" | "ok" | "err">(null);
   const [errMsg, setErrMsg] = useState<string | null>(null);
   const [denial, setDenial] = useState<ServiceDenialPresentation | null>(null);
+  // Bot name + forced language. Held in state so the row re-renders, PERSISTED by JoinOptions —
+  // joinBody() reads the stored values, so the send path stays a single source of truth.
+  const [prefs, setPrefs] = useState(initialJoinPrefs);
   const addBot = async () => {
     const u = url.trim();
     if (!u || sent === "sending") return;
@@ -720,7 +724,7 @@ function MeetingsList() {
       const r = await fetch("/api/bots", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ platform: parsed.platform, native_meeting_id: parsed.native_meeting_id, meeting_url: u, bot_name: defaultBotName() }),
+        body: JSON.stringify(joinBody({ platform: parsed.platform, native_meeting_id: parsed.native_meeting_id, meeting_url: u })),
       });
       if (r.ok) {
         setSent("ok"); setUrl("");
@@ -761,6 +765,7 @@ function MeetingsList() {
             {sent === "sending" ? "…" : "Add bot"}
           </button>
         </div>
+        <JoinOptions prefs={prefs} onChange={setPrefs} />
         {sent === "ok" && <div style={{ fontSize: 11, color: "var(--green)", marginTop: 5, lineHeight: 1.4 }}>Bot sent — admit it in the meeting; it appears here once it starts transcribing.</div>}
         {denial
           ? <ServiceDenialPanel presentation={denial} onRetry={() => void addBot()} />

@@ -7,13 +7,16 @@
  *  toggles, two domains — composed into one op. Partial failure is SURFACED in the returned state, never
  *  swallowed (P18). */
 import { ApiError, getJson } from "./apiClient";
-import { defaultBotName } from "./defaultBotName";
+import { joinBody } from "./joinPrefs";
 
 export interface AgentOnMeetingInput {
   platform: string; // e.g. "google_meet"
   native_id: string; // the meeting's native id
   meeting_url?: string; // optional — derived for google_meet when absent
   bot_name?: string;
+  /** Force a transcription language (a Whisper code). Omitted ⇒ the caller's stored preference,
+   *  which is itself omitted for auto-detect. */
+  language?: string;
 }
 
 export interface AgentOnMeetingState {
@@ -40,12 +43,11 @@ export async function agentOnMeeting(input: AgentOnMeetingInput): Promise<AgentO
   const bot = await getJson<{ status?: string; id?: number | string }>("/api/bots", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
+    body: JSON.stringify(joinBody({
       platform,
       native_meeting_id: native_id,
       meeting_url: meetingUrlFor(platform, native_id, input.meeting_url),
-      bot_name: input.bot_name ?? defaultBotName(),
-    }),
+    }, { botName: input.bot_name, language: input.language })),
   });
   // Step 2 — AGENT domain: enable the copilot (POST /api/meeting/process). Surface a failure, don't throw.
   let copilot: AgentOnMeetingState["copilot"] = { enabled: false };

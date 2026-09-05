@@ -13,7 +13,8 @@
  *  including the two field-tested traps (public-vs-secret address, Workspace-admin lock), and
  *  answers immediately on connect — sync-now runs and reports what it found. */
 import { useEffect, useState, type CSSProperties } from "react";
-import { defaultBotName } from "./defaultBotName";
+import { joinBody } from "./joinPrefs";
+import { JoinOptions, initialJoinPrefs } from "../ui-kit/JoinOptions";
 import { useService } from "../platform";
 import { LayoutServiceId } from "../workbench/layout";
 import { Icon } from "../ui-kit";
@@ -155,6 +156,8 @@ function DropBotInline() {
   const [sent, setSent] = useState<null | "sending" | "ok" | "err">(null);
   const [msg, setMsg] = useState<string | null>(null);
   const [denial, setDenial] = useState<ServiceDenialPresentation | null>(null);
+  // First run is exactly where naming the bot matters most — it is the name every attendee sees.
+  const [prefs, setPrefs] = useState(initialJoinPrefs);
   const send = async () => {
     const u = url.trim();
     if (!u || sent === "sending") return;
@@ -165,7 +168,7 @@ function DropBotInline() {
       const r = await fetch("/api/bots", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ platform: parsed.platform, native_meeting_id: parsed.native_meeting_id, meeting_url: u, bot_name: defaultBotName() }),
+        body: JSON.stringify(joinBody({ platform: parsed.platform, native_meeting_id: parsed.native_meeting_id, meeting_url: u })),
       });
       if (r.ok) {
         setSent("ok"); setUrl("");
@@ -196,6 +199,7 @@ function DropBotInline() {
           {sent === "sending" ? "…" : "Send bot"}
         </button>
       </div>
+      <JoinOptions prefs={prefs} onChange={setPrefs} />
       {sent === "ok" && <div style={{ fontSize: 11, color: "var(--green)", lineHeight: 1.4 }}>Bot sent — admit it in the meeting.</div>}
       {denial
         ? <ServiceDenialPanel presentation={denial} onRetry={() => void send()} />

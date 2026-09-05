@@ -25,7 +25,7 @@ import { createPlannedMeeting, updatePlannedMeeting, deletePlannedMeeting } from
 import { createSharedWorkspace, listSharedMemberships, listWorkspaceTree, mintInvite, readWorkspaceFile, type Membership } from "./workspaceApi";
 import { findBriefNote, isExampleNote } from "./briefNote";
 import { manageTabDescriptor } from "./workspaceManage";
-import { defaultBotName } from "./defaultBotName";
+import { joinBody } from "./joinPrefs";
 import { ASK_CHAT_EVENT } from "../canvas/actions";
 
 const field = {
@@ -244,7 +244,7 @@ function MeetingPrepTab({ params }: TabProps) {
       const platformSlug = m.platform === "Google Meet" ? "google_meet" : m.platform.toLowerCase().replace(/\s+/g, "_");
       const r = await fetch("/api/bots", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ platform: platformSlug, native_meeting_id: m.native_id, ...(m.meeting_url ? { meeting_url: m.meeting_url } : {}), bot_name: defaultBotName() }),
+        body: JSON.stringify(joinBody({ platform: platformSlug, native_meeting_id: m.native_id, ...(m.meeting_url ? { meeting_url: m.meeting_url } : {}) })),
       });
       // The body used to be read as raw TEXT and rethrown as a bare Error, so a denial payload
       // reached the presenter JSON-shaped and came out as "Something went wrong". Read it as the

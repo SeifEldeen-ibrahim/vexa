@@ -2468,7 +2468,7 @@ def create_app(
         import urllib.request
 
         secret = os.environ.get("INTERNAL_API_SECRET", "")
-        base = (os.environ.get("VEXA_MEETING_API_URL") or os.environ.get("MEETING_API_URL") or "").rstrip("/")
+        base = (os.environ.get("VEXA_MEETING_API_URL") or "").rstrip("/")
         if not (secret and base):
             logger.warning("meet-chat: no internal meeting-api route configured - cannot deliver the reply")
             return False
@@ -2505,7 +2505,7 @@ def create_app(
         if key in _owner_identity_cache:
             return _owner_identity_cache[key]
         secret = os.environ.get("INTERNAL_API_SECRET", "")
-        base = (os.environ.get("VEXA_ADMIN_API_URL") or os.environ.get("ADMIN_API_URL") or "").rstrip("/")
+        base = (os.environ.get("VEXA_ADMIN_API_URL") or "").rstrip("/")
         if not (secret and base):
             logger.warning("meet-chat: no internal identity route configured - nobody will be "
                            "recognised as the owner")

@@ -91,6 +91,14 @@ spec:
                   optional: true
             # The in-meeting chat assistant. OFF by default: any participant in a meeting can
             # address it, so it is an untrusted-input surface and its turns are read-only.
+            # The platform (loopback) tier secret: meeting-api's owner-named chat send and
+            # admin-api's identity lookup, neither exposed through the gateway.
+            - name: INTERNAL_API_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "vexa.adminTokenSecretName" . }}
+                  key: INTERNAL_API_SECRET
+                  optional: true
             - name: VEXA_MEET_CHAT_ENABLED
               value: {{ .Values.agentApi.meetChat.enabled | default false | quote }}
             - name: VEXA_MEET_CHAT_PREFIX

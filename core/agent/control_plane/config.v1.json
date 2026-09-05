@@ -264,6 +264,12 @@
       "description": "answer EVERY participant who addresses the bot, not just the meeting owner; off by default because the turn runs as the owner and Meet chat has no private replies"
     },
     {
+      "key": "INTERNAL_API_SECRET",
+      "class": "required-explicit",
+      "secret": true,
+      "description": "the platform (loopback) tier secret; used to call meeting-api's owner-named chat send and admin-api's user-identity lookup, neither of which is exposed through the gateway"
+    },
+    {
       "key": "VEXA_MEET_CHAT_MIN_INTERVAL_S",
       "class": "defaulted",
       "default": "5",

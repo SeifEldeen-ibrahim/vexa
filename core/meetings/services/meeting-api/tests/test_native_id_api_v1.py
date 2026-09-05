@@ -40,6 +40,13 @@ def _client():
     return TestClient(create_app(store, redis=_CaptureRedis())), store
 
 
+def _client_with_redis():
+    """Same app, but the redis fake is handed back so a test can read what was PUBLISHED."""
+    store = InMemoryTranscriptStore()
+    redis = _CaptureRedis()
+    return TestClient(create_app(store, redis=redis)), store, redis
+
+
 # ---- C1: native PATCH ---------------------------------------------------------------
 
 def test_native_patch_renames_owned_meeting_200():
@@ -142,3 +149,72 @@ def test_chat_read_owned_returns_empty_messages():
 def test_chat_read_unowned_404():
     client, _store = _client()
     assert client.get(f"/bots/{PLAT}/{NATIVE}/chat", headers=H).status_code == 404
+
+
+# ---- native chat SEND — the acts.v1 command-bus skin ---------------------------------
+#
+# Closes the KNOWN_GAPS row for POST /bots/{platform}/{native}/chat. The route publishes an acts.v1
+# `chat_send` onto the meeting's bot command bus; these drive the SHIPPED handler offline.
+
+import json as _stdjson
+
+
+def test_chat_send_publishes_an_acts_v1_command_to_the_meetings_bus():
+    client, store, redis = _client_with_redis()
+    mid = store.seed_meeting(user_id=USER, platform=PLAT, native_meeting_id=NATIVE, status="active")
+    r = client.post(f"/bots/{PLAT}/{NATIVE}/chat", json={"text": "hello meeting"}, headers=H)
+    assert r.status_code == 202, r.text
+    # Fire-and-forget by contract: 202 means PUBLISHED, never "the bot typed it".
+    assert r.json() == {"status": "queued"}
+    sent = [(c, d) for c, d in redis.published if c.startswith("bot_commands:")]
+    assert len(sent) == 1, redis.published
+    channel, data = sent[0]
+    assert channel == f"bot_commands:meeting:{mid}"
+    assert _stdjson.loads(data) == {"action": "chat_send", "text": "hello meeting"}
+
+
+def test_chat_send_unowned_404_and_publishes_nothing():
+    """Someone else's meeting is a 404, never a 403 — and no command reaches the bus."""
+    client, _store, redis = _client_with_redis()
+    r = client.post(f"/bots/{PLAT}/{NATIVE}/chat", json={"text": "hi"}, headers=H)
+    assert r.status_code == 404
+    assert [c for c, _ in redis.published if c.startswith("bot_commands:")] == []
+
+
+def test_chat_send_another_users_meeting_is_404():
+    client, store, redis = _client_with_redis()
+    store.seed_meeting(user_id=USER + 1, platform=PLAT, native_meeting_id=NATIVE, status="active")
+    r = client.post(f"/bots/{PLAT}/{NATIVE}/chat", json={"text": "hi"}, headers=H)
+    assert r.status_code == 404
+    assert [c for c, _ in redis.published if c.startswith("bot_commands:")] == []
+
+
+def test_chat_send_rejects_an_empty_or_missing_text():
+    client, store, redis = _client_with_redis()
+    store.seed_meeting(user_id=USER, platform=PLAT, native_meeting_id=NATIVE, status="active")
+    for body in ({}, {"text": ""}, {"text": "   "}, {"text": 42}):
+        r = client.post(f"/bots/{PLAT}/{NATIVE}/chat", json=body, headers=H)
+        assert r.status_code == 422, (body, r.status_code)
+    assert [c for c, _ in redis.published if c.startswith("bot_commands:")] == []
+
+
+def test_chat_send_refuses_text_over_the_platform_cap():
+    """Meet's composer caps a message at 500 chars — refuse at the boundary rather than let the
+    browser truncate it silently."""
+    client, store, redis = _client_with_redis()
+    store.seed_meeting(user_id=USER, platform=PLAT, native_meeting_id=NATIVE, status="active")
+    assert client.post(f"/bots/{PLAT}/{NATIVE}/chat", json={"text": "x" * 500}, headers=H).status_code == 202
+    assert client.post(f"/bots/{PLAT}/{NATIVE}/chat", json={"text": "x" * 501}, headers=H).status_code == 422
+
+
+def test_chat_send_targets_the_newest_row_for_a_resent_link():
+    """Two runs of the same link: the command must reach the LIVE bot, i.e. the newest row — the
+    same resolution rule the other native-keyed routes use."""
+    client, store, redis = _client_with_redis()
+    store.seed_meeting(user_id=USER, platform=PLAT, native_meeting_id=NATIVE, status="completed",
+                       created_at="2026-01-01T00:00:00Z")
+    newest = store.seed_meeting(user_id=USER, platform=PLAT, native_meeting_id=NATIVE, status="active",
+                                created_at="2026-06-01T00:00:00Z")
+    client.post(f"/bots/{PLAT}/{NATIVE}/chat", json={"text": "hi"}, headers=H)
+    channel = [c for c, _ in redis.published if c.startswith("bot_commands:")][0]
+    assert channel == f"bot_commands:meeting:{newest}"

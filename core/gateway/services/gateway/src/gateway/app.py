@@ -104,6 +104,7 @@ ROUTE_SCOPES: Dict[Tuple[str, str], FrozenSet[str]] = {
     ("PUT", "/bots/{platform}/{native_meeting_id}/config"): BOT,
     ("POST", "/bots/{platform}/{native_meeting_id}/speak"): BOT,
     ("GET", "/bots/{platform}/{native_meeting_id}/chat"): BOT,
+    ("POST", "/bots/{platform}/{native_meeting_id}/chat"): BOT,
     # --- the meeting record plane ---
     ("GET", "/meetings"): TX,
     ("POST", "/meetings"): TX,
@@ -673,6 +674,12 @@ def create_app(
     @app.get("/bots/{platform}/{native_meeting_id}/chat")
     async def read_meeting_chat(platform: str, native_meeting_id: str, request: Request):
         return await _forward("GET", _meeting(f"/bots/{platform}/{native_meeting_id}/chat"), request)
+
+    # The SEND half of the meeting-chat pair. Forwarded to the same meeting-api owner boundary; it
+    # publishes an acts.v1 `chat_send` onto the meeting's bot command bus and answers 202.
+    @app.post("/bots/{platform}/{native_meeting_id}/chat")
+    async def send_chat(platform: str, native_meeting_id: str, request: Request):
+        return await _forward("POST", _meeting(f"/bots/{platform}/{native_meeting_id}/chat"), request)
 
     # ---- user self-serve webhook config (main.py:1080 set_user_webhook_proxy) ----
     # Identity OWNS the config (user.data JSONB via admin-api); the gateway is the public edge for

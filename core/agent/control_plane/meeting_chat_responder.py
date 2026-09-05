@@ -224,14 +224,16 @@ class MeetingChatResponder:
       ``access(meeting_key) -> str`` — the meeting's granted scope. Anything that is not exactly
         ``"workspace"`` is treated as ``"transcript"``: an unreachable store, a typo or a missing key
         must all fail CLOSED, because failing open here means reading private notes into a room.
-      ``post_reply(platform, native, text) -> bool``        — deliver one message into the meeting.
+      ``post_reply(owner, platform, native, text) -> bool``  — deliver one message into the meeting,
+        AS the named owner. The owner is passed explicitly rather than implied by a key, so a
+        deployment serving many users does not depend on one of them holding the credential.
     """
 
     def __init__(
         self,
         *,
         run_turn: Callable[[str, str, dict, str, str, str], str],
-        post_reply: Callable[[str, str, str], bool],
+        post_reply: Callable[[str, str, str, str], bool],
         access: Optional[Callable[[str], str]] = None,
         bot_name: str = "Vexa",
         prefix: str = "@vexa",
@@ -346,7 +348,7 @@ class MeetingChatResponder:
                 return
             body = address_to(body, sender)
             for chunk in chunk_reply(body):
-                if not self._post_reply(platform, native, chunk):
+                if not self._post_reply(subject, platform, native, chunk):
                     self._log(f"meet-chat: reply delivery failed for {platform}/{native}")
                     break
             self._log(f"meet-chat: answered {sender} in {platform}/{native} ({len(body)} chars)")

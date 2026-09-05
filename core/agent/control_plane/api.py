@@ -2456,25 +2456,27 @@ def create_app(
                 return str(ev.get("message") or "The assistant hit an error answering that.")
         return "".join(parts).strip()
 
-    def _meet_chat_post(platform: str, native: str, text: str) -> bool:
-        """Deliver one reply into the meeting chat via the gateway's POST /bots/{p}/{n}/chat.
+    def _meet_chat_post(owner: str, platform: str, native: str, text: str) -> bool:
+        """Deliver one reply into the meeting chat, AS the meeting's owner.
 
-        Uses the DEPLOYMENT bot key, the same hop `_record_meeting_doc` already makes — which means
-        the authorization boundary for "who may make the bot speak here" is possession of that key
-        on this host, not the meeting owner's identity. Worth knowing before this is widened."""
-        import urllib.error
+        Goes to meeting-api's INTERNAL route over the loopback tier, naming the owner explicitly,
+        rather than to the public owner-scoped route with a deployment-wide API key. The key version
+        worked only for meetings owned by whoever held that key — every other user's meeting got a
+        silent 404 — and made "who may make the bot speak here" a question of who possesses one
+        shared secret on the host. Naming the owner keeps the SAME owner check (a wrong owner still
+        404s) while authenticating the CALLER as the platform, which is what it actually is."""
         import urllib.request
 
-        key = os.environ.get("VEXA_BOT_API_KEY", "")
-        if not key:
-            logger.warning("meet-chat: VEXA_BOT_API_KEY not set - cannot deliver the reply")
+        secret = os.environ.get("INTERNAL_API_SECRET", "")
+        base = (os.environ.get("VEXA_MEETING_API_URL") or os.environ.get("MEETING_API_URL") or "").rstrip("/")
+        if not (secret and base):
+            logger.warning("meet-chat: no internal meeting-api route configured - cannot deliver the reply")
             return False
-        gw = os.environ.get("VEXA_GATEWAY_URL", "http://gateway:8000").rstrip("/")
         try:
             req = urllib.request.Request(
-                f"{gw}/bots/{platform}/{native}/chat",
-                data=json.dumps({"text": text}).encode(), method="POST",
-                headers={"X-API-Key": key, "Content-Type": "application/json"},
+                f"{base}/internal/bots/{platform}/{native}/chat",
+                data=json.dumps({"user_id": owner, "text": text}).encode(), method="POST",
+                headers={"Authorization": f"Bearer {secret}", "Content-Type": "application/json"},
             )
             with urllib.request.urlopen(req, timeout=10) as resp:
                 return 200 <= resp.status < 300
@@ -2483,9 +2485,9 @@ def create_app(
             return False
 
     def _meet_chat_access(meeting_key: str) -> str:
-        """The meeting's granted scope, read fresh each turn so a revoke takes effect immediately.
-        Any fault, any missing key, any unexpected value ⇒ transcript-only: failing open here would
-        read private notes into a room."""
+        """The meeting's granted grounding scope, read fresh each turn so a revoke takes effect
+        immediately. Any fault, missing key or unexpected value ⇒ transcript-only: failing open here
+        would read private notes into a room."""
         import redis as _redis
 
         r = _redis.from_url(redis_url, decode_responses=True)
@@ -2496,7 +2498,7 @@ def create_app(
 
     def _meet_chat_owner_identity(subject: str):
         """(name, email) for a subject, from the identity service's internal tier. Cached — a
-        meeting's owner does not change mid-call, and this is on the path of every question."""
+        meeting's owner does not change mid-call, and this sits on the path of every question."""
         import urllib.request
 
         key = str(subject)
@@ -2508,8 +2510,11 @@ def create_app(
             logger.warning("meet-chat: no internal identity route configured - nobody will be "
                            "recognised as the owner")
             return (None, None)
+        # admin-api's internal tier authenticates on X-Internal-Secret, NOT a bearer token — the
+        # meetings side uses Authorization for the same secret, so this is easy to get wrong and
+        # fails as a flat 403 that reads like a bad key rather than a wrong header.
         req = urllib.request.Request(f"{base}/internal/users/{key}/identity",
-                                     headers={"Authorization": f"Bearer {secret}"})
+                                     headers={"X-Internal-Secret": secret})
         with urllib.request.urlopen(req, timeout=5) as resp:
             body = json.loads(resp.read().decode() or "{}")
         ident = (body.get("name"), body.get("email"))

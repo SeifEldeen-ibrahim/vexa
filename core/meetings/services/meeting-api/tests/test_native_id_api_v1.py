@@ -218,3 +218,61 @@ def test_chat_send_targets_the_newest_row_for_a_resent_link():
     client.post(f"/bots/{PLAT}/{NATIVE}/chat", json={"text": "hi"}, headers=H)
     channel = [c for c, _ in redis.published if c.startswith("bot_commands:")][0]
     assert channel == f"bot_commands:meeting:{newest}"
+
+
+# ---- the INTERNAL chat send (platform-authenticated, owner named explicitly) ---------
+#
+# The public route is scoped to the API key's user, which means the agent — one process answering on
+# behalf of MANY users — could only ever reach meetings owned by whoever held its key. This route
+# keeps the same owner check and moves the caller's identity to the platform tier.
+
+INTERNAL_H = {"Authorization": "Bearer test-internal-secret"}
+
+
+def _internal_client(monkeypatch_env=None):
+    import os
+    os.environ["INTERNAL_API_SECRET"] = "test-internal-secret"
+    store = InMemoryTranscriptStore()
+    redis = _CaptureRedis()
+    return TestClient(create_app(store, redis=redis)), store, redis
+
+
+def test_internal_chat_send_publishes_for_the_named_owner():
+    client, store, redis = _internal_client()
+    mid = store.seed_meeting(user_id=USER, platform=PLAT, native_meeting_id=NATIVE, status="active")
+    r = client.post(f"/internal/bots/{PLAT}/{NATIVE}/chat",
+                    json={"user_id": USER, "text": "answered"}, headers=INTERNAL_H)
+    assert r.status_code == 202, r.text
+    sent = [(c, d) for c, d in redis.published if c.startswith("bot_commands:")]
+    assert len(sent) == 1 and sent[0][0] == f"bot_commands:meeting:{mid}"
+
+
+def test_internal_chat_send_refuses_without_the_platform_secret():
+    """No secret, wrong secret, or a bearer that is merely present must all fail — this route is
+    named-owner, so a caller that reaches it can speak in ANY user's meeting."""
+    client, store, redis = _internal_client()
+    store.seed_meeting(user_id=USER, platform=PLAT, native_meeting_id=NATIVE, status="active")
+    for headers in ({}, {"Authorization": "Bearer wrong"}, {"Authorization": "Bearer "}):
+        r = client.post(f"/internal/bots/{PLAT}/{NATIVE}/chat",
+                        json={"user_id": USER, "text": "hi"}, headers=headers)
+        assert r.status_code == 401, (headers, r.status_code)
+    assert [c for c, _ in redis.published if c.startswith("bot_commands:")] == []
+
+
+def test_internal_chat_send_still_enforces_ownership():
+    """Naming an owner does not bypass the check — it just says WHICH owner to check."""
+    client, store, redis = _internal_client()
+    store.seed_meeting(user_id=USER, platform=PLAT, native_meeting_id=NATIVE, status="active")
+    r = client.post(f"/internal/bots/{PLAT}/{NATIVE}/chat",
+                    json={"user_id": USER + 1, "text": "hi"}, headers=INTERNAL_H)
+    assert r.status_code == 404
+    assert [c for c, _ in redis.published if c.startswith("bot_commands:")] == []
+
+
+def test_internal_chat_send_validates_the_body():
+    client, store, _redis = _internal_client()
+    store.seed_meeting(user_id=USER, platform=PLAT, native_meeting_id=NATIVE, status="active")
+    for body in ({"text": "hi"}, {"user_id": "abc", "text": "hi"}, {"user_id": USER},
+                 {"user_id": USER, "text": "   "}, {"user_id": USER, "text": "x" * 501}):
+        r = client.post(f"/internal/bots/{PLAT}/{NATIVE}/chat", json=body, headers=INTERNAL_H)
+        assert r.status_code == 422, (body, r.status_code)

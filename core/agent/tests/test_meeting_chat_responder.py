@@ -52,8 +52,8 @@ class _Recorder:
             self.release.wait(timeout=5)
         return self._reply
 
-    def post_reply(self, platform, native, text):
-        self.posts.append((platform, native, text))
+    def post_reply(self, owner, platform, native, text):
+        self.posts.append((owner, platform, native, text))
         return True
 
 
@@ -113,7 +113,7 @@ def test_an_addressed_message_runs_a_turn_and_posts_the_answer_back_to_the_meeti
     r = _responder(rec)
     assert _offer(r, "@vexa what did we decide?") == "accepted"
     _settle(rec)
-    assert rec.posts == [("google_meet", "abc-defg-hij", "@Ada We decided to ship on Friday.")]
+    assert rec.posts == [("42", "google_meet", "abc-defg-hij", "@Ada We decided to ship on Friday.")]
     r.close()
 
 
@@ -375,12 +375,23 @@ def test_an_unresolved_asker_gets_no_fake_name():
         assert address_to("Friday.", who) == "Friday."
 
 
+def test_the_reply_is_delivered_AS_the_meeting_owner():
+    """Not with a shared deployment key: that only ever worked for one user's meetings, and made
+    possession of a host secret the answer to "who may make the bot speak here"."""
+    rec = _Recorder()
+    r = _responder(rec)
+    _offer(r, "@vexa hi", owner="99")
+    _settle(rec)
+    assert rec.posts[0][0] == "99"
+    r.close()
+
+
 def test_the_posted_reply_is_addressed():
     rec = _Recorder(reply="Friday.")
     r = _responder(rec)
     _offer(r, "@vexa when do we ship?", sender="Grace Hopper")
     _settle(rec)
-    assert rec.posts[0][2] == "@Grace Hopper Friday."
+    assert rec.posts[0][3] == "@Grace Hopper Friday."
     r.close()
 
 

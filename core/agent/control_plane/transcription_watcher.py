@@ -213,23 +213,27 @@ def _resume_cursor(r, key: str) -> str:
     return str(cursor) if cursor else "0-0"
 
 
-def start(redis_url: str, dispatcher, live, *, subject: str = "u_live") -> threading.Thread:
+def start(redis_url: str, dispatcher, live, *, subject: str = "u_live", chat_responder=None) -> threading.Thread:
     """Spawn the watcher (the ARM daemon thread) and return it (tests/introspection). ``keymap``
     (numeric meeting_id → row-id routing key) is the arm thread's own state.
 
     ``subject`` is a PRE-M2 placeholder (defaults to ``u_live``): every armed copilot is attributed to
     this one subject. Live-meeting dispatch (M2) must resolve and pass the real meeting OWNER instead —
-    until then the copilot's meeting doc lands in the placeholder workspace, not the owner's."""
+    until then the copilot's meeting doc lands in the placeholder workspace, not the owner's.
+
+    ``chat_responder`` (optional) receives in-meeting chat segments. It takes the owner off the
+    SEGMENT (invocation.v1 ``ownerUserId``, stamped by the bot) rather than from ``subject``, so it
+    never inherits the placeholder above — and it must never block this thread (see ``offer``)."""
     keymap: dict[str, str] = {}
     t = threading.Thread(
-        target=_run_arm, args=(redis_url, dispatcher, live, subject, keymap),
+        target=_run_arm, args=(redis_url, dispatcher, live, subject, keymap, chat_responder),
         daemon=True, name="tx-watch",
     )
     t.start()
     return t
 
 
-def _run_arm(redis_url: str, dispatcher, live, subject: str, keymap: dict) -> None:
+def _run_arm(redis_url: str, dispatcher, live, subject: str, keymap: dict, chat_responder=None) -> None:
     """Inbound watch → key on the row id, register live, re-arm copilot, reap on session_end. Does NOT
     write the transcript carrier — meeting-api's collector owns ``tc:meeting:{row_id}`` (P23/P0)."""
     import redis as redislib
@@ -259,7 +263,7 @@ def _run_arm(redis_url: str, dispatcher, live, subject: str, keymap: dict) -> No
                 try:
                     r.xack(SRC, GROUP, msg_id)
                     _handle(r, dispatcher, live, subject, json.loads(fields.get("payload") or "{}"),
-                            last_arm, keymap, first_seen)
+                            last_arm, keymap, first_seen, chat_responder)
                 except Exception:  # noqa: BLE001
                     logger.exception("bad transcription frame; skipping")
 
@@ -267,7 +271,7 @@ def _run_arm(redis_url: str, dispatcher, live, subject: str, keymap: dict) -> No
 RESOLVE_GRACE_SEC = 6.0  # how long to wait for a native id before falling back to the numeric key
 
 
-def _handle(r, dispatcher, live, subject, p, last_arm, keymap, first_seen) -> None:
+def _handle(r, dispatcher, live, subject, p, last_arm, keymap, first_seen, chat_responder=None) -> None:
     # P0 (cross-tenant leak fix): the TRANSCRIPT CARRIER + :on + :cursor + dispatch keys are the numeric
     # ROW id `mid` — NOT the native Meet code. The native id is NOT unique (it collides across DIFFERENT
     # users and across ONE user's re-sends of the same link), so keying transcript data by it leaked one
@@ -344,6 +348,38 @@ def _handle(r, dispatcher, live, subject, p, last_arm, keymap, first_seen) -> No
         # proc:meeting:{row_id} which the meeting-api db-writer persists into the meeting row's data JSONB.
         "numeric_meeting_id": mid if mid.isdigit() else None,
     })
+    # ── in-meeting chat → the assistant ───────────────────────────────────────────────────────
+    # A `source:'chat'` segment is a message someone TYPED, not speech. Hand each one to the
+    # responder, which decides whether it is addressed to the bot and answers on ITS OWN pool.
+    #
+    # Two properties this branch must keep:
+    #   * O(1) on THIS thread. `_run_arm` is a SINGLE daemon serving every live meeting on the
+    #     deployment and is the sole re-arm/reap arbiter for every copilot; an agent turn run here
+    #     would stall all of them for its duration. `offer` is non-blocking by contract.
+    #   * Non-fatal. `offer` is also never-raise by contract, but a fault would abort the REST of
+    #     _handle — the live registration and the copilot re-arm below — so the chat branch must not
+    #     be able to cost this meeting its copilot.
+    if chat_responder is not None:
+        try:
+            # The OWNER rides the segment envelope (invocation.v1 `ownerUserId`, stamped by the bot).
+            # Absent ⇒ the responder refuses: answering under a placeholder subject would reply out
+            # of a workspace that belongs to nobody.
+            owner = p.get("owner_user_id")
+            for seg in (p.get("segments") or []):
+                if not isinstance(seg, dict) or seg.get("source") != "chat":
+                    continue
+                text = (seg.get("text") or "").strip()
+                if not text:
+                    continue
+                verdict = chat_responder.offer(
+                    meeting_key=key, platform=platform, native=native, owner=owner,
+                    sender=str(seg.get("speaker") or "Someone"), text=text,
+                )
+                if verdict != "not-addressed":
+                    logger.info("meet-chat %s/%s: %s", platform, native, verdict)
+        except Exception:  # noqa: BLE001 — never let the chat branch cost the copilot its re-arm
+            logger.exception("meet-chat: offer branch failed for %s/%s", platform, native)
+
     # Processing is OPT-IN per meeting: only arm / keep-alive the copilot while the user has enabled it
     # (the terminal sets ``proc:meeting:{row_id}:on`` via /api/meeting/process — DESIRED STATE only;
     # ADR 0027 makes this loop the ONE dispatch arbiter). Default OFF → no copilot → no processing;

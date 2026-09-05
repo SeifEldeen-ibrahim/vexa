@@ -34,6 +34,7 @@ from jsonschema.exceptions import ValidationError
 from pydantic import BaseModel
 
 from control_plane import meeting_steering
+from control_plane.meeting_chat_responder import MeetingChatResponder
 from control_plane import schedule_digest as schedule_digest_mod
 from control_plane import routines as routines_mod
 from control_plane.config_preflight import NOT_CONFIGURED, capability_state, missing_capability_keys
@@ -86,6 +87,21 @@ def _upload_filename(name: str | None) -> str:
     base = re.sub(r"\s+", "_", base)
     base = re.sub(r"[^A-Za-z0-9._-]", "_", base).strip("._-")
     return base[:160] or "upload"
+
+
+def _env_flag(name: str, *, default: bool = False) -> bool:
+    """Read a boolean deployment knob. Unset ⇒ ``default``; an unparseable value is treated as the
+    default and logged, never coerced by ``bool()`` (which reads "false" as True)."""
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    v = raw.strip().lower()
+    if v in ("1", "true", "yes", "on"):
+        return True
+    if v in ("0", "false", "no", "off"):
+        return False
+    logger.warning("%s=%r is not a boolean — using %s", name, raw, default)
+    return default
 
 
 def _truncate_title(text: str, *, limit: int = 60) -> str:
@@ -2350,12 +2366,117 @@ def _build_production_app() -> FastAPI:
         if handle is not None:
             handle.stop()
 
+    # ── the in-meeting chat assistant ──────────────────────────────────────────────────────────
+    # A participant types "@vexa …" in the meeting chat and gets an answer THERE, from the same
+    # agent and in the same conversation thread the Assistant tab shows.
+    #
+    # Both collaborators are built here, at the composition root, because both need things the
+    # responder must not hold itself: the dispatcher + stream reader (the turn), and the deployment
+    # bot key (the reply hop). The responder stays a pure orchestrator and is provable offline.
+    def _meet_chat_turn(subject: str, session: str, focus: dict, prompt: str) -> str:
+        """Run ONE agent turn headlessly and return the assistant's text.
+
+        The same grounding and dispatch the SSE route builds — deliberately assembled from the same
+        pieces (`_context_grounding` → `units.make_dispatch` → `stream_reader.read`) so a Meet-chat
+        answer and an Assistant-tab answer come from the same machinery.
+
+        Two deliberate differences from the SSE route, both because the input is UNTRUSTED:
+          * workspaces are pinned `ro`. `units.mode_for("message")` grants `rw` on the assumption
+            that a chat turn is the account owner typing; here it is any participant in the room,
+            including an external guest, so the turn proposes and never writes.
+          * there is no resume/retry machinery — nobody is holding a stream open to reconnect.
+        """
+        body = ChatBody(prompt=prompt, session=session,
+                        context=ChatContextBody(focus=focus, surface={"list": "meetings"}))
+        ctx, tools, grounded = _context_grounding(
+            body, session, redis_url,
+            schedule_rows=lambda: _schedule_source(subject),
+            workspace_mounts=lambda: (active_workspaces(wsr.root, subject)
+                                      + shared_active_mounts(wsr.root, subject, mindex.list(subject))),
+        )
+        inv = units.make_dispatch(
+            subject=subject, trigger="message",
+            start=units.entrypoint(inline=grounded), context=ctx, tools=tools,
+            workspaces=[{"id": subject, "mode": "ro"}],
+        )
+        unit_id = units.dispatch_id(inv)
+        # No model credential ⇒ the worker can only fail with its own "Not logged in" text, which
+        # means nothing to someone sitting in a meeting. Say so in words they can act on instead of
+        # going silent — silence in a meeting reads as a broken bot.
+        if capability_state("model_inference") == NOT_CONFIGURED:
+            cfg = dispatcher.resolve_model_config(subject)
+            if cfg is not None and not _has_custom_model_endpoint(cfg):
+                return "I can't answer right now - this deployment has no model credentials configured."
+        # Index the thread so it appears in the Assistant tab beside the ones typed there.
+        is_new = not any(r["session"] == session for r in sess.list(subject))
+        sess.upsert(subject, session, title=_truncate_title(prompt) if is_new else None)
+        start = _stream_tail_id(redis_url, units.output_topic(unit_id)) or None
+        unit_id = dispatcher.dispatch(inv)
+        parts: list[str] = []
+        for item in stream_reader.read(unit_id, resume=start):
+            if item is None:
+                continue
+            ev = item[0] if isinstance(item, tuple) else item
+            kind = ev.get("type")
+            if kind == "message-delta" and ev.get("text"):
+                parts.append(str(ev["text"]))
+            elif kind in ("turn-complete", "rejected"):
+                break
+            elif kind == "done":
+                if ev.get("ok") is False and ev.get("reply"):
+                    parts.append(str(ev["reply"]))
+                break
+            elif kind in ("error", "stream-error"):
+                return str(ev.get("message") or "The assistant hit an error answering that.")
+        return "".join(parts).strip()
+
+    def _meet_chat_post(platform: str, native: str, text: str) -> bool:
+        """Deliver one reply into the meeting chat via the gateway's POST /bots/{p}/{n}/chat.
+
+        Uses the DEPLOYMENT bot key, the same hop `_record_meeting_doc` already makes — which means
+        the authorization boundary for "who may make the bot speak here" is possession of that key
+        on this host, not the meeting owner's identity. Worth knowing before this is widened."""
+        import urllib.error
+        import urllib.request
+
+        key = os.environ.get("VEXA_BOT_API_KEY", "")
+        if not key:
+            logger.warning("meet-chat: VEXA_BOT_API_KEY not set - cannot deliver the reply")
+            return False
+        gw = os.environ.get("VEXA_GATEWAY_URL", "http://gateway:8000").rstrip("/")
+        try:
+            req = urllib.request.Request(
+                f"{gw}/bots/{platform}/{native}/chat",
+                data=json.dumps({"text": text}).encode(), method="POST",
+                headers={"X-API-Key": key, "Content-Type": "application/json"},
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                return 200 <= resp.status < 300
+        except Exception:  # noqa: BLE001 — a delivery failure is logged, never raised at the pool
+            logger.exception("meet-chat: reply delivery failed for %s/%s", platform, native)
+            return False
+
+    responder = None
+    if _env_flag("VEXA_MEET_CHAT_ENABLED", default=False):
+        responder = MeetingChatResponder(
+            run_turn=_meet_chat_turn,
+            post_reply=_meet_chat_post,
+            bot_name=os.environ.get("DEFAULT_BOT_NAME", "Vexa"),
+            prefix=os.environ.get("VEXA_MEET_CHAT_PREFIX", "@vexa"),
+            always=_env_flag("VEXA_MEET_CHAT_ALWAYS", default=False),
+            min_interval_s=float(os.environ.get("VEXA_MEET_CHAT_MIN_INTERVAL_S", "5")),
+        )
+        app.state.meet_chat_responder = responder
+
     # The in-process meetings Integration (replaces the standalone bridge container): a daemon thread
     # tails transcription_segments → fans tc:meeting:{uid} + arms the copilot dispatch on activity.
     # NOTE: no `subject=` → the watcher uses its PRE-M2 `u_live` placeholder; live-meeting dispatch (M2)
-    # must pass the real meeting owner here (see transcription_watcher.start).
+    # must pass the real meeting owner here (see transcription_watcher.start). The responder is
+    # separate: it takes the owner off the segment (invocation.v1 `ownerUserId`) and fails closed
+    # without one, so it never inherits that placeholder.
     from control_plane import transcription_watcher
-    transcription_watcher.start(settings.redis_url, dispatcher, app.state.live_meetings)
+    transcription_watcher.start(settings.redis_url, dispatcher, app.state.live_meetings,
+                                chat_responder=responder)
     return app
 
 

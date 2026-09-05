@@ -90,6 +90,7 @@ export VEXA_MEET_CHAT_ENABLED="${VEXA_MEET_CHAT_ENABLED:-false}"
 export VEXA_MEET_CHAT_PREFIX="${VEXA_MEET_CHAT_PREFIX:-@vexa}"
 export VEXA_MEET_CHAT_ALWAYS="${VEXA_MEET_CHAT_ALWAYS:-false}"
 export VEXA_MEET_CHAT_ANYONE="${VEXA_MEET_CHAT_ANYONE:-false}"
+export VEXA_MEET_CHAT_OWNER_NAMES="${VEXA_MEET_CHAT_OWNER_NAMES:-}"
 export VEXA_MEET_CHAT_MIN_INTERVAL_S="${VEXA_MEET_CHAT_MIN_INTERVAL_S:-5}"
 # Gates the acts.v1 interactive family (chat_send/chat_read, speak) on every bot spawn.
 export VOICE_AGENT_ENABLED="${VOICE_AGENT_ENABLED:-false}"

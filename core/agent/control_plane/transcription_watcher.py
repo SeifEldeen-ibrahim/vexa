@@ -371,9 +371,14 @@ def _handle(r, dispatcher, live, subject, p, last_arm, keymap, first_seen, chat_
                 text = (seg.get("text") or "").strip()
                 if not text:
                     continue
+                # The bot stamps `chat:email:<addr>` when the platform exposed one, else
+                # `chat:<name>`. The email is the only identity worth gating on.
+                skey = str(seg.get("speaker_key") or "")
+                sender_email = skey[len("chat:email:"):] if skey.startswith("chat:email:") else None
                 verdict = chat_responder.offer(
                     meeting_key=key, platform=platform, native=native, owner=owner,
                     sender=str(seg.get("speaker") or "Someone"), text=text,
+                    sender_email=sender_email,
                 )
                 if verdict != "not-addressed":
                     logger.info("meet-chat %s/%s: %s", platform, native, verdict)

@@ -691,7 +691,7 @@ export async function startCaptureBridge(
   telemetry?: TelemetrySink,
   /** In-meeting chat sink (jitsi + google_meet lanes) — each captured chat message crosses here;
    *  the composition root publishes it as a transcript.v1 `source:'chat'` segment. */
-  onChat?: (sender: string, text: string) => void,
+  onChat?: (sender: string, text: string, senderEmail?: string) => void,
   /** Active-phase silence signal. It remains unavailable until page capture reports ready. */
   activity?: RemoteAudioActivityTap,
 ): Promise<() => Promise<void>> {
@@ -789,8 +789,8 @@ export async function startCaptureBridge(
     if (!String(e.message).includes('already registered')) throw e;
   });
   // in-meeting chat → the embedder's sink (a transcript.v1 `chat` segment at the composition root).
-  await page.exposeFunction('__vexaChatMessage', (sender: string, text: string): void => {
-    try { onChat?.(sender, text); } catch (e) { console.error(`[bot] chat sink rejected: ${String(e)}`); }
+  await page.exposeFunction('__vexaChatMessage', (sender: string, text: string, senderEmail?: string): void => {
+    try { onChat?.(sender, text, senderEmail); } catch (e) { console.error(`[bot] chat sink rejected: ${String(e)}`); }
   }).catch(() => { /* optional */ });
 
   // ── Start the page-side capture (VexaBrowserUtils preferred; production inline fallback). ──
@@ -1272,7 +1272,8 @@ export async function startCaptureBridge(
         w.__vexaGmeetChat = w.VexaBrowserUtils.createGmeetChat({
           selfName: botName,
           log: (m: string) => w.logBot?.('[GmeetChat] ' + m),
-          onMessage: (m: { sender: string; text: string }) => w.__vexaChatMessage?.(m.sender, m.text),
+          onMessage: (m: { sender: string; text: string; senderEmail?: string }) =>
+            w.__vexaChatMessage?.(m.sender, m.text, m.senderEmail),
         });
       } catch (e: any) {
         w.__vexaGmeetChat = null;

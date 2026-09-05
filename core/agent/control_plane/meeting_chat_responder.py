@@ -31,13 +31,19 @@ WHO MAY ASK. By default only the meeting's OWNER is answered; everyone else is r
 That is the real permission check — the ``@vexa`` prefix is only a spam and cost filter, and anyone
 in the room can type it.
 
-Matching is by DISPLAY NAME, because that is all Google Meet gives a bot: its chat carries a
-participant's name and no email, account id or any other identity. So "is this the owner?" is
-answered by comparing the chat name against the owner's account name and their email's local part.
-That is a heuristic, and it is stated as one: a participant who sets their Meet display name to the
-owner's would pass it. It bounds casual use, not a determined impersonator — the transcript-only
-default is what bounds the damage either way. Set ``VEXA_MEET_CHAT_ANYONE=true`` to answer the whole
-room instead.
+Identity, in order of strength:
+
+  EMAIL   — exact match, and decisive when present. Meet's CHAT carries no email, so the bot reads
+            the people panel for one; Meet exposes an address for some participants (typically
+            same-org) and not others. When an email IS available it settles the question, and a
+            non-matching email is a refusal — not a fall-through to something looser.
+  NAME    — the fallback when the platform gave no email. The WHOLE display name must match the
+            account's name, its email local part, or ``VEXA_MEET_CHAT_OWNER_NAMES``. Matching on
+            name PARTS failed on its first real meeting: a second participant sharing one word of
+            the owner's name was answered as the owner. A first name is not an identity, and even a
+            whole name is only a convention — someone who sets theirs to the owner's would pass.
+
+``VEXA_MEET_CHAT_ANYONE=true`` answers the whole room instead.
 
 GROUNDING SCOPE — and why the default is the narrow one. The turn runs as the meeting's OWNER, so
 whatever it can read, it can read ALOUD into a room the owner does not control. Read-only mounts stop
@@ -45,15 +51,15 @@ an untrusted participant CHANGING the workspace; they do nothing about a guest t
 "@vexa what do my notes say about salaries?" and getting the answer printed into the chat. Access is
 therefore:
 
-  ``transcript``  (default) — the CURRENT meeting's transcript and nothing else. There is no private
-                  material in scope, so there is nothing to exfiltrate. This answers what the feature
-                  is actually for: questions about what was said in this room.
-  ``workspace``   (opt-in, per meeting, from the UI) — the owner's full workspace, READ-ONLY, plus
-                  the search and web tools that make it useful. Past meetings' notes are in there
-                  because the copilot writes them regardless of this setting, so switching a meeting
-                  to ``workspace`` also brings prior meetings into scope, not just this one. Write
-                  and shell tools stay off in BOTH scopes: the request comes from a room the owner
-                  does not control.
+The axis is WHICH HISTORY is in reach — not whether the assistant is capable. Both scopes can search
+the web; neither can write anything.
+
+  ``transcript``  (default) — THIS meeting, plus the web. No file tools, so no past records: a guest
+                  can get help with what is being discussed now, and cannot mine what came before.
+  ``workspace``   (opt-in, per meeting, from the UI) — the above PLUS the owner's stored records,
+                  read-only: past meetings' notes and anything else in the workspace. The copilot
+                  writes meeting notes there regardless of this setting, so granting it opens PRIOR
+                  meetings, which is exactly the point of granting it.
 
 The knob is per MEETING and defaults closed on every new meeting: a room you trusted last week is not
 the room you are in today.
@@ -81,36 +87,51 @@ SCOPE_TRANSCRIPT = "transcript"
 SCOPE_WORKSPACE = "workspace"
 
 
-def owner_display_names(name: "str | None", email: "str | None") -> set:
-    """The display names that count as the owner, lower-cased.
+def _norm(v: "str | None") -> str:
+    """Lower-case, collapse whitespace. The only normalisation applied to a display name."""
+    return re.sub(r"\s+", " ", (v or "").strip().lower())
 
-    Google Meet shows a chosen display name ("Seif Ibrahim"), while the account may only have an
-    email ("seif@biami.io"). So the local part is included, and matching is per WORD as well as
-    whole-string: "seif" matches "Seif Ibrahim". Dots and underscores in a local part are split too
-    ("ada.lovelace@x" → "ada", "lovelace")."""
-    out: set = set()
-    for v in (name, email):
-        v = (v or "").strip().lower()
-        if not v:
-            continue
-        if "@" in v:
-            v = v.split("@", 1)[0]
-        out.add(v)
-        for part in re.split(r"[.\s_+-]+", v):
-            if len(part) >= 3:
-                out.add(part)
+
+def owner_display_names(name: "str | None", email: "str | None", extra: "list | None" = None) -> set:
+    """The display names that count as the owner, normalised, matched WHOLE.
+
+    Matching used to also accept any WORD of the name, so that an account known only by
+    ``seif@biami.io`` would still recognise a Meet display name of "Seif Ibrahim". That is too loose
+    to be an access control and failed on its first real meeting: a second participant called
+    "seif eldeen ibrahim" shares the token "seif" and was answered as the owner. A first name is not
+    an identity.
+
+    So the comparison is now the WHOLE display name against the whole accepted name. The cost is
+    that an account with no ``name`` set will not recognise a fuller Meet display name — which is
+    correct: it genuinely does not know it. Set the account's name, or list the display name in
+    ``VEXA_MEET_CHAT_OWNER_NAMES``; the rejection log says which name was seen so it is one step to
+    fix, not a mystery."""
+    out = {_norm(name)}
+    e = _norm(email)
+    if "@" in e:
+        out.add(e.split("@", 1)[0])
+    for x in (extra or []):
+        out.add(_norm(x))
     return {v for v in out if v}
 
 
+def is_owner_email(sender_email: "str | None", owner_email: "str | None") -> bool:
+    """Exact, case-insensitive email match — the ONLY tight identity check available here.
+
+    Meet's chat carries a display name; an email is only obtainable from the people panel, and only
+    for participants Meet chooses to expose one for (typically same-org accounts). When it IS
+    available this is what decides, because a display name is not an identity — anyone in the room
+    can set theirs to anyone's, which is exactly how a second participant sharing one word of the
+    owner's name got answered as the owner."""
+    a, b = _norm(sender_email), _norm(owner_email)
+    return bool(a and b and a == b)
+
+
 def is_owner(sender: "str | None", accepted: set) -> bool:
-    """Does this chat display name belong to the owner? Empty ``accepted`` ⇒ False (fail closed:
-    an identity we could not resolve is not a match)."""
-    who = (sender or "").strip().lower()
-    if not who or not accepted:
-        return False
-    if who in accepted:
-        return True
-    return any(w in accepted for w in re.split(r"[.\s_+-]+", who) if len(w) >= 3)
+    """Does this chat display name belong to the owner? Whole-name match only. Empty ``accepted`` ⇒
+    False (fail closed: an identity we could not resolve is not a match)."""
+    who = _norm(sender)
+    return bool(who and accepted and who in accepted)
 
 
 def strip_markdown(text: str) -> str:
@@ -240,6 +261,7 @@ class MeetingChatResponder:
         always: bool = False,
         anyone: bool = False,
         owner_identity: Optional[Callable[[str], "tuple"]] = None,
+        owner_names: "list | None" = None,
         max_workers: int = 2,
         min_interval_s: float = 5.0,
         log: Optional[Callable[[str], None]] = None,
@@ -252,6 +274,7 @@ class MeetingChatResponder:
         self._always = always
         self._anyone = anyone
         self._owner_identity = owner_identity
+        self._owner_names = owner_names or []
         self._min_interval_s = min_interval_s
         self._log = log or (lambda m: logger.info("%s", m))
         # Bounded on purpose: a Meet bot is already most of this box's CPU, and every turn is a
@@ -271,6 +294,7 @@ class MeetingChatResponder:
         owner: Optional[object],
         sender: str,
         text: str,
+        sender_email: "str | None" = None,
     ) -> str:
         """Consider one ``source:'chat'`` segment. Returns a verdict string (for logs and tests);
         never raises, never blocks, and never runs the turn on the caller's thread.
@@ -290,7 +314,7 @@ class MeetingChatResponder:
                           f"(a placeholder subject would answer from the wrong workspace)")
                 return "no-owner"
             # WHO MAY ASK — the real permission check, before any work is done.
-            if not self._anyone and not self._sender_is_owner(subject, sender):
+            if not self._anyone and not self._sender_is_owner(subject, sender, sender_email):
                 self._log(f"meet-chat: ignoring a question from {sender!r} — not the meeting owner")
                 return "not-owner"
             now = time.monotonic()
@@ -326,9 +350,9 @@ class MeetingChatResponder:
             # "Someone" instead rather than putting a fake name in front of the model.
             who = "Someone" if sender.strip().lower() in ("", "unknown") else sender
             scoped = (
-                "Answer ONLY from this meeting's transcript. You have no access to any workspace, "
-                "notes or documents, and anyone in the meeting can read your reply — do not guess at "
-                "private information and do not offer to look anything up."
+                "Answer from this meeting's transcript, and search the web when that helps. You "
+                "CANNOT open the user's stored records — no past meetings, notes or documents — so "
+                "do not claim to have checked them. Everyone in the meeting can read your reply."
                 if scope == SCOPE_TRANSCRIPT else
                 "Answer from this meeting's transcript, the workspace you can read, and the web if "
                 "it helps. You cannot change anything — you have no write or shell tools, so do not "
@@ -358,7 +382,7 @@ class MeetingChatResponder:
             with self._lock:
                 self._inflight.discard(meeting_key)
 
-    def _sender_is_owner(self, subject: str, sender: str) -> bool:
+    def _sender_is_owner(self, subject: str, sender: str, sender_email: "str | None" = None) -> bool:
         """Is this chat display name the meeting's owner? FAILS CLOSED — an identity service that is
         down means nobody is answered, which is quieter than answering everybody."""
         if self._owner_identity is None:
@@ -368,7 +392,22 @@ class MeetingChatResponder:
         except Exception:  # noqa: BLE001
             logger.exception("meet-chat: owner identity lookup failed for subject %s", subject)
             return False
-        return is_owner(sender, owner_display_names(name, email))
+        # EMAIL FIRST when the platform gave us one — it is the only tight check. A non-matching
+        # email is decisive: we know who this is, and it is not the owner. Falling back to a name
+        # there would let someone with the owner's display name past a failed email check.
+        if sender_email:
+            if is_owner_email(sender_email, email):
+                return True
+            self._log(f"meet-chat: {sender_email!r} is not the meeting owner ({email!r})")
+            return False
+        accepted = owner_display_names(name, email, self._owner_names)
+        if is_owner(sender, accepted):
+            return True
+        # Say WHAT was seen and what would have matched — otherwise "it ignored me" is unfixable.
+        self._log(f"meet-chat: {sender!r} is not the meeting owner (no email from the platform; "
+                  f"accepted names: {sorted(accepted)}). Set the account name or add it to "
+                  f"VEXA_MEET_CHAT_OWNER_NAMES.")
+        return False
 
     def _scope_for(self, meeting_key: str) -> str:
         """The meeting's granted grounding scope. FAILS CLOSED to ``transcript``."""

@@ -22,6 +22,7 @@ from control_plane.meeting_chat_responder import (
     address_to,
     addressed_question,
     is_owner,
+    is_owner_email,
     owner_display_names,
     chunk_reply,
     meeting_session_id,
@@ -66,9 +67,10 @@ def _responder(rec: _Recorder, **kw) -> MeetingChatResponder:
     return MeetingChatResponder(run_turn=rec.run_turn, post_reply=rec.post_reply, **kw)
 
 
-def _offer(r: MeetingChatResponder, text: str, *, owner="42", key="7", sender="Ada") -> str:
+def _offer(r: MeetingChatResponder, text: str, *, owner="42", key="7", sender="Ada",
+           sender_email=None) -> str:
     return r.offer(meeting_key=key, platform="google_meet", native="abc-defg-hij",
-                   owner=owner, sender=sender, text=text)
+                   owner=owner, sender=sender, text=text, sender_email=sender_email)
 
 
 def _settle(rec: _Recorder, n: int = 1, timeout: float = 5.0) -> None:
@@ -261,15 +263,18 @@ def test_an_unreadable_or_unexpected_grant_fails_CLOSED():
         r.close()
 
 
-def test_the_prompt_tells_a_transcript_turn_it_has_no_workspace():
-    """The model must not offer to look something up it cannot reach, in front of the room."""
+def test_a_transcript_turn_is_told_it_can_search_but_not_open_stored_records():
+    """The scopes differ by WHICH HISTORY is reachable, not by whether the assistant is capable —
+    so the narrow one must still know it can search the web, and must not claim to have checked
+    records it cannot open."""
     rec = _Recorder()
     r = _responder(rec)
     _offer(r, "@vexa what did we decide?")
     _settle(rec)
     prompt = rec.turns[0][3]
-    assert "no access to any workspace" in prompt
-    assert "anyone in the meeting can read your reply" in prompt.lower()
+    assert "search the web" in prompt
+    assert "CANNOT open the user's stored records" in prompt
+    assert "everyone in the meeting can read your reply" in prompt.lower()
     r.close()
 
 
@@ -438,29 +443,37 @@ if __name__ == "__main__":
 
 def test_owner_names_cover_the_account_name_and_the_email_local_part():
     got = owner_display_names("Seif Ibrahim", "seif@biami.io")
-    assert "seif ibrahim" in got and "seif" in got and "ibrahim" in got
+    assert got == {"seif ibrahim", "seif"}
     assert "biami.io" not in got            # the domain is not a name
+    assert "ibrahim" not in got             # nor is a fragment of a name — see the test below
 
 
-def test_owner_names_split_a_dotted_local_part():
-    got = owner_display_names(None, "ada.lovelace@example.test")
-    assert "ada" in got and "lovelace" in got
-
-
-def test_owner_names_drop_initials_too_short_to_identify_anyone():
-    assert "a" not in owner_display_names(None, "a.lovelace@example.test")
-
-
-def test_the_owner_is_recognised_by_their_meet_display_name():
+def test_a_shared_FIRST_NAME_is_not_an_identity():
+    """THE LIVE FAILURE. The account knew only seif@biami.io, so "seif" was accepted — and a second
+    participant in the room, "seif eldeen ibrahim", was answered as the owner. Name PARTS are not an
+    access control; only the whole name is."""
     accepted = owner_display_names(None, "seif@biami.io")
-    assert is_owner("Seif Ibrahim", accepted)      # the real case, from a live meeting
-    assert is_owner("seif", accepted)
-    assert is_owner("SEIF IBRAHIM", accepted)
+    assert is_owner("seif", accepted)                        # the account's own name, exactly
+    assert not is_owner("seif eldeen ibrahim", accepted)     # a different person who shares a word
+    assert not is_owner("Seif Ibrahim", accepted)            # unknown to this account until named
+
+
+def test_a_fuller_meet_name_is_recognised_once_the_account_knows_it():
+    """Either source closes the gap the test above leaves open."""
+    assert is_owner("Seif Ibrahim", owner_display_names("Seif Ibrahim", "seif@biami.io"))
+    assert is_owner("Seif Ibrahim", owner_display_names(None, "seif@biami.io", ["Seif Ibrahim"]))
+
+
+def test_matching_ignores_case_and_spacing_but_nothing_else():
+    accepted = owner_display_names("Seif Ibrahim", None)
+    assert is_owner("SEIF   IBRAHIM", accepted)
+    assert is_owner("  seif ibrahim  ", accepted)
+    assert not is_owner("seif-ibrahim", accepted)
 
 
 def test_a_stranger_is_not_the_owner():
     accepted = owner_display_names("Seif Ibrahim", "seif@biami.io")
-    for who in ("Marcin", "Guest", "", None, "Unknown"):
+    for who in ("Marcin", "Guest", "", None, "Unknown", "seif eldeen ibrahim"):
         assert not is_owner(who, accepted), who
 
 
@@ -474,6 +487,8 @@ def test_only_the_owner_gets_an_answer():
     rec = _Recorder()
     r = _responder(rec, anyone=False, owner_identity=lambda s: ("Seif Ibrahim", "seif@biami.io"))
     assert _offer(r, "@vexa what did we decide?", sender="Marcin") == "not-owner"
+    # The live case: a different person sharing one word of the owner's name.
+    assert _offer(r, "@vexa reply to me", sender="seif eldeen ibrahim") == "not-owner"
     time.sleep(0.05)
     assert rec.turns == [] and rec.posts == []
     assert _offer(r, "@vexa what did we decide?", sender="Seif Ibrahim") == "accepted"
@@ -494,9 +509,58 @@ def test_a_failing_identity_lookup_answers_nobody():
     r.close()
 
 
+def test_an_extra_configured_name_is_accepted():
+    rec = _Recorder()
+    r = _responder(rec, anyone=False, owner_identity=lambda s: (None, "seif@biami.io"),
+                   owner_names=["Seif Ibrahim"])
+    assert _offer(r, "@vexa hi", sender="Seif Ibrahim") == "accepted"
+    _settle(rec)
+    r.close()
+
+
 def test_anyone_mode_answers_the_whole_room():
     rec = _Recorder()
     r = _responder(rec, anyone=True, owner_identity=lambda s: ("Seif", "seif@biami.io"))
     assert _offer(r, "@vexa hi", sender="A Total Stranger") == "accepted"
     _settle(rec)
+    r.close()
+
+
+# ── identity: email decides when the platform gives one ───────────────────────────────────
+
+def test_email_matching_is_exact_and_case_insensitive():
+    assert is_owner_email("Seif@Biami.IO", "seif@biami.io")
+    assert not is_owner_email("seif.eldeen@biami.io", "seif@biami.io")
+    assert not is_owner_email("", "seif@biami.io")
+    assert not is_owner_email("seif@biami.io", None)
+
+
+def test_an_email_beats_a_matching_name():
+    """The case the live failure produced, with identity available: a participant whose display name
+    would pass is refused on the address."""
+    rec = _Recorder()
+    r = _responder(rec, anyone=False,
+                   owner_identity=lambda s: ("Seif Ibrahim", "seif@biami.io"))
+    assert _offer(r, "@vexa hi", sender="Seif Ibrahim",
+                  sender_email="seif.eldeen@biami.io") == "not-owner"
+    time.sleep(0.05)
+    assert rec.turns == []
+    r.close()
+
+
+def test_a_matching_email_is_accepted_whatever_the_display_name():
+    rec = _Recorder()
+    r = _responder(rec, anyone=False, owner_identity=lambda s: (None, "seif@biami.io"))
+    assert _offer(r, "@vexa hi", sender="literally anything",
+                  sender_email="seif@biami.io") == "accepted"
+    _settle(rec)
+    r.close()
+
+
+def test_without_an_email_it_falls_back_to_the_whole_name():
+    rec = _Recorder()
+    r = _responder(rec, anyone=False, owner_identity=lambda s: ("Seif Ibrahim", "seif@biami.io"))
+    assert _offer(r, "@vexa hi", sender="Seif Ibrahim") == "accepted"
+    _settle(rec)
+    assert _offer(r, "@vexa hi", sender="seif eldeen ibrahim", key="8") == "not-owner"
     r.close()

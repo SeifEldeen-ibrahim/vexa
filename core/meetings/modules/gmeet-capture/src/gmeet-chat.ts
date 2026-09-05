@@ -25,7 +25,12 @@
  * tuned from live telemetry instead of a guess-and-redeploy loop.
  */
 
-export interface GmeetChatMessage { sender: string; text: string }
+export interface GmeetChatMessage {
+  sender: string;
+  text: string;
+  /** The sender's email, when Meet exposes one. Absent on most calls — see `senderEmail`. */
+  senderEmail?: string;
+}
 
 export interface GmeetChatOptions {
   log?: (m: string) => void;
@@ -42,6 +47,9 @@ export interface GmeetChat {
   destroy(): void;
   getState(): {
     matchedContainer: string | null;
+    /** display name (lower-cased) -> email, for participants Meet exposed one for. Empty means this
+     *  meeting gives the bot no email identity at all. */
+    emails: Record<string, string>;
     panelOpen: boolean;
     seen: number;
     recent: GmeetChatMessage[];
@@ -75,6 +83,25 @@ export const gmeetChatTextSelectors: string[] = [
   'div[jsname="dTKtvb"] div[jscontroller]',
   'div[dir="auto"]',
 ];
+// The people/participants panel, and anything in it that carries an email. Meet shows an address
+// for some accounts (commonly same-org) and nothing for others, so this is BEST EFFORT by
+// construction — `getState().emails` reports what was actually found so a deployment can see whether
+// identity is available to it at all rather than taking anyone's word for it.
+export const gmeetPeoplePanelSelectors: string[] = [
+  '[aria-label*="Participants" i]',
+  '[aria-label*="People" i]',
+  'div[jsname="jrQDbd"]',
+  '[role="list"][aria-label*="articipant" i]',
+];
+export const gmeetPeopleToggleSelectors: string[] = [
+  'button[aria-label*="Show everyone" i]',
+  'button[aria-label*="People" i]',
+  'button[aria-label*="Participants" i]',
+];
+
+/** Any email-looking string inside an element's text or its attributes. */
+const EMAIL_RE = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/;
+
 // The toolbar button that opens the chat panel, and the composer inside it.
 export const gmeetChatToggleSelectors: string[] = [
   'button[aria-label*="Chat with everyone" i]',
@@ -243,6 +270,54 @@ function textOfIn(root: Element, selectors: string[]): string {
   return '';
 }
 
+/** Scrape the people panel for `display name -> email`, where Meet exposes one.
+ *
+ *  Meet's CHAT carries a display name and nothing else, so an email — the only identity worth
+ *  gating on — has to come from somewhere else if it is available at all. The people panel is that
+ *  somewhere: for some accounts (typically inside the same Workspace org) a row carries an address
+ *  in its text or an aria-label; for others it carries only a name.
+ *
+ *  Returns whatever it found. An empty map is a real answer — it means this deployment cannot do
+ *  email matching for this meeting, and the caller must say so rather than silently fall back to
+ *  something looser without telling anyone. */
+export function scrapeGmeetParticipantEmails(): Record<string, string> {
+  const out: Record<string, string> = {};
+  try {
+    const panel = firstMatch(document, gmeetPeoplePanelSelectors);
+    const roots: Element[] = panel ? [panel] : [document.body];
+    for (const root of roots) {
+      for (const row of Array.from(root.querySelectorAll('[role="listitem"], li, div[data-participant-id]'))) {
+        const hay = [
+          row.textContent || '',
+          row.getAttribute('aria-label') || '',
+          row.getAttribute('data-tooltip') || '',
+          row.getAttribute('title') || '',
+        ].join(' ');
+        const m = hay.match(EMAIL_RE);
+        if (!m) continue;
+        // The name is the row's first name-like leaf that is not the address itself.
+        const frags = Array.from(row.querySelectorAll('*'))
+          .map((e) => (e.childElementCount === 0 ? (e.textContent || '').trim() : ''))
+          .filter((t) => t && !EMAIL_RE.test(t));
+        const name = frags.find((f) => looksLikeName(f));
+        if (name) out[name.trim().toLowerCase()] = m[0].toLowerCase();
+      }
+    }
+  } catch {
+    /* identity is best effort; never disturb capture */
+  }
+  return out;
+}
+
+/** Open the people panel if it is closed, so `scrapeGmeetParticipantEmails` has something to read. */
+export function ensureGmeetPeopleOpen(): boolean {
+  if (firstMatch(document, gmeetPeoplePanelSelectors)) return false;
+  const toggle = firstMatch(document, gmeetPeopleToggleSelectors) as HTMLElement | null;
+  if (!toggle) return false;
+  toggle.click();
+  return true;
+}
+
 export function createGmeetChat(opts: GmeetChatOptions): GmeetChat {
   const log = opts.log || (() => {});
   const autoOpen = opts.autoOpen !== false;
@@ -253,6 +328,7 @@ export function createGmeetChat(opts: GmeetChatOptions): GmeetChat {
   let matchedContainer: string | null = null;
   let container: Element | null = null;
   let dumped = false;
+  let emails: Record<string, string> = {};
 
   const textOf = (root: Element, selectors: string[]): string => {
     for (const sel of selectors) {
@@ -307,7 +383,10 @@ export function createGmeetChat(opts: GmeetChatOptions): GmeetChat {
     sender = (sender || '').replace(/\s*\d{1,2}:\d{2}\s*(AM|PM)?\s*$/i, '').trim() || 'Unknown';
     text = (text || '').trim();
     if (!text) return null;
-    return { sender, text };
+    // Attach the sender's email when this meeting exposes one. Absent is normal and is reported
+    // through getState().emails rather than guessed at.
+    const senderEmail = emails[sender.trim().toLowerCase()];
+    return senderEmail ? { sender, text, senderEmail } : { sender, text };
   };
 
   const dumpNode = (node: Element): string[] =>
@@ -369,6 +448,16 @@ export function createGmeetChat(opts: GmeetChatOptions): GmeetChat {
     // Re-open first: a collapsed panel unmounts the list, so without this the observer has nothing
     // to attach to and the reader goes quiet for the rest of the meeting.
     if (autoOpen && ensureGmeetChatOpen()) log('chat panel was closed - reopened');
+    // Refresh the identity map each poll: people join mid-call, and the panel may only have been
+    // opened after the first messages arrived.
+    const found = scrapeGmeetParticipantEmails();
+    if (Object.keys(found).length) {
+      const before = Object.keys(emails).length;
+      emails = { ...emails, ...found };
+      if (Object.keys(emails).length !== before) {
+        log(`participant emails resolved: ${JSON.stringify(emails)}`);
+      }
+    }
     const found = findContainer();
     if (found && found !== container) {
       container = found;
@@ -395,6 +484,7 @@ export function createGmeetChat(opts: GmeetChatOptions): GmeetChat {
       }
       return {
         matchedContainer,
+        emails,
         panelOpen: isGmeetChatOpen(),
         seen: seenHashes.size,
         recent: recent.slice(-10),

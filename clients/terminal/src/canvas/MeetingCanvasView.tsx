@@ -145,7 +145,12 @@ function MeetingCanvasBody({ meetingId }: { meetingId?: string }) {
           {label}
         </button>
         <span style={{ fontSize: 11.5, color: "var(--t3)" }}>{processing ? "cleaned + copilot" : "raw transcript"}</span>
-        {effectiveLive && (
+        {/* Always shown, not gated on `effectiveLive`. The live flag goes stale (a bot the runtime
+            lost still reads as live, and a real live meeting can read as not-live for a beat), and
+            hiding this hid it exactly when someone was trying to set the meeting up — the grant was
+            unreachable and the assistant looked broken rather than restricted. It is a per-meeting
+            setting, meaningful before and during the call. */}
+        {meetingId && (
           <>
             <span style={{ flex: 1 }} />
             <button

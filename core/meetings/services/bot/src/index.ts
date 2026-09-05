@@ -272,12 +272,15 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<number
     // speaker, the wall clock is the timing (epoch seconds, like the audio lanes), and
     // `completed` is immediate — a chat line has no draft phase.
     let chatSeq = 0;
-    const publishChat = (sender: string, text: string): void => {
+    const publishChat = (sender: string, text: string, senderEmail?: string): void => {
       const nowMs = Date.now();
       void transcript.publish({
         segment_id: `${inv.connectionId ?? 'session'}:chat:${nowMs}:${chatSeq++}`,
         speaker: sender,
-        speaker_key: `chat:${sender}`,
+        // The EMAIL when the platform exposed one, else the display name. A consumer deciding
+        // "is this the meeting owner?" needs an identity, and a display name is not one — anyone
+        // can set theirs to anyone's. `chat:email:` marks which of the two this is.
+        speaker_key: senderEmail ? `chat:email:${senderEmail}` : `chat:${sender}`,
         text,
         start: nowMs / 1000,
         end: nowMs / 1000,

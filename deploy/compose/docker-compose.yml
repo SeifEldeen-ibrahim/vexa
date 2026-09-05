@@ -272,6 +272,7 @@ services:
       # owner and Meet chat has no private replies, so a stranger asking is a stranger
       # getting the owner's agent to answer in front of the room.
       - VEXA_MEET_CHAT_ANYONE=${VEXA_MEET_CHAT_ANYONE:-false}
+      - VEXA_MEET_CHAT_OWNER_NAMES=${VEXA_MEET_CHAT_OWNER_NAMES:-}
       - VEXA_MEET_CHAT_MIN_INTERVAL_S=${VEXA_MEET_CHAT_MIN_INTERVAL_S:-5}
       # The name the responder answers to, alongside the prefix.
       - DEFAULT_BOT_NAME=${DEFAULT_BOT_NAME:-Vexa}

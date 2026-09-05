@@ -264,10 +264,17 @@
       "description": "answer EVERY participant who addresses the bot, not just the meeting owner; off by default because the turn runs as the owner and Meet chat has no private replies"
     },
     {
+      "key": "VEXA_MEET_CHAT_OWNER_NAMES",
+      "class": "defaulted",
+      "default": "",
+      "description": "extra Meet display names that count as the meeting owner, comma separated; needed when the account knows only an email and the owner's Meet name is fuller (the match is whole-name)"
+    },
+    {
       "key": "INTERNAL_API_SECRET",
-      "class": "required-explicit",
+      "class": "defaulted",
+      "default": "",
       "secret": true,
-      "description": "the platform (loopback) tier secret; used to call meeting-api's owner-named chat send and admin-api's user-identity lookup, neither of which is exposed through the gateway"
+      "description": "the platform (loopback) tier secret; used to call meeting-api's owner-named chat send and admin-api's user-identity lookup, neither exposed through the gateway. Unset degrades those two hops loudly (no reply delivery, nobody recognised as the owner) rather than failing boot"
     },
     {
       "key": "VEXA_MEET_CHAT_MIN_INTERVAL_S",

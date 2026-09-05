@@ -1211,10 +1211,17 @@ def create_app(
         start_id = cursor or "0-0"
         return {"native_id": body.native_id, "meeting_id": row_id, "processing": True, "resumed_from": start_id}
 
-    #: What a WORKSPACE-scoped meeting-chat turn may use: the owner's workspace (read), the search
-    #: tools that make it useful, and the network. Deliberately NOT Write/Edit/Bash — the request
-    #: comes from a room the owner does not control, so the turn answers and never changes anything.
-    MEET_CHAT_WORKSPACE_TOOLS = ["Read", "Glob", "Grep", "WebSearch", "WebFetch"]
+    #: The two scopes differ by WHAT HISTORY is in reach, not by whether the assistant is capable.
+    #: The web is on in both — an assistant that cannot look anything up is not an assistant, and
+    #: nothing private leaks through a search engine.
+    #:
+    #:   transcript — THIS meeting, plus the web. No file tools, so no past records.
+    #:   workspace  — the above PLUS the owner's stored records (past meetings, notes), read-only.
+    #:
+    #: Write/Edit/Bash are absent from BOTH: the request comes from a room the owner does not
+    #: control, so the assistant answers and never changes anything.
+    MEET_CHAT_WEB_TOOLS = ["WebSearch", "WebFetch"]
+    MEET_CHAT_WORKSPACE_TOOLS = ["Read", "Glob", "Grep"] + MEET_CHAT_WEB_TOOLS
 
     def _meet_chat_access_key(row: str) -> str:
         return f"meetchat:meeting:{row}:workspace"
@@ -2407,19 +2414,14 @@ def create_app(
         # transcript-scoped turn still has everything it needs to answer about the room — it simply
         # carries no mounts. An empty list is the honest expression of that: nothing to read, so
         # nothing to leak.
-        # TRANSCRIPT scope is TOOL-LESS. unit.v1 requires at least one granted workspace, so the
-        # mount cannot simply be removed — but a turn with no tools cannot open a file in it either,
-        # and that is the property that matters: there is nothing private it can read out loud.
-        #
-        # WORKSPACE scope is the full research turn the Assistant tab gets — the workspace AND the
-        # network — minus the WRITE tools. The input is still untrusted (anyone in the room can
-        # address it), and a participant should not be able to make the owner's agent edit files or
-        # run shell; reading and answering is the whole job here. The mount is read-only as well, so
-        # the two guards are independent.
+        # The scopes differ by which HISTORY is reachable. Both can search the web; neither can
+        # write. unit.v1 requires at least one granted workspace, so a transcript-scoped turn still
+        # MOUNTS one — it simply has no file tools to open it with, which is the property that
+        # matters: no past records in reach, and nothing private to read aloud into the room.
         inv = units.make_dispatch(
             subject=subject, trigger="message",
             start=units.entrypoint(inline=grounded), context=ctx,
-            tools=(MEET_CHAT_WORKSPACE_TOOLS if scope == SCOPE_WORKSPACE else ["none"]),
+            tools=(MEET_CHAT_WORKSPACE_TOOLS if scope == SCOPE_WORKSPACE else MEET_CHAT_WEB_TOOLS),
             workspaces=[{"id": subject, "mode": "ro"}],
         )
         unit_id = units.dispatch_id(inv)
@@ -2533,6 +2535,10 @@ def create_app(
             # Default: only the meeting's OWNER is answered. Everyone else is read and ignored.
             anyone=_env_flag("VEXA_MEET_CHAT_ANYONE", default=False),
             owner_identity=_meet_chat_owner_identity,
+            # Extra display names that count as the owner. Needed because Meet shows a chosen name
+            # ("Seif Ibrahim") while an account may only know an email ("seif@..."), and the match is
+            # whole-name — a first name is not an identity.
+            owner_names=[n.strip() for n in os.environ.get("VEXA_MEET_CHAT_OWNER_NAMES", "").split(",") if n.strip()],
             min_interval_s=float(os.environ.get("VEXA_MEET_CHAT_MIN_INTERVAL_S", "5")),
         )
         app.state.meet_chat_responder = responder

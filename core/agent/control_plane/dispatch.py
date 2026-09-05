@@ -209,11 +209,25 @@ def _worker_cwd(root: str, subject: str, mounts: list[dict]) -> str:
 def _apply_granted_modes(mounts: list[dict], granted: list[dict]) -> list[dict]:
     """Downgrade each mount to read-only where the dispatch granted ``mode: "ro"``.
 
-    Matching is by workspace id against the mount's slug. A grant that names no mount is ignored (the
-    stack is the source of truth for WHICH workspaces exist); a grant of ``rw`` is a no-op, because
-    this seam may only ever narrow access. An unparseable grant list leaves the stack untouched —
-    failing OPEN on the mount set is wrong, but so is dropping a turn's workspaces on a bad shape, so
-    the narrowing is best-effort and the caller's own gate (tools, trigger) remains the backstop."""
+    A grant is ``{"id": <subject>, "mode": …}`` — ``units.make_dispatch`` defaults it to the SUBJECT,
+    not to a workspace name. The mount it has to be matched against does NOT carry that id: its
+    ``slug`` is the workspace's own name (``"seed"``, a renamed workspace, a shared slug) and the
+    subject appears only in the PATH::
+
+        grant  {"id": "6", "mode": "ro"}
+        mount  {"slug": "seed", "path": "/workspaces/6", "role": "private", "write": true}
+
+    So matching on ``slug`` alone silently narrows nothing, which is how the first version of this
+    function passed its unit test and still let an untrusted turn write. Match on the slug OR on the
+    path's owning segment, and verify against a mount set captured from a real dispatch rather than
+    an invented one.
+
+    ``_system`` (``/workspaces/.system/<subject>``) is narrowed by the same rule, deliberately: a turn
+    the caller declared read-only has no business writing the agent's private memory either.
+
+    This seam may only ever REMOVE write, never add it, so a tier the stack built read-only stays
+    read-only. A malformed grant leaves the stack untouched — dropping a turn's workspaces on a bad
+    shape is its own failure — and the caller's trigger/tool gates remain the backstop."""
     try:
         ro = {str(g.get("id")) for g in granted
               if isinstance(g, dict) and str(g.get("mode", "")).lower() == "ro"}
@@ -221,9 +235,18 @@ def _apply_granted_modes(mounts: list[dict], granted: list[dict]) -> list[dict]:
         return mounts
     if not ro:
         return mounts
+
+    def owns(mount: dict) -> bool:
+        if str(mount.get("slug")) in ro:
+            return True
+        # The owning segment of the mount path: /workspaces/6 -> "6";
+        # /workspaces/.system/6 -> "6". Both are the subject's own stack.
+        parts = [p for p in str(mount.get("path") or "").split("/") if p]
+        return bool(parts) and parts[-1] in ro
+
     out: list[dict] = []
     for m in mounts:
-        if m.get("write") and str(m.get("slug")) in ro:
+        if m.get("write") and owns(m):
             m = {**m, "write": False}
         out.append(m)
     return out

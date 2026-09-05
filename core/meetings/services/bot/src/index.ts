@@ -24,7 +24,7 @@
  * lazy redis connect.
  */
 import { createClient } from 'redis';
-import { loadInvocation, InvocationError, speakerStreamConfigFromEnv, type Invocation } from './config.js';
+import { loadInvocation, InvocationError, speakerStreamConfigFromEnv, ownerUserIdOf, type Invocation } from './config.js';
 import type { Act, LifecycleEvent, TranscriptSegment } from './contracts.js';
 import { createOrchestrator } from './orchestrator.js';
 import { createHttpLifecycleSink } from './adapters/lifecycle-http.js';
@@ -184,7 +184,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<number
     client: transcriptClient,
     meetingId,
     nativeMeetingId: inv.nativeMeetingId,
-    ownerUserId: inv.ownerUserId,
+    ownerUserId: ownerUserIdOf(inv),
     // Teams is the current blast radius. Its CSRC lanes need the same complete per-speaker pending
     // snapshot the Dashboard already consumes for GMeet-style live rendering. Leave every sibling
     // platform on the existing wire until this is proven on STAGE and deliberately imported back.

@@ -719,12 +719,6 @@ async def request_bot(
         internal_secret=internal_secret,
         transcribe_enabled=transcribe_enabled,
         voice_agent_enabled=voice_agent_enabled,
-        # The meeting OWNER, carried forward rather than re-derived downstream. mint_meeting_token
-        # above already signs this same user_id into the MeetingToken, but that claim is opaque to
-        # every consumer that isn't verifying the JWT — so the agent's copilot/responder had no way
-        # to attribute a meeting to its owner and fell back to a placeholder subject. One field here
-        # is the point of introduction; a lookup anywhere downstream is the point of observation.
-        owner_user_id=user_id,
         transcription_service_url=transcription_service_url,
         transcription_service_token=transcription_service_token,
         transcription_model=transcription_model,

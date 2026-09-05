@@ -145,7 +145,6 @@ def build_invocation(
     internal_secret: Optional[str] = None,
     transcribe_enabled: bool = True,
     voice_agent_enabled: bool = False,
-    owner_user_id: Optional[int] = None,
     recording_enabled: bool = False,
     capture_modes: Optional[list[str]] = None,
     capture_signal_enabled: Optional[bool] = None,
@@ -181,11 +180,6 @@ def build_invocation(
         "transcribeEnabled": transcribe_enabled,
         # Gates the acts.v1 interactive family at the bot (speak / chat_send / screen / avatar).
         "voiceAgentEnabled": voice_agent_enabled,
-        # The meeting owner's id, stamped onto every segment the bot publishes so the agent domain
-        # can attribute a live meeting WITHOUT a lookup. None-stripped: an older control plane that
-        # doesn't send it yields an invocation with no owner, and the consumer must fail closed
-        # rather than guess a subject.
-        "ownerUserId": owner_user_id,
         "transcriptionServiceUrl": transcription_service_url,
         "transcriptionServiceToken": transcription_service_token,
         "transcriptionModel": transcription_model,

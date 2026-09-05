@@ -65,9 +65,6 @@ export interface Invocation {
   token?: string;
   connectionId?: string;
   meeting_id?: number;
-  /** The meeting owner's user id, stamped by the control plane. Carried onto every published
-   *  segment so a consumer can attribute the meeting without a lookup. */
-  ownerUserId?: number;
   container_name?: string;
   redisUrl: string;
   meetingApiCallbackUrl?: string;
@@ -179,4 +176,39 @@ export function speakerStreamConfigFromEnv(
     configured = true;
   }
   return configured ? config : undefined;
+}
+
+
+/** The meeting OWNER's user id, read out of the MeetingToken the invocation already carries.
+ *
+ *  The control plane mints that token with `user_id` as a signed claim, so the owner has always
+ *  been in the invocation — just encoded. Reading it here means the agent domain can attribute a
+ *  live meeting to its owner (rather than a placeholder subject) with NO new invocation field, and
+ *  therefore no sealed-contract change and no deploy-ordering hazard: `Invocation` is
+ *  `additionalProperties: false`, so a new field would make every bot image older than the control
+ *  plane reject its own config and refuse to start.
+ *
+ *  The payload is DECODED, not verified — the bot is not making a trust decision here. It stamps a
+ *  routing value that the collector (which does verify the token) and the agent use, at exactly the
+ *  same trust level as the `meeting_id` / `nativeMeetingId` it already stamps from the same config.
+ *  Anything that can forge this already controls the bot's environment.
+ *
+ *  Returns undefined for an absent/malformed token — consumers fail closed rather than guess.
+ */
+export function ownerUserIdOf(inv: Pick<Invocation, 'token'>): number | undefined {
+  const token = inv.token;
+  if (!token) return undefined;
+  const parts = token.split('.');
+  if (parts.length !== 3) return undefined;
+  try {
+    const pad = '='.repeat((4 - (parts[1].length % 4)) % 4);
+    const json = Buffer.from(parts[1].replace(/-/g, '+').replace(/_/g, '/') + pad, 'base64').toString('utf8');
+    const claims = JSON.parse(json) as { user_id?: unknown };
+    const id = claims.user_id;
+    if (typeof id === 'number' && Number.isFinite(id)) return id;
+    if (typeof id === 'string' && /^\d+$/.test(id)) return Number(id);
+    return undefined;
+  } catch {
+    return undefined;
+  }
 }

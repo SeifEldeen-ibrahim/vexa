@@ -10,7 +10,7 @@
 import { readFileSync, readdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { parseInvocation, loadInvocation, InvocationError, speakerStreamConfigFromEnv } from './config.js';
+import { parseInvocation, loadInvocation, InvocationError, speakerStreamConfigFromEnv, ownerUserIdOf } from './config.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const GOLDEN_DIR = join(HERE, '..', '..', '..', 'contracts', 'invocation.v1', 'golden');
@@ -91,4 +91,30 @@ console.log('\n✅ config (L1/L2): the goldens parse, the env helper round-trips
     BOT_SPEAKER_CONFIRM_THRESHOLD: '1.5',
   }, (message) => invalidWarnings.push(message));
   check('invalid speaker-stream values fall back loudly', invalid === undefined && invalidWarnings.length === 2, invalidWarnings.join('; '));
+}
+
+// ── ownerUserIdOf — the meeting owner, off the token the invocation already carries ──────────
+// This exists so the agent domain can attribute a live meeting to its owner WITHOUT a new
+// invocation field: `Invocation` is additionalProperties:false, so adding one would make every bot
+// image older than the control plane reject its own config and refuse to start.
+{
+  const b64 = (o: unknown) => Buffer.from(JSON.stringify(o)).toString('base64url');
+  const tok = (payload: unknown) => `${b64({ alg: 'HS256', typ: 'JWT' })}.${b64(payload)}.sig`;
+
+  check('ownerUserIdOf reads user_id out of the MeetingToken',
+    ownerUserIdOf({ token: tok({ meeting_id: 7, user_id: 42 }) }) === 42);
+  check('ownerUserIdOf accepts a stringified user_id',
+    ownerUserIdOf({ token: tok({ user_id: '42' }) }) === 42);
+  check('ownerUserIdOf is undefined with no token (consumer fails closed)',
+    ownerUserIdOf({ token: undefined }) === undefined);
+  check('ownerUserIdOf is undefined for a non-JWT token',
+    ownerUserIdOf({ token: 'not-a-jwt' }) === undefined);
+  check('ownerUserIdOf is undefined for an undecodable payload',
+    ownerUserIdOf({ token: 'a.!!!not-base64!!!.c' }) === undefined);
+  check('ownerUserIdOf is undefined when the claim is absent',
+    ownerUserIdOf({ token: tok({ meeting_id: 7 }) }) === undefined);
+  check('ownerUserIdOf rejects a non-numeric claim',
+    ownerUserIdOf({ token: tok({ user_id: 'not-a-number' }) }) === undefined);
+  check('ownerUserIdOf never throws on hostile input',
+    ownerUserIdOf({ token: '..' }) === undefined);
 }

@@ -107,18 +107,22 @@ function MeetingCanvasBody({ meetingId }: { meetingId?: string }) {
   // the workspace also brings PAST meetings' notes into scope (the copilot writes those regardless
   // of this setting) — which is the point, and also why it is off until deliberately turned on.
   const [chatWorkspace, setChatWorkspace] = useState(false);
+  const [chatAnyone, setChatAnyone] = useState(false);
   const [chatAccessBusy, setChatAccessBusy] = useState(false);
-  const toggleChatAccess = () => {
-    const next = !chatWorkspace;
+  // One writer for both grants. The endpoint only touches the field it is given, so flipping one
+  // never silently clears the other.
+  const setChatAccess = (patch: { workspace?: boolean; anyone?: boolean }) => {
     if (!meetingId || chatAccessBusy) return;
+    const revert = { workspace: chatWorkspace, anyone: chatAnyone };
     setChatAccessBusy(true);
-    setChatWorkspace(next);                       // optimistic; reverted below if the grant is refused
+    if (patch.workspace !== undefined) setChatWorkspace(patch.workspace);   // optimistic
+    if (patch.anyone !== undefined) setChatAnyone(patch.anyone);
     void fetch("/api/meeting/chat-access", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ meeting_id: meetingId, native_id: nativeId ?? meetingId, workspace: next }),
+      body: JSON.stringify({ meeting_id: meetingId, native_id: nativeId ?? meetingId, ...patch }),
     })
-      .then((r) => { if (!r.ok) setChatWorkspace(!next); })   // a refused grant must not look granted
-      .catch(() => setChatWorkspace(!next))
+      .then((r) => { if (!r.ok) { setChatWorkspace(revert.workspace); setChatAnyone(revert.anyone); } })
+      .catch(() => { setChatWorkspace(revert.workspace); setChatAnyone(revert.anyone); })
       .finally(() => setChatAccessBusy(false));
   };
 
@@ -155,7 +159,27 @@ function MeetingCanvasBody({ meetingId }: { meetingId?: string }) {
             <span style={{ flex: 1 }} />
             <button
               type="button"
-              onClick={toggleChatAccess}
+              onClick={() => setChatAccess({ anyone: !chatAnyone })}
+              aria-pressed={chatAnyone}
+              disabled={chatAccessBusy}
+              title={chatAnyone
+                ? "Anyone in the meeting can ask the assistant. It answers as you, to the whole room."
+                : "Only you are answered. Others are ignored — and if two people share your display name, nobody is answered, because a chat message cannot say which of them wrote it."}
+              style={{
+                display: "flex", alignItems: "center", gap: 7, cursor: chatAccessBusy ? "default" : "pointer",
+                background: chatAnyone ? "var(--accent)" : "transparent",
+                color: chatAnyone ? "var(--on-accent)" : "var(--t2)",
+                border: `1px solid ${chatAnyone ? "var(--accent)" : "var(--line2)"}`,
+                borderRadius: 8, padding: "4px 10px", fontSize: 12, fontWeight: 600,
+                opacity: chatAccessBusy ? 0.6 : 1,
+              }}
+            >
+              <span style={{ width: 7, height: 7, borderRadius: "50%", background: chatAnyone ? "var(--on-accent)" : "var(--t3)", flex: "none" }} />
+              {chatAnyone ? "@vexa: anyone can ask" : "@vexa: only me"}
+            </button>
+            <button
+              type="button"
+              onClick={() => setChatAccess({ workspace: !chatWorkspace })}
               aria-pressed={chatWorkspace}
               disabled={chatAccessBusy}
               title={chatWorkspace

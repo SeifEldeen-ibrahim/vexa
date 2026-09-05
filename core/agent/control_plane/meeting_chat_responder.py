@@ -91,6 +91,16 @@ REPLY_CHUNK_CHARS = 480
 #: answer plus "(continued in the Assistant tab)" — the full turn is always readable there.
 REPLY_MAX_CHUNKS = 3
 
+#: What the assistant says when two people in the room share the asker's display name. It SPEAKS
+#: rather than going quiet: silence reads as a broken bot, and the person deserves to know why they
+#: were refused and that it is not personal.
+AMBIGUOUS_NAME_REPLY = (
+    "I can't answer that one. Two people in this meeting are using the name {name}, and a chat "
+    "message only carries a name — so I can't tell which of you sent it, and one of you might be "
+    "the meeting owner. Google Meet has no private replies, so I won't guess. Rename one account, "
+    "or the owner can allow anyone to ask from the meeting's panel in Vexa."
+)
+
 #: Grounding scopes. `transcript` is the default and the safe one — see GROUNDING SCOPE above.
 SCOPE_TRANSCRIPT = "transcript"
 SCOPE_WORKSPACE = "workspace"
@@ -269,6 +279,7 @@ class MeetingChatResponder:
         prefix: str = "@vexa",
         always: bool = False,
         anyone: bool = False,
+        anyone_for: Optional[Callable[[str], bool]] = None,
         owner_identity: Optional[Callable[[str], "tuple"]] = None,
         owner_names: "list | None" = None,
         max_workers: int = 2,
@@ -282,6 +293,7 @@ class MeetingChatResponder:
         self._prefix = prefix
         self._always = always
         self._anyone = anyone
+        self._anyone_for = anyone_for
         self._owner_identity = owner_identity
         self._owner_names = owner_names or []
         self._min_interval_s = min_interval_s
@@ -304,17 +316,20 @@ class MeetingChatResponder:
         sender: str,
         text: str,
         sender_email: "str | None" = None,
+        sender_ambiguous: bool = False,
     ) -> str:
         """Consider one ``source:'chat'`` segment. Returns a verdict string (for logs and tests);
         never raises, never blocks, and never runs the turn on the caller's thread.
 
-        Verdicts: ``not-addressed`` · ``no-owner`` · ``not-owner`` · ``busy`` · ``rate-limited`` ·
-        ``accepted``.
+        Verdicts: ``not-addressed`` · ``no-owner`` · ``ambiguous-name`` · ``not-owner`` · ``busy`` ·
+        ``rate-limited`` · ``accepted``.
         """
         try:
             question = addressed_question(text, bot_name=self._bot_name, prefix=self._prefix, always=self._always)
             if not question:
                 return "not-addressed"
+            # The deployment default, widened per meeting from the UI.
+            anyone = self._anyone or self._meeting_allows_anyone(meeting_key)
             # FAIL CLOSED. Without the owner we cannot attribute the turn, and the alternative —
             # a placeholder subject — answers out of a workspace that belongs to nobody.
             subject = str(owner).strip() if owner not in (None, "") else ""
@@ -322,8 +337,20 @@ class MeetingChatResponder:
                 self._log(f"meet-chat: no ownerUserId on {platform}/{native} — refusing to answer "
                           f"(a placeholder subject would answer from the wrong workspace)")
                 return "no-owner"
+            # AMBIGUOUS NAME. Two people in the room are using this one, so the message cannot be
+            # attributed to either — and one of them may be the owner. An email settles it; without
+            # one there is nothing to settle it WITH, so say so out loud instead of guessing or
+            # going quiet. `anyone` mode has nobody to impersonate, so it is unaffected.
+            if sender_ambiguous and not sender_email and not anyone:
+                logger.warning("meet-chat: REFUSED %r - two participants share that display name", sender)
+                try:
+                    self._post_reply(str(owner), platform, native,
+                                     AMBIGUOUS_NAME_REPLY.format(name=sender))
+                except Exception:  # noqa: BLE001 — explaining is best effort; the refusal stands
+                    logger.exception("meet-chat: could not post the ambiguous-name notice")
+                return "ambiguous-name"
             # WHO MAY ASK — the real permission check, before any work is done.
-            if not self._anyone and not self._sender_is_owner(subject, sender, sender_email):
+            if not anyone and not self._sender_is_owner(subject, sender, sender_email):
                 return "not-owner"   # _sender_is_owner already logged WHY, loudly
             now = time.monotonic()
             with self._lock:
@@ -404,6 +431,16 @@ class MeetingChatResponder:
         finally:
             with self._lock:
                 self._inflight.discard(meeting_key)
+
+    def _meeting_allows_anyone(self, meeting_key: str) -> bool:
+        """Has this meeting's owner opened the assistant to everyone in the room? Fails closed."""
+        if self._anyone_for is None:
+            return False
+        try:
+            return bool(self._anyone_for(meeting_key))
+        except Exception:  # noqa: BLE001
+            logger.exception("meet-chat: anyone-grant lookup failed for %s", meeting_key)
+            return False
 
     def _sender_is_owner(self, subject: str, sender: str, sender_email: "str | None" = None) -> bool:
         """Is this chat display name the meeting's owner? FAILS CLOSED — an identity service that is

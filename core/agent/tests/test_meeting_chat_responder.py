@@ -68,9 +68,10 @@ def _responder(rec: _Recorder, **kw) -> MeetingChatResponder:
 
 
 def _offer(r: MeetingChatResponder, text: str, *, owner="42", key="7", sender="Ada",
-           sender_email=None) -> str:
+           sender_email=None, sender_ambiguous=False) -> str:
     return r.offer(meeting_key=key, platform="google_meet", native="abc-defg-hij",
-                   owner=owner, sender=sender, text=text, sender_email=sender_email)
+                   owner=owner, sender=sender, text=text, sender_email=sender_email,
+                   sender_ambiguous=sender_ambiguous)
 
 
 def _settle(rec: _Recorder, n: int = 1, timeout: float = 5.0) -> None:
@@ -611,4 +612,59 @@ def test_a_name_match_still_answers_from_the_transcript():
     _offer(r, "@vexa when do we ship?", sender="Seif Ibrahim")
     _settle(rec)
     assert len(rec.posts) == 1
+    r.close()
+
+
+# ── two people, one display name ──────────────────────────────────────────────────────────
+
+def test_a_shared_display_name_is_refused_OUT_LOUD():
+    """Silence reads as a broken bot. The person is told why, and that it is not personal."""
+    rec = _Recorder()
+    r = _responder(rec, anyone=False, owner_identity=lambda s: ("Seif Ibrahim", "seif@biami.io"))
+    assert _offer(r, "@vexa hi", sender="Seif Ibrahim", sender_ambiguous=True) == "ambiguous-name"
+    assert rec.turns == [], "no turn should be spent on a message that cannot be attributed"
+    assert len(rec.posts) == 1
+    said = rec.posts[0][3]
+    assert "Seif Ibrahim" in said and "two people" in said.lower()
+    r.close()
+
+
+def test_an_email_settles_a_shared_display_name():
+    """Two people may share a name; they cannot share an address."""
+    rec = _Recorder()
+    r = _responder(rec, anyone=False, owner_identity=lambda s: (None, "seif@biami.io"))
+    assert _offer(r, "@vexa hi", sender="Seif Ibrahim", sender_email="seif@biami.io",
+                  sender_ambiguous=True) == "accepted"
+    _settle(rec)
+    r.close()
+
+
+def test_anyone_mode_has_nobody_to_impersonate():
+    """With the owner check off there is no privilege to steal, so a shared name is not a problem."""
+    rec = _Recorder()
+    r = _responder(rec, anyone=True)
+    assert _offer(r, "@vexa hi", sender="Seif Ibrahim", sender_ambiguous=True) == "accepted"
+    _settle(rec)
+    r.close()
+
+
+def test_a_meeting_can_be_opened_to_everyone_from_the_ui():
+    """The per-meeting grant widens the deployment default."""
+    rec = _Recorder()
+    r = _responder(rec, anyone=False, owner_identity=lambda s: ("Seif", "seif@biami.io"),
+                   anyone_for=lambda key: key == "open")
+    assert _offer(r, "@vexa hi", sender="A Stranger", key="closed") == "not-owner"
+    assert _offer(r, "@vexa hi", sender="A Stranger", key="open") == "accepted"
+    _settle(rec)
+    r.close()
+
+
+def test_a_failing_anyone_lookup_stays_closed():
+    def boom(_k):
+        raise RuntimeError("redis down")
+
+    rec = _Recorder()
+    r = _responder(rec, anyone=False, owner_identity=lambda s: ("Seif", "seif@biami.io"),
+                   anyone_for=boom)
+    assert _offer(r, "@vexa hi", sender="A Stranger") == "not-owner"
     r.close()

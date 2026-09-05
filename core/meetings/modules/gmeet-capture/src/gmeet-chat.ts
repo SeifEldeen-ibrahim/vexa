@@ -30,6 +30,10 @@ export interface GmeetChatMessage {
   text: string;
   /** The sender's email, when Meet exposes one. Absent on most calls — see `senderEmail`. */
   senderEmail?: string;
+  /** True when TWO OR MORE people in the room are using this display name. A chat message carries
+   *  only a name, so in that case there is no way to tell which of them sent it — and the honest
+   *  answer is to say so rather than to guess. */
+  senderAmbiguous?: boolean;
 }
 
 export interface GmeetChatOptions {
@@ -50,6 +54,9 @@ export interface GmeetChat {
     /** display name (lower-cased) -> email, for participants Meet exposed one for. Empty means this
      *  meeting gives the bot no email identity at all. */
     emails: Record<string, string>;
+    /** display name (lower-cased) -> how many people in the room use it. >1 means a chat message
+     *  from that name cannot be attributed to a person. */
+    nameCounts: Record<string, number>;
     panelOpen: boolean;
     seen: number;
     recent: GmeetChatMessage[];
@@ -270,6 +277,45 @@ function textOfIn(root: Element, selectors: string[]): string {
   return '';
 }
 
+/** Every participant row the people panel shows, as `{ name, email? }` — duplicates INCLUDED.
+ *
+ *  Kept separate from the name→email map because that map collapses duplicates by construction, and
+ *  duplicates are exactly what has to be detected: two people using one display name is the case a
+ *  chat message cannot disambiguate. */
+export function scrapeGmeetParticipantRows(): Array<{ name: string; email?: string }> {
+  const rows: Array<{ name: string; email?: string }> = [];
+  try {
+    const panel = firstMatch(document, gmeetPeoplePanelSelectors);
+    const root: ParentNode = panel || document.body;
+    for (const row of Array.from(root.querySelectorAll('[role="listitem"], li, div[data-participant-id]'))) {
+      const frags = Array.from(row.querySelectorAll('*'))
+        .map((e) => (e.childElementCount === 0 ? (e.textContent || '').trim() : ''))
+        .filter((t) => t.length > 0);
+      const name = frags.find((f) => !EMAIL_RE.test(f) && looksLikeName(f));
+      if (!name) continue;
+      let email: string | undefined;
+      for (const c of [...frags, row.getAttribute('aria-label') || '', row.getAttribute('title') || '']) {
+        const m = c.match(EMAIL_RE);
+        if (m) { email = m[0].toLowerCase(); break; }
+      }
+      rows.push(email ? { name: name.trim(), email } : { name: name.trim() });
+    }
+  } catch {
+    /* identity is best effort; never disturb capture */
+  }
+  return rows;
+}
+
+/** How many people in the room are using each display name (lower-cased). */
+export function participantNameCounts(rows: Array<{ name: string }>): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const r of rows) {
+    const k = r.name.trim().toLowerCase();
+    if (k) out[k] = (out[k] || 0) + 1;
+  }
+  return out;
+}
+
 /** Scrape the people panel for `display name -> email`, where Meet exposes one.
  *
  *  Meet's CHAT carries a display name and nothing else, so an email — the only identity worth
@@ -336,6 +382,7 @@ export function createGmeetChat(opts: GmeetChatOptions): GmeetChat {
   let container: Element | null = null;
   let dumped = false;
   let emails: Record<string, string> = {};
+  let nameCounts: Record<string, number> = {};
 
   const textOf = (root: Element, selectors: string[]): string => {
     for (const sel of selectors) {
@@ -392,8 +439,13 @@ export function createGmeetChat(opts: GmeetChatOptions): GmeetChat {
     if (!text) return null;
     // Attach the sender's email when this meeting exposes one. Absent is normal and is reported
     // through getState().emails rather than guessed at.
-    const senderEmail = emails[sender.trim().toLowerCase()];
-    return senderEmail ? { sender, text, senderEmail } : { sender, text };
+    const key = sender.trim().toLowerCase();
+    const senderEmail = emails[key];
+    const msg: GmeetChatMessage = { sender, text };
+    if (senderEmail) msg.senderEmail = senderEmail;
+    // Two people on one display name: a chat line cannot say which of them wrote it.
+    if ((nameCounts[key] || 0) > 1) msg.senderAmbiguous = true;
+    return msg;
   };
 
   const dumpNode = (node: Element): string[] =>
@@ -462,6 +514,15 @@ export function createGmeetChat(opts: GmeetChatOptions): GmeetChat {
     // meeting — an email was never once resolved, and the whole email path was dead code that
     // silently degraded to name matching.
     if (autoOpen) ensureGmeetPeopleOpen();
+    const rows = scrapeGmeetParticipantRows();
+    if (rows.length) {
+      const counts = participantNameCounts(rows);
+      const dupes = Object.entries(counts).filter(([, n]) => n > 1).map(([n]) => n);
+      if (dupes.length && JSON.stringify(counts) !== JSON.stringify(nameCounts)) {
+        log(`DUPLICATE display names in the room: ${JSON.stringify(dupes)} - messages from them cannot be attributed`);
+      }
+      nameCounts = counts;
+    }
     const foundEmails = scrapeGmeetParticipantEmails();
     if (Object.keys(foundEmails).length) {
       const before = Object.keys(emails).length;
@@ -497,6 +558,7 @@ export function createGmeetChat(opts: GmeetChatOptions): GmeetChat {
       return {
         matchedContainer,
         emails,
+        nameCounts,
         panelOpen: isGmeetChatOpen(),
         seen: seenHashes.size,
         recent: recent.slice(-10),

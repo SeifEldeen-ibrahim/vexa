@@ -375,10 +375,13 @@ def _handle(r, dispatcher, live, subject, p, last_arm, keymap, first_seen, chat_
                 # `chat:<name>`. The email is the only identity worth gating on.
                 skey = str(seg.get("speaker_key") or "")
                 sender_email = skey[len("chat:email:"):] if skey.startswith("chat:email:") else None
+                # `chat:dup:` means two people in the room share this display name, so the message
+                # cannot be attributed to either — the absence of an identity, not just a weak one.
+                ambiguous = skey.startswith("chat:dup:")
                 verdict = chat_responder.offer(
                     meeting_key=key, platform=platform, native=native, owner=owner,
                     sender=str(seg.get("speaker") or "Someone"), text=text,
-                    sender_email=sender_email,
+                    sender_email=sender_email, sender_ambiguous=ambiguous,
                 )
                 if verdict != "not-addressed":
                     logger.info("meet-chat %s/%s: %s", platform, native, verdict)

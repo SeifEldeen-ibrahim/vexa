@@ -272,7 +272,8 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<number
     // speaker, the wall clock is the timing (epoch seconds, like the audio lanes), and
     // `completed` is immediate — a chat line has no draft phase.
     let chatSeq = 0;
-    const publishChat = (sender: string, text: string, senderEmail?: string): void => {
+    const publishChat = (sender: string, text: string, senderEmail?: string,
+                        senderAmbiguous?: boolean): void => {
       const nowMs = Date.now();
       void transcript.publish({
         segment_id: `${inv.connectionId ?? 'session'}:chat:${nowMs}:${chatSeq++}`,
@@ -280,7 +281,11 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<number
         // The EMAIL when the platform exposed one, else the display name. A consumer deciding
         // "is this the meeting owner?" needs an identity, and a display name is not one — anyone
         // can set theirs to anyone's. `chat:email:` marks which of the two this is.
-        speaker_key: senderEmail ? `chat:email:${senderEmail}` : `chat:${sender}`,
+        // An email is an identity; a name shared by two people in the room is the ABSENCE of one,
+        // and the consumer has to be able to tell those apart from an ordinary name.
+        speaker_key: senderEmail ? `chat:email:${senderEmail}`
+          : senderAmbiguous ? `chat:dup:${sender}`
+          : `chat:${sender}`,
         text,
         start: nowMs / 1000,
         end: nowMs / 1000,

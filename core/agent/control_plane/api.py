@@ -504,7 +504,11 @@ class MeetingChatAccess(BaseModel):
     model_config = {"extra": "forbid"}
     native_id: str
     platform: str = "google_meet"
-    workspace: bool
+    #: Read the owner's stored records (past meetings, notes) as well as this transcript.
+    workspace: "bool | None" = None
+    #: Answer EVERY participant, not just the owner. Turns the identity question off rather than
+    #: solving it — for a room where everyone present is trusted with the owner's assistant.
+    anyone: "bool | None" = None
     meeting_id: "str | None" = None
 
 
@@ -1226,6 +1230,9 @@ def create_app(
     def _meet_chat_access_key(row: str) -> str:
         return f"meetchat:meeting:{row}:workspace"
 
+    def _meet_chat_anyone_key(row: str) -> str:
+        return f"meetchat:meeting:{row}:anyone"
+
     #: How long a workspace grant survives without being refreshed. A meeting is over in hours; the
     #: grant must not outlive it and silently apply to a re-send of the same link next week.
     MEET_CHAT_GRANT_TTL_SEC = 12 * 3600
@@ -1256,15 +1263,24 @@ def create_app(
             raise HTTPException(status_code=404, detail="Meeting not found")
         try:
             r = _redis.from_url(redis_url, decode_responses=True)
-            if body.workspace:
-                r.set(_meet_chat_access_key(key), SCOPE_WORKSPACE, ex=MEET_CHAT_GRANT_TTL_SEC)
-            else:
-                r.delete(_meet_chat_access_key(key))
+            # Each field is set only when the caller named it, so a client toggling one grant does
+            # not silently clear the other.
+            if body.workspace is not None:
+                if body.workspace:
+                    r.set(_meet_chat_access_key(key), SCOPE_WORKSPACE, ex=MEET_CHAT_GRANT_TTL_SEC)
+                else:
+                    r.delete(_meet_chat_access_key(key))
+            if body.anyone is not None:
+                if body.anyone:
+                    r.set(_meet_chat_anyone_key(key), "1", ex=MEET_CHAT_GRANT_TTL_SEC)
+                else:
+                    r.delete(_meet_chat_anyone_key(key))
+            scope = SCOPE_WORKSPACE if r.get(_meet_chat_access_key(key)) == SCOPE_WORKSPACE else SCOPE_TRANSCRIPT
+            anyone = r.get(_meet_chat_anyone_key(key)) == "1"
         except Exception as e:  # noqa: BLE001 — a store fault must not read as "granted"
             logger.exception("meet-chat access write failed for %s", key)
             raise HTTPException(status_code=503, detail=f"could not record the grant: {e}")
-        return {"native_id": body.native_id, "meeting_id": row_id,
-                "scope": SCOPE_WORKSPACE if body.workspace else SCOPE_TRANSCRIPT}
+        return {"native_id": body.native_id, "meeting_id": row_id, "scope": scope, "anyone": anyone}
 
     @app.post("/api/chat")
     def chat(body: ChatBody, request: Request):
@@ -2523,6 +2539,18 @@ def create_app(
         _owner_identity_cache[key] = ident
         return ident
 
+    def _meet_chat_anyone(meeting_key: str) -> bool:
+        """Per-MEETING 'answer everyone' grant, on top of the deployment default. Read fresh each
+        turn; any fault is False, because failing open here answers strangers."""
+        import redis as _redis
+
+        try:
+            r = _redis.from_url(redis_url, decode_responses=True)
+            return r.get(_meet_chat_anyone_key(str(meeting_key))) == "1"
+        except Exception:  # noqa: BLE001
+            logger.exception("meet-chat: anyone-grant lookup failed for %s", meeting_key)
+            return False
+
     responder = None
     if _env_flag("VEXA_MEET_CHAT_ENABLED", default=False):
         responder = MeetingChatResponder(
@@ -2534,6 +2562,7 @@ def create_app(
             always=_env_flag("VEXA_MEET_CHAT_ALWAYS", default=False),
             # Default: only the meeting's OWNER is answered. Everyone else is read and ignored.
             anyone=_env_flag("VEXA_MEET_CHAT_ANYONE", default=False),
+            anyone_for=_meet_chat_anyone,
             owner_identity=_meet_chat_owner_identity,
             # Extra display names that count as the owner. Needed because Meet shows a chosen name
             # ("Seif Ibrahim") while an account may only know an email ("seif@..."), and the match is

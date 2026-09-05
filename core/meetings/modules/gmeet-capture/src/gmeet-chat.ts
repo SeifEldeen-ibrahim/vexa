@@ -287,20 +287,27 @@ export function scrapeGmeetParticipantEmails(): Record<string, string> {
     const roots: Element[] = panel ? [panel] : [document.body];
     for (const root of roots) {
       for (const row of Array.from(root.querySelectorAll('[role="listitem"], li, div[data-participant-id]'))) {
-        const hay = [
-          row.textContent || '',
+        // Each candidate string is examined SEPARATELY. Concatenating them (row.textContent) glues
+        // the name onto the address — "Seif Ibrahim" + "seif@biami.io" reads as
+        // "Ibrahimseif@biami.io", which is a perfectly valid-looking and completely wrong email.
+        const frags = Array.from(row.querySelectorAll('*'))
+          .map((e) => (e.childElementCount === 0 ? (e.textContent || '').trim() : ''))
+          .filter((t) => t.length > 0);
+        const candidates = [
+          ...frags,
           row.getAttribute('aria-label') || '',
           row.getAttribute('data-tooltip') || '',
           row.getAttribute('title') || '',
-        ].join(' ');
-        const m = hay.match(EMAIL_RE);
-        if (!m) continue;
-        // The name is the row's first name-like leaf that is not the address itself.
-        const frags = Array.from(row.querySelectorAll('*'))
-          .map((e) => (e.childElementCount === 0 ? (e.textContent || '').trim() : ''))
-          .filter((t) => t && !EMAIL_RE.test(t));
-        const name = frags.find((f) => looksLikeName(f));
-        if (name) out[name.trim().toLowerCase()] = m[0].toLowerCase();
+        ];
+        let email = '';
+        for (const c of candidates) {
+          const m = c.match(EMAIL_RE);
+          if (m) { email = m[0]; break; }
+        }
+        if (!email) continue;
+        // The name is the first name-like leaf that is not the address itself.
+        const name = frags.find((f) => !EMAIL_RE.test(f) && looksLikeName(f));
+        if (name) out[name.trim().toLowerCase()] = email.toLowerCase();
       }
     }
   } catch {
@@ -448,12 +455,17 @@ export function createGmeetChat(opts: GmeetChatOptions): GmeetChat {
     // Re-open first: a collapsed panel unmounts the list, so without this the observer has nothing
     // to attach to and the reader goes quiet for the rest of the meeting.
     if (autoOpen && ensureGmeetChatOpen()) log('chat panel was closed - reopened');
-    // Refresh the identity map each poll: people join mid-call, and the panel may only have been
-    // opened after the first messages arrived.
-    const found = scrapeGmeetParticipantEmails();
-    if (Object.keys(found).length) {
+    // Refresh the identity map each poll: people join mid-call, and the people panel may only be
+    // opened after the first messages have already arrived.
+    //
+    // The panel has to be OPENED first. Without this the scraper had nothing to read on every real
+    // meeting — an email was never once resolved, and the whole email path was dead code that
+    // silently degraded to name matching.
+    if (autoOpen) ensureGmeetPeopleOpen();
+    const foundEmails = scrapeGmeetParticipantEmails();
+    if (Object.keys(foundEmails).length) {
       const before = Object.keys(emails).length;
-      emails = { ...emails, ...found };
+      emails = { ...emails, ...foundEmails };
       if (Object.keys(emails).length !== before) {
         log(`participant emails resolved: ${JSON.stringify(emails)}`);
       }

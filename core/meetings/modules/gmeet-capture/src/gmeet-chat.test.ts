@@ -20,6 +20,7 @@ import {
   ensureGmeetChatOpen,
   isGmeetChatOpen,
   wasSentByUs,
+  scrapeGmeetParticipantEmails,
   type GmeetChatMessage,
 } from './gmeet-chat.js';
 
@@ -216,6 +217,58 @@ console.log('gmeet-chat: live-found defects');
   const seen: GmeetChatMessage[] = [];
   const chat = createGmeetChat({ onMessage: (m) => seen.push(m), autoOpen: false });
   check('skips a timestamp when scanning back for the header', seen[0]?.sender === 'Ada');
+  chat.destroy();
+}
+
+// ── identity: the email, where Meet exposes one ─────────────────────────────
+// Meet's CHAT carries a display name and no address. An email — the only tight identity available —
+// has to come from the people panel, and Meet shows one for some participants and not others. These
+// pin the extraction; whether a given meeting HAS emails is reported by getState().emails, not
+// assumed.
+console.log('gmeet-chat: identity');
+{
+  mount(
+    '<div aria-label="Participants">' +
+      '<div role="listitem"><span>Seif Ibrahim</span><span>seif@biami.io</span></div>' +
+      '<div role="listitem"><span>Marcin Kowalski</span><span>marcin@other.test</span></div>' +
+    '</div>',
+  );
+  const got = scrapeGmeetParticipantEmails();
+  check('reads name -> email out of the people panel',
+    got['seif ibrahim'] === 'seif@biami.io' && got['marcin kowalski'] === 'marcin@other.test');
+}
+
+{
+  // The common case: Meet shows names only. An empty map is a real answer, not a failure.
+  mount('<div aria-label="Participants"><div role="listitem"><span>Seif Ibrahim</span></div></div>');
+  check('returns nothing when Meet exposes no address', Object.keys(scrapeGmeetParticipantEmails()).length === 0);
+}
+
+{
+  mount('<div></div>');
+  check('survives having no people panel at all', Object.keys(scrapeGmeetParticipantEmails()).length === 0);
+}
+
+{
+  // A chat message carries the sender's email when the panel gave one.
+  mount(
+    '<div aria-label="Participants"><div role="listitem"><span>Ada Lovelace</span>' +
+      '<span>ada@example.test</span></div></div>' +
+    panel('<div data-message-id="1" data-sender-name="Ada Lovelace" data-message-text="hello"></div>'),
+  );
+  const seen: GmeetChatMessage[] = [];
+  const chat = createGmeetChat({ onMessage: (m) => seen.push(m), autoOpen: false });
+  check('attaches the sender email to the message', seen[0]?.senderEmail === 'ada@example.test');
+  check('getState reports which identities were resolvable',
+    chat.getState().emails['ada lovelace'] === 'ada@example.test');
+  chat.destroy();
+}
+
+{
+  mount(panel('<div data-message-id="1" data-sender-name="Ada" data-message-text="hi"></div>'));
+  const seen: GmeetChatMessage[] = [];
+  const chat = createGmeetChat({ onMessage: (m) => seen.push(m), autoOpen: false });
+  check('omits the email rather than inventing one', seen[0]?.senderEmail === undefined);
   chat.destroy();
 }
 

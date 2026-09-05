@@ -31,6 +31,15 @@ WHO MAY ASK. By default only the meeting's OWNER is answered; everyone else is r
 That is the real permission check — the ``@vexa`` prefix is only a spam and cost filter, and anyone
 in the room can type it.
 
+Identity is required IN PROPORTION TO WHAT IS REACHABLE, because a display name is not an identity:
+two Google accounts can carry the same one, and anyone in a meeting can set theirs to the owner's.
+
+  ``transcript``  a whole-name match is enough. An impersonator gains help with a meeting they are
+                  already sitting in, and nothing private is in reach.
+  ``workspace``   a VERIFIED EMAIL is required. Past records are never handed out on the strength of
+                  a name. If Meet exposed no address for the asker, the turn silently narrows to
+                  ``transcript`` — it answers, it just does not open the archive.
+
 Identity, in order of strength:
 
   EMAIL   — exact match, and decisive when present. Meet's CHAT carries no email, so the bot reads
@@ -315,8 +324,7 @@ class MeetingChatResponder:
                 return "no-owner"
             # WHO MAY ASK — the real permission check, before any work is done.
             if not self._anyone and not self._sender_is_owner(subject, sender, sender_email):
-                self._log(f"meet-chat: ignoring a question from {sender!r} — not the meeting owner")
-                return "not-owner"
+                return "not-owner"   # _sender_is_owner already logged WHY, loudly
             now = time.monotonic()
             with self._lock:
                 if meeting_key in self._inflight:
@@ -326,18 +334,33 @@ class MeetingChatResponder:
                     return "rate-limited"
                 self._inflight.add(meeting_key)
                 self._last_at[meeting_key] = now
-            self._pool.submit(self._answer, meeting_key, platform, native, subject, sender, question)
+            self._pool.submit(self._answer, meeting_key, platform, native, subject, sender, question,
+                              sender_email)
             return "accepted"
         except Exception:  # noqa: BLE001 — the watcher thread must survive anything that happens here
             logger.exception("meet-chat: offer failed for %s", meeting_key)
             return "error"
 
     # ── the turn (pool thread) ─────────────────────────────────────────────────────────────────
-    def _answer(self, meeting_key: str, platform: str, native: str, subject: str, sender: str, question: str) -> None:
+    def _answer(self, meeting_key: str, platform: str, native: str, subject: str, sender: str,
+                question: str, sender_email: "str | None" = None) -> None:
         try:
             # The SAME thread identity the Terminal's Assistant tab shows.
             session = meeting_session_id(platform, meeting_key)
             scope = self._scope_for(meeting_key)
+            # RISK-PROPORTIONATE IDENTITY. A display name is not an identity — two accounts can
+            # carry the same one, and anyone in the room can set theirs to the owner's. So the weak
+            # check may only ever guard the harmless scope:
+            #   transcript — an impersonator gains help with a meeting they are already sitting in.
+            #   workspace  — an impersonator gains the owner's PAST RECORDS. Never on a name.
+            # Meet exposes an address for some participants and not others, so this can refuse a
+            # legitimate owner; it refuses toward the narrow scope rather than toward the records.
+            if scope == SCOPE_WORKSPACE and not sender_email:
+                logger.warning(
+                    "meet-chat: %r asked in a WORKSPACE-scoped meeting but Meet exposed no email for "
+                    "them - answering from the transcript only. A display name is not an identity, "
+                    "and stored records are not handed out on one.", sender)
+                scope = SCOPE_TRANSCRIPT
             focus = {
                 "kind": "meeting",
                 "platform": platform,
@@ -398,15 +421,19 @@ class MeetingChatResponder:
         if sender_email:
             if is_owner_email(sender_email, email):
                 return True
-            self._log(f"meet-chat: {sender_email!r} is not the meeting owner ({email!r})")
+            logger.warning("meet-chat: REFUSED %r - not the meeting owner (%r)", sender_email, email)
             return False
         accepted = owner_display_names(name, email, self._owner_names)
         if is_owner(sender, accepted):
             return True
         # Say WHAT was seen and what would have matched — otherwise "it ignored me" is unfixable.
-        self._log(f"meet-chat: {sender!r} is not the meeting owner (no email from the platform; "
-                  f"accepted names: {sorted(accepted)}). Set the account name or add it to "
-                  f"VEXA_MEET_CHAT_OWNER_NAMES.")
+        # WARNING, not info: this is the difference between "the assistant is restricted" and "the
+        # assistant is broken", and on its first live meeting it was invisible — the owner was
+        # refused because his account knew only an email, and nothing said so.
+        logger.warning(
+            "meet-chat: REFUSED %r - not the meeting owner. Meet exposed no email for them, and the "
+            "accepted names are %s. Set the account's name, or add the display name to "
+            "VEXA_MEET_CHAT_OWNER_NAMES.", sender, sorted(accepted))
         return False
 
     def _scope_for(self, meeting_key: str) -> str:

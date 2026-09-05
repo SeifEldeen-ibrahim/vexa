@@ -229,9 +229,12 @@ def test_the_default_scope_is_transcript_only():
 
 
 def test_a_granted_meeting_gets_workspace_scope():
+    """A grant PLUS a verified email. The grant alone is not enough — stored records are not handed
+    out on a display name, which two accounts can share."""
     rec = _Recorder()
-    r = _responder(rec, access=lambda key: "workspace")
-    _offer(r, "@vexa hi")
+    r = _responder(rec, access=lambda key: "workspace",
+                   owner_identity=lambda s: (None, "ada@example.test"))
+    _offer(r, "@vexa hi", sender_email="ada@example.test")
     _settle(rec)
     assert rec.turns[0][5] == "workspace"
     r.close()
@@ -240,9 +243,10 @@ def test_a_granted_meeting_gets_workspace_scope():
 def test_the_grant_is_per_meeting():
     """A meeting the owner opened up must not open up every other meeting."""
     rec = _Recorder()
-    r = _responder(rec, access=lambda key: "workspace" if key == "11" else "transcript")
-    _offer(r, "@vexa hi", key="11"); _settle(rec, 1)
-    _offer(r, "@vexa hi", key="22"); _settle(rec, 2)
+    r = _responder(rec, access=lambda key: "workspace" if key == "11" else "transcript",
+                   owner_identity=lambda s: (None, "ada@example.test"))
+    _offer(r, "@vexa hi", key="11", sender_email="ada@example.test"); _settle(rec, 1)
+    _offer(r, "@vexa hi", key="22", sender_email="ada@example.test"); _settle(rec, 2)
     got = {t[1]: t[5] for t in rec.turns}
     assert got["meet-google_meet-11"] == "workspace"
     assert got["meet-google_meet-22"] == "transcript"
@@ -281,8 +285,9 @@ def test_a_transcript_turn_is_told_it_can_search_but_not_open_stored_records():
 def test_a_workspace_turn_is_still_warned_that_the_room_can_read_the_reply():
     """Meet has no direct messages, so a workspace-scoped turn must know its answer is public."""
     rec = _Recorder()
-    r = _responder(rec, access=lambda k: "workspace")
-    _offer(r, "@vexa what did we decide?")
+    r = _responder(rec, access=lambda k: "workspace",
+                   owner_identity=lambda s: (None, "ada@example.test"))
+    _offer(r, "@vexa what did we decide?", sender_email="ada@example.test")
     _settle(rec)
     prompt = rec.turns[0][3].lower()
     assert "everyone in the meeting can read your reply" in prompt
@@ -292,8 +297,9 @@ def test_a_workspace_turn_is_still_warned_that_the_room_can_read_the_reply():
 def test_a_workspace_turn_is_told_it_cannot_change_anything():
     """It has Read/Glob/Grep/Web but no Write/Edit/Bash — it must not offer edits it cannot make."""
     rec = _Recorder()
-    r = _responder(rec, access=lambda k: "workspace")
-    _offer(r, "@vexa tidy up my notes")
+    r = _responder(rec, access=lambda k: "workspace",
+                   owner_identity=lambda s: (None, "ada@example.test"))
+    _offer(r, "@vexa tidy up my notes", sender_email="ada@example.test")
     _settle(rec)
     assert "no write or shell tools" in rec.turns[0][3]
     r.close()
@@ -563,4 +569,46 @@ def test_without_an_email_it_falls_back_to_the_whole_name():
     assert _offer(r, "@vexa hi", sender="Seif Ibrahim") == "accepted"
     _settle(rec)
     assert _offer(r, "@vexa hi", sender="seif eldeen ibrahim", key="8") == "not-owner"
+    r.close()
+
+
+# ── identity is required in proportion to what is reachable ───────────────────────────────
+# Two Google accounts can carry the same display name, and anyone in a room can set theirs to the
+# owner's. So the weak check may only guard the harmless scope.
+
+def test_workspace_scope_needs_a_verified_email_not_a_name():
+    """A name match opens the transcript. It must NOT open the owner's stored records."""
+    rec = _Recorder()
+    r = _responder(rec, anyone=False,
+                   owner_identity=lambda s: ("Seif Ibrahim", "seif@biami.io"),
+                   access=lambda k: "workspace")
+    # Name-only: accepted as the owner, but narrowed away from the archive.
+    assert _offer(r, "@vexa what did we discuss last week?", sender="Seif Ibrahim") == "accepted"
+    _settle(rec)
+    assert rec.turns[0][5] == "transcript", "past records were handed out on a display name"
+    r.close()
+
+
+def test_workspace_scope_is_granted_on_a_verified_email():
+    rec = _Recorder()
+    r = _responder(rec, anyone=False,
+                   owner_identity=lambda s: ("Seif Ibrahim", "seif@biami.io"),
+                   access=lambda k: "workspace")
+    assert _offer(r, "@vexa what did we discuss last week?", sender="Seif Ibrahim",
+                  sender_email="seif@biami.io") == "accepted"
+    _settle(rec)
+    assert rec.turns[0][5] == "workspace"
+    r.close()
+
+
+def test_a_name_match_still_answers_from_the_transcript():
+    """The narrowing must not turn into a refusal — the assistant still works, it just does not
+    open the archive."""
+    rec = _Recorder(reply="From the transcript: Friday.")
+    r = _responder(rec, anyone=False,
+                   owner_identity=lambda s: ("Seif Ibrahim", "seif@biami.io"),
+                   access=lambda k: "workspace")
+    _offer(r, "@vexa when do we ship?", sender="Seif Ibrahim")
+    _settle(rec)
+    assert len(rec.posts) == 1
     r.close()

@@ -178,6 +178,47 @@ console.log('gmeet-chat: live-found defects');
   check('does not claim an unrelated message as its own', !wasSentByUs('something else entirely'));
 }
 
+{
+  // THE REAL SHAPE, from a live meeting's log. The row carries NO author at all:
+  //   ["div.jO4O1","div.ptNLrf","div[jsname=dTKtvb]","div >marcin said sooo"]
+  // Meet renders one header per RUN of messages, as a SIBLING above the rows — so the author can
+  // only be found by looking before the row in document order, never inside it.
+  mount(panel(
+    '<div class="group">' +
+      '<div class="hdr"><span>Marcin Kowalski</span></div>' +
+      '<div data-message-id="1"><div class="jO4O1"></div><div jsname="dTKtvb">marcin said sooo</div></div>' +
+      '<div data-message-id="2"><div jsname="dTKtvb">and then this</div></div>' +
+    '</div>',
+  ));
+  const seen: GmeetChatMessage[] = [];
+  const chat = createGmeetChat({ onMessage: (m) => seen.push(m), autoOpen: false });
+  check('finds the sender in the group header above the row', seen[0]?.sender === 'Marcin Kowalski');
+  check('attributes the SECOND message of a run to the same header', seen[1]?.sender === 'Marcin Kowalski');
+  check('still carries each body', seen.map((m) => m.text).join('|') === 'marcin said sooo|and then this');
+  chat.destroy();
+}
+
+{
+  // No header anywhere: report Unknown honestly rather than inventing an author.
+  mount(panel('<div data-message-id="1"><div jsname="dTKtvb">orphan message</div></div>'));
+  const seen: GmeetChatMessage[] = [];
+  const chat = createGmeetChat({ onMessage: (m) => seen.push(m), autoOpen: false });
+  check('says Unknown when there is genuinely no author to find', seen[0]?.sender === 'Unknown');
+  chat.destroy();
+}
+
+{
+  // A timestamp sibling must not be mistaken for a name.
+  mount(panel(
+    '<div class="group"><div>10:42</div><div><span>Ada</span></div>' +
+    '<div data-message-id="1"><div jsname="dTKtvb">hello</div></div></div>',
+  ));
+  const seen: GmeetChatMessage[] = [];
+  const chat = createGmeetChat({ onMessage: (m) => seen.push(m), autoOpen: false });
+  check('skips a timestamp when scanning back for the header', seen[0]?.sender === 'Ada');
+  chat.destroy();
+}
+
 // ── panel state ─────────────────────────────────────────────────────────────
 console.log('gmeet-chat: panel');
 {

@@ -101,6 +101,27 @@ function MeetingCanvasBody({ meetingId }: { meetingId?: string }) {
     }
   };
 
+  // ── the in-meeting assistant's reach ────────────────────────────────────────────────────────
+  // Anyone in the meeting can address the assistant, and it answers AS the owner. By default it can
+  // only see THIS meeting's transcript, so a guest has nothing private to pull out of it. Granting
+  // the workspace also brings PAST meetings' notes into scope (the copilot writes those regardless
+  // of this setting) — which is the point, and also why it is off until deliberately turned on.
+  const [chatWorkspace, setChatWorkspace] = useState(false);
+  const [chatAccessBusy, setChatAccessBusy] = useState(false);
+  const toggleChatAccess = () => {
+    const next = !chatWorkspace;
+    if (!meetingId || chatAccessBusy) return;
+    setChatAccessBusy(true);
+    setChatWorkspace(next);                       // optimistic; reverted below if the grant is refused
+    void fetch("/api/meeting/chat-access", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ meeting_id: meetingId, native_id: nativeId ?? meetingId, workspace: next }),
+    })
+      .then((r) => { if (!r.ok) setChatWorkspace(!next); })   // a refused grant must not look granted
+      .catch(() => setChatWorkspace(!next))
+      .finally(() => setChatAccessBusy(false));
+  };
+
   // Completed meetings get view names (nothing is "processing" any more); live keeps the arm/disarm wording.
   const label = effectiveLive ? `Processing ${processing ? "on" : "off"}` : (processing ? "Processed" : "Raw");
 
@@ -124,6 +145,31 @@ function MeetingCanvasBody({ meetingId }: { meetingId?: string }) {
           {label}
         </button>
         <span style={{ fontSize: 11.5, color: "var(--t3)" }}>{processing ? "cleaned + copilot" : "raw transcript"}</span>
+        {effectiveLive && (
+          <>
+            <span style={{ flex: 1 }} />
+            <button
+              type="button"
+              onClick={toggleChatAccess}
+              aria-pressed={chatWorkspace}
+              disabled={chatAccessBusy}
+              title={chatWorkspace
+                ? "The in-meeting assistant can read your workspace — including past meetings' notes. Anyone in the meeting can ask it."
+                : "The in-meeting assistant answers only from this meeting's transcript. Anyone in the meeting can ask it."}
+              style={{
+                display: "flex", alignItems: "center", gap: 7, cursor: chatAccessBusy ? "default" : "pointer",
+                background: chatWorkspace ? "var(--accent)" : "transparent",
+                color: chatWorkspace ? "var(--on-accent)" : "var(--t2)",
+                border: `1px solid ${chatWorkspace ? "var(--accent)" : "var(--line2)"}`,
+                borderRadius: 8, padding: "4px 10px", fontSize: 12, fontWeight: 600,
+                opacity: chatAccessBusy ? 0.6 : 1,
+              }}
+            >
+              <span style={{ width: 7, height: 7, borderRadius: "50%", background: chatWorkspace ? "var(--on-accent)" : "var(--t3)", flex: "none" }} />
+              {chatWorkspace ? "@vexa: workspace" : "@vexa: transcript only"}
+            </button>
+          </>
+        )}
       </div>
       <MeetingHealthBanner />
       <main style={{ flex: 1, minHeight: 0, overflow: "auto" }}>

@@ -683,8 +683,13 @@ def build_router(
         payload: dict,
         x_user_id: Optional[str] = Header(default=None),
     ):
-        user_id = _resolve_user_id(x_user_id)
-        text = (payload or {}).get("text")
+        return await _send_chat(platform, native_meeting_id,
+                                _resolve_user_id(x_user_id), (payload or {}).get("text"))
+
+    async def _send_chat(platform: str, native_meeting_id: str, user_id: int, text):
+        """Publish one acts.v1 `chat_send` for an OWNED meeting. Shared by the public (api-key) and
+        internal (platform-authenticated) routes so the validation and the owner boundary are the
+        same code, not two copies that drift."""
         if not isinstance(text, str) or not text.strip():
             raise HTTPException(status_code=422, detail="body must carry a non-empty string `text`")
         if len(text) > CHAT_SEND_MAX_CHARS:
@@ -716,6 +721,40 @@ def build_router(
             fields={"chars": len(text)},
         )
         return JSONResponse(status_code=202, content={"status": "queued"})
+
+    # --- POST /internal/bots/{platform}/{native_meeting_id}/chat — the SAME send, as a named user.
+    #
+    # The public route above is owner-scoped off the gateway-resolved API key, which means a caller
+    # can only send into meetings THAT key owns. That is right for an API consumer and wrong for the
+    # agent: agent-api answers on behalf of whichever user owns the live meeting, and it holds one
+    # deployment-wide bot key, so on a multi-user deployment every meeting except that key-holder's
+    # got a silent 404. Possession of one shared key was also, in effect, the authorization boundary
+    # for "who may make the bot speak here".
+    #
+    # This route takes the owner EXPLICITLY and authenticates the CALLER as the platform, over the
+    # loopback-only internal tier (INTERNAL_API_SECRET, never exposed through the gateway). The owner
+    # check is unchanged — it just runs against the user the caller names rather than the key's user,
+    # so a wrong or absent owner still 404s. `include_in_schema=False`: internal, not api.v1. ---
+    @router.post("/internal/bots/{platform}/{native_meeting_id}/chat",
+                 status_code=202, include_in_schema=False)
+    async def internal_send_meeting_chat(
+        platform: str,
+        native_meeting_id: str,
+        payload: dict,
+        authorization: Optional[str] = Header(default=None),
+    ):
+        import os as _os
+
+        secret = _os.getenv("INTERNAL_API_SECRET")
+        bearer = (authorization or "").removeprefix("Bearer ").strip()
+        if not (secret and bearer and bearer == secret):
+            raise HTTPException(status_code=401, detail="internal tier requires INTERNAL_API_SECRET")
+        raw_user = (payload or {}).get("user_id")
+        try:
+            user_id = int(raw_user)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=422, detail="body must carry an integer `user_id`")
+        return await _send_chat(platform, native_meeting_id, user_id, (payload or {}).get("text"))
 
     # --- GET /meetings/{platform}/{native_meeting_id}/participants → who was in this meeting, as far as
     # the 0.12 core actually KNOWS. Owner-scoped (404 on someone else's meeting — never an empty roster,

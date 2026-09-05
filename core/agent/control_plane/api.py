@@ -34,7 +34,9 @@ from jsonschema.exceptions import ValidationError
 from pydantic import BaseModel
 
 from control_plane import meeting_steering
-from control_plane.meeting_chat_responder import MeetingChatResponder
+from control_plane.meeting_chat_responder import (
+    MeetingChatResponder, SCOPE_TRANSCRIPT, SCOPE_WORKSPACE,
+)
 from control_plane import schedule_digest as schedule_digest_mod
 from control_plane import routines as routines_mod
 from control_plane.config_preflight import NOT_CONFIGURED, capability_state, missing_capability_keys
@@ -489,6 +491,21 @@ class MeetingStart(BaseModel):
     native_id: str              # the platform meeting id (e.g. a Google Meet code abc-defg-hij)
     subject: Optional[str] = None  # DERIVED from X-User-Id (P20); ignored if sent.
     title: Optional[str] = None
+
+
+class MeetingChatAccess(BaseModel):
+    """Grant or revoke WORKSPACE grounding for a meeting's in-chat assistant.
+
+    Default (and the state of every new meeting) is transcript-only: the assistant answers from that
+    meeting's transcript and can open nothing else. Granting `workspace` lets it also read the owner's
+    workspace — which includes PAST meetings' notes, because the copilot writes those regardless of
+    this setting. Anyone in the room can address the assistant, so this grant decides what a guest can
+    get read out to them."""
+    model_config = {"extra": "forbid"}
+    native_id: str
+    platform: str = "google_meet"
+    workspace: bool
+    meeting_id: "str | None" = None
 
 
 class MeetingProcess(BaseModel):
@@ -1193,6 +1210,49 @@ def create_app(
         # the watcher's next segment (≤ one batch), keyed and started from the same cursor.
         start_id = cursor or "0-0"
         return {"native_id": body.native_id, "meeting_id": row_id, "processing": True, "resumed_from": start_id}
+
+    def _meet_chat_access_key(row: str) -> str:
+        return f"meetchat:meeting:{row}:workspace"
+
+    #: How long a workspace grant survives without being refreshed. A meeting is over in hours; the
+    #: grant must not outlive it and silently apply to a re-send of the same link next week.
+    MEET_CHAT_GRANT_TTL_SEC = 12 * 3600
+
+    @app.post("/api/meeting/chat-access", status_code=202)
+    def meeting_chat_access(body: MeetingChatAccess, request: Request):
+        """Set the in-meeting assistant's grounding scope for ONE meeting (desired state only).
+
+        Keyed on the meetings-domain ROW id for the same reason everything else here is: the native
+        code collides across users and across one user's re-sends, so keying a GRANT by it would hand
+        a stranger's meeting the access this user granted. Off/absent ⇒ transcript-only."""
+        import redis as _redis
+
+        subject = subject_of(request)
+        live_entry = next(
+            (m for m in live.list()
+             if m.get("native_id") == body.native_id or m.get("session_uid") == body.native_id),
+            None,
+        )
+        row_id = (
+            body.meeting_id
+            or (str(live_entry["numeric_meeting_id"])
+                if live_entry and live_entry.get("numeric_meeting_id") else None)
+        )
+        key = row_id or body.native_id
+        # Owner check: only the meeting's owner may widen what its chat assistant can read.
+        if row_id and _meeting_owner_lookup(subject, row_id) is None:
+            raise HTTPException(status_code=404, detail="Meeting not found")
+        try:
+            r = _redis.from_url(redis_url, decode_responses=True)
+            if body.workspace:
+                r.set(_meet_chat_access_key(key), SCOPE_WORKSPACE, ex=MEET_CHAT_GRANT_TTL_SEC)
+            else:
+                r.delete(_meet_chat_access_key(key))
+        except Exception as e:  # noqa: BLE001 — a store fault must not read as "granted"
+            logger.exception("meet-chat access write failed for %s", key)
+            raise HTTPException(status_code=503, detail=f"could not record the grant: {e}")
+        return {"native_id": body.native_id, "meeting_id": row_id,
+                "scope": SCOPE_WORKSPACE if body.workspace else SCOPE_TRANSCRIPT}
 
     @app.post("/api/chat")
     def chat(body: ChatBody, request: Request):
@@ -2313,7 +2373,8 @@ def create_app(
     # Both collaborators are built here, at the composition root, because both need things the
     # responder must not hold itself: the dispatcher + stream reader (the turn), and the deployment
     # bot key (the reply hop). The responder stays a pure orchestrator and is provable offline.
-    def _meet_chat_turn(subject: str, session: str, focus: dict, prompt: str, title: str = "") -> str:
+    def _meet_chat_turn(subject: str, session: str, focus: dict, prompt: str, title: str = "",
+                        scope: str = SCOPE_TRANSCRIPT) -> str:
         """Run ONE agent turn headlessly and return the assistant's text.
 
         The same grounding and dispatch the SSE route builds — deliberately assembled from the same
@@ -2321,9 +2382,12 @@ def create_app(
         answer and an Assistant-tab answer come from the same machinery.
 
         Two deliberate differences from the SSE route, both because the input is UNTRUSTED:
-          * workspaces are pinned `ro`. `units.mode_for("message")` grants `rw` on the assumption
-            that a chat turn is the account owner typing; here it is any participant in the room,
-            including an external guest, so the turn proposes and never writes.
+          * GROUNDING SCOPE. By default the turn mounts NO workspace at all — it answers from the
+            meeting transcript folded into the prompt and nothing else. Read-only mounts would stop a
+            participant CHANGING the workspace, but not a guest asking the agent to read private
+            notes out loud into a room the owner does not control; the only reliable answer to
+            exfiltration is having nothing private in scope. `workspace` scope (opt-in per meeting)
+            mounts the owner's workspaces READ-ONLY.
           * there is no resume/retry machinery — nobody is holding a stream open to reconnect.
         """
         body = ChatBody(prompt=prompt, session=session,
@@ -2334,9 +2398,18 @@ def create_app(
             workspace_mounts=lambda: (active_workspaces(wsr.root, subject)
                                       + shared_active_mounts(wsr.root, subject, mindex.list(subject))),
         )
+        # `_context_grounding` has already folded the meeting transcript into `grounded`, so a
+        # transcript-scoped turn still has everything it needs to answer about the room — it simply
+        # carries no mounts. An empty list is the honest expression of that: nothing to read, so
+        # nothing to leak.
+        # TRANSCRIPT scope is TOOL-LESS. unit.v1 requires at least one granted workspace, so the
+        # mount cannot simply be removed — but a turn with no tools cannot open a file in it either,
+        # and that is the property that matters: there is nothing private it can read out loud.
+        # WORKSPACE scope keeps the read-only mount and the ordinary chat toolset.
         inv = units.make_dispatch(
             subject=subject, trigger="message",
-            start=units.entrypoint(inline=grounded), context=ctx, tools=tools,
+            start=units.entrypoint(inline=grounded), context=ctx,
+            tools=(tools if scope == SCOPE_WORKSPACE else ["none"]),
             workspaces=[{"id": subject, "mode": "ro"}],
         )
         unit_id = units.dispatch_id(inv)
@@ -2399,11 +2472,22 @@ def create_app(
             logger.exception("meet-chat: reply delivery failed for %s/%s", platform, native)
             return False
 
+    def _meet_chat_access(meeting_key: str) -> str:
+        """The meeting's granted scope, read fresh each turn so a revoke takes effect immediately.
+        Any fault, any missing key, any unexpected value ⇒ transcript-only: failing open here would
+        read private notes into a room."""
+        import redis as _redis
+
+        r = _redis.from_url(redis_url, decode_responses=True)
+        return SCOPE_WORKSPACE if r.get(_meet_chat_access_key(str(meeting_key))) == SCOPE_WORKSPACE \
+            else SCOPE_TRANSCRIPT
+
     responder = None
     if _env_flag("VEXA_MEET_CHAT_ENABLED", default=False):
         responder = MeetingChatResponder(
             run_turn=_meet_chat_turn,
             post_reply=_meet_chat_post,
+            access=_meet_chat_access,
             bot_name=os.environ.get("DEFAULT_BOT_NAME", "Vexa"),
             prefix=os.environ.get("VEXA_MEET_CHAT_PREFIX", "@vexa"),
             always=_env_flag("VEXA_MEET_CHAT_ALWAYS", default=False),

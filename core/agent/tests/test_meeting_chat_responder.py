@@ -40,8 +40,8 @@ class _Recorder:
         self.entered = threading.Event()
         self.release = threading.Event()
 
-    def run_turn(self, subject, session, focus, prompt, title=""):
-        self.turns.append((subject, session, focus, prompt, title))
+    def run_turn(self, subject, session, focus, prompt, title="", scope="transcript"):
+        self.turns.append((subject, session, focus, prompt, title, scope))
         self.entered.set()
         if self._delay:
             time.sleep(self._delay)
@@ -178,7 +178,7 @@ def test_the_turn_is_grounded_in_the_meeting_and_names_the_asker():
     r = _responder(rec)
     _offer(r, "@vexa what did we decide?", sender="Grace")
     _settle(rec)
-    _subject, _session, focus, prompt, _title = rec.turns[0]
+    _subject, _session, focus, prompt, _title, _scope = rec.turns[0]
     assert focus["kind"] == "meeting" and focus["meeting_id"] == "7"
     assert focus["native_id"] == "abc-defg-hij" and focus["status"] == "active"
     assert "Grace" in prompt and "what did we decide?" in prompt
@@ -194,6 +194,75 @@ def test_the_thread_is_titled_with_the_question_not_the_prompt_scaffolding():
     title = rec.turns[0][4]
     assert title == "what did we decide about pricing?"
     assert "Answer them" not in title and "meeting chat" not in title
+    r.close()
+
+
+# ── grounding scope: what a guest in the room can get read out to them ────────────────────
+
+def test_the_default_scope_is_transcript_only():
+    """No access resolver at all ⇒ the narrow scope. A deployment that forgets to wire the grant
+    store must not thereby grant everyone the owner's workspace."""
+    rec = _Recorder()
+    r = _responder(rec)
+    _offer(r, "@vexa hi")
+    _settle(rec)
+    assert rec.turns[0][5] == "transcript"
+    r.close()
+
+
+def test_a_granted_meeting_gets_workspace_scope():
+    rec = _Recorder()
+    r = _responder(rec, access=lambda key: "workspace")
+    _offer(r, "@vexa hi")
+    _settle(rec)
+    assert rec.turns[0][5] == "workspace"
+    r.close()
+
+
+def test_the_grant_is_per_meeting():
+    """A meeting the owner opened up must not open up every other meeting."""
+    rec = _Recorder()
+    r = _responder(rec, access=lambda key: "workspace" if key == "11" else "transcript")
+    _offer(r, "@vexa hi", key="11"); _settle(rec, 1)
+    _offer(r, "@vexa hi", key="22"); _settle(rec, 2)
+    got = {t[1]: t[5] for t in rec.turns}
+    assert got["meet-google_meet-11"] == "workspace"
+    assert got["meet-google_meet-22"] == "transcript"
+    r.close()
+
+
+def test_an_unreadable_or_unexpected_grant_fails_CLOSED():
+    """Failing open here means a guest gets private notes read aloud. Every fault is transcript."""
+    def boom(_key):
+        raise RuntimeError("redis down")
+
+    for resolver in (boom, lambda k: None, lambda k: "", lambda k: "WORKSPACE", lambda k: "rw"):
+        rec = _Recorder()
+        r = _responder(rec, access=resolver)
+        _offer(r, "@vexa hi")
+        _settle(rec)
+        assert rec.turns[0][5] == "transcript", resolver
+        r.close()
+
+
+def test_the_prompt_tells_a_transcript_turn_it_has_no_workspace():
+    """The model must not offer to look something up it cannot reach, in front of the room."""
+    rec = _Recorder()
+    r = _responder(rec)
+    _offer(r, "@vexa what did we decide?")
+    _settle(rec)
+    prompt = rec.turns[0][3]
+    assert "no access to any workspace" in prompt
+    assert "anyone in the meeting can read your reply" in prompt.lower()
+    r.close()
+
+
+def test_a_workspace_turn_is_still_warned_that_the_room_can_read_the_reply():
+    rec = _Recorder()
+    r = _responder(rec, access=lambda k: "workspace")
+    _offer(r, "@vexa what did we decide?")
+    _settle(rec)
+    assert "anyone in the meeting can read your reply" in rec.turns[0][3].lower()
     r.close()
 
 

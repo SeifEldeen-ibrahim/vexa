@@ -194,6 +194,55 @@ export function sendGmeetChatMessage(text: string): boolean {
   }
 }
 
+/** Does this element look like a message row rather than a group header? */
+function isMessageRow(el: Element): boolean {
+  return gmeetChatMessageSelectors.some((sel) => {
+    try { return el.matches(sel); } catch { return false; }
+  });
+}
+
+/** Is this short leaf text plausibly a person's display name (a chat group header)? */
+function looksLikeName(t: string): boolean {
+  const v = t.trim();
+  if (!v || v.length > 40) return false;
+  if (CHROME_WORDS.has(v.toLowerCase())) return false;
+  if (/^\d{1,2}:\d{2}/.test(v)) return false;          // a timestamp
+  if (!/[A-Za-z]/.test(v)) return false;                // punctuation / emoji only
+  return true;
+}
+
+/** The sender of a grouped message: the nearest name-like text BEFORE the row.
+ *
+ *  Walks the row's preceding siblings, then repeats one level up, because Meet nests the header and
+ *  the message rows as siblings inside a group wrapper. Returns "" when nothing plausible is found —
+ *  the caller then reports "Unknown" honestly rather than inventing an author. */
+function senderFromHeader(row: Element): string {
+  let node: Element | null = row;
+  for (let depth = 0; depth < 4 && node; depth++, node = node.parentElement) {
+    let sib: Element | null = node.previousElementSibling;
+    for (let n = 0; n < 6 && sib; n++, sib = sib.previousElementSibling) {
+      // A preceding MESSAGE ROW is not a header. Without this the second message of a run takes the
+      // first message's text as its author whenever that text is short enough to look like a name.
+      if (isMessageRow(sib)) continue;
+      // Prefer an explicit sender element in the header, else its own short text.
+      const explicit = textOfIn(sib, gmeetChatSenderSelectors);
+      if (explicit && looksLikeName(explicit)) return explicit;
+      const own = (sib.textContent || '').trim();
+      if (looksLikeName(own)) return own;
+    }
+  }
+  return '';
+}
+
+/** `textOf` for a node OUTSIDE a chat instance (the module-level header scan). */
+function textOfIn(root: Element, selectors: string[]): string {
+  for (const sel of selectors) {
+    const t = root.querySelector(sel)?.textContent?.trim();
+    if (t) return t;
+  }
+  return '';
+}
+
 export function createGmeetChat(opts: GmeetChatOptions): GmeetChat {
   const log = opts.log || (() => {});
   const autoOpen = opts.autoOpen !== false;
@@ -224,14 +273,18 @@ export function createGmeetChat(opts: GmeetChatOptions): GmeetChat {
     let sender = node.getAttribute('data-sender-name') || textOf(node, gmeetChatSenderSelectors);
     let text = node.getAttribute('data-message-text') || textOf(node, gmeetChatTextSelectors);
 
-    // Grouped runs: Meet renders one header for consecutive messages from the same person, so the
-    // sender lives on an ancestor rather than the row.
+    // Grouped runs: Meet renders ONE header for a run of messages from the same person, and that
+    // header is OUTSIDE the message row. Live evidence — the whole row was:
+    //   ["div.jO4O1","div.ptNLrf","div[jsname=dTKtvb]","div >marcin said sooo"]
+    // no author anywhere in it. So searching the row, or querying ancestors for a sender selector,
+    // can never find it; the name has to be looked for BEFORE the row in document order.
     if (!sender) {
       let cur: Element | null = node.parentElement;
-      for (let i = 0; i < 4 && cur && !sender; i++, cur = cur.parentElement) {
+      for (let i = 0; i < 5 && cur && !sender; i++, cur = cur.parentElement) {
         sender = cur.getAttribute?.('data-sender-name') || textOf(cur, gmeetChatSenderSelectors);
       }
     }
+    if (!sender) sender = senderFromHeader(node);
     // Leaf-text fallbacks. These run INDEPENDENTLY: the sender fallback used to be nested inside
     // `if (!text)`, so a row whose BODY matched a selector never got its sender recovered — every
     // message came back "Unknown". (Found live; the unit fixtures all had data-sender-name.)
@@ -280,7 +333,12 @@ export function createGmeetChat(opts: GmeetChatOptions): GmeetChat {
     // log says what the DOM actually looks like instead of costing a rebuild to find out.
     if (!dumped) {
       dumped = true;
-      log(`first message row structure: ${JSON.stringify(dumpNode(node)).slice(0, 900)}`);
+      log(`first message row structure: ${JSON.stringify(dumpNode(node)).slice(0, 700)}`);
+      // The author is NOT in the row (proved live), so dump the GROUP around it as well — that is
+      // where the header lives and where a selector fix has to aim.
+      if (node.parentElement) {
+        log(`its parent group: ${JSON.stringify(dumpNode(node.parentElement)).slice(0, 900)}`);
+      }
       log(`extracted sender=${JSON.stringify(msg.sender)} from the row above`);
     }
     // Echo control, two independent guards. The text guard is the load-bearing one — Meet gave the

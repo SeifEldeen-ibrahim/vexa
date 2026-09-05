@@ -293,6 +293,11 @@ def build_unit_env(settings: Settings, invocation: dict, *, unit_id: str, token:
         "VEXA_WORKSPACE_MOUNT_TARGET": root,                      # where the Runtime binds it in the container
         "VEXA_WORKSPACE_PATH": _worker_cwd(root, subject, mounts),  # the worker's cwd — the primary baseline, or (if it's switched off) the first active normal workspace
         "VEXA_MOUNTS": json.dumps(mounts),                       # the ordered active mount set [{slug,path,role,write,primary}]
+        # The turn's TOOL SET. `unit.v1` carries `tools`; the worker reads VEXA_CHAT_TOOLS. Absent ⇒
+        # the worker's research-capable default. The literal `none` is a TOOL-LESS turn: it cannot
+        # open a file at all, which is the only reliable way to stop a turn reading private material
+        # ALOUD into a room — read-only mounts stop writes, not exfiltration.
+        **({"VEXA_CHAT_TOOLS": ",".join(invocation["tools"])} if invocation.get("tools") else {}),
         "VEXA_WORKSPACE_STORE_URL": settings.workspace_store_url,
         "REDIS_URL": settings.redis_url,
     }

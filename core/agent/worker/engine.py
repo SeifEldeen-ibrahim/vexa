@@ -302,7 +302,10 @@ def run_turn_over_workspace(
     active mounts to the model, drive ``run_harness_turn`` (which commits EACH changed mount, authored by
     the dispatch principal), and persist the captured session id. A stale resume (the harness session
     expired) retries fresh once.
-    ``allowed_tools`` defaults to Read/Write/Edit; pass ``["Read"]`` for a propose-only (no-write) turn.
+    ``allowed_tools`` defaults to Read/Write/Edit when it is ``None``; pass ``["Read"]`` for a
+    propose-only (no-write) turn, or ``[]`` for a TOOL-LESS turn that can only answer from its prompt.
+    ``[]`` and ``None`` are deliberately different: an empty list is a caller saying "no tools", and
+    reading it as "use the defaults" is how a restricted turn silently gets Read/Write/Edit back.
     ``session`` namespaces the continuity file so chat threads stay distinct (default ``"main"``)."""
     _ensure_repo(work)
     # Resolve the harness through the worker.worker seam at call time so a test patching
@@ -318,7 +321,7 @@ def run_turn_over_workspace(
     # session_continuity=False (the meeting copilot): never read/write the shared chat session — its
     # card-extraction beats must NOT pollute the user's chat conversation memory.
     resume = _resume_id(chat_root, sess_file, harness) if session_continuity else None
-    allowed = allowed_tools or ["Read", "Write", "Edit"]
+    allowed = ["Read", "Write", "Edit"] if allowed_tools is None else list(allowed_tools)
     # Declare the mount set to the model VERBATIM (WP-A1.1) + the write-routing policy (WP-A1.2), so the
     # agent never guesses where it may read/write. Single-mount turns get no mounts preamble; the
     # kg-links rule ([[wikilinks]] render as actionable entity chips) applies to EVERY turn.
@@ -515,9 +518,13 @@ def main() -> None:  # pragma: no cover — the container entrypoint (wired in t
         )
     else:  # chat / routine / event — run the entrypoint, then serve interactive messages
         # Research-capable toolset: WEB search/fetch + the workspace tools. Writes are committed by
-        # run_harness_turn. Override with VEXA_CHAT_TOOLS (comma-separated).
-        chat_tools = (os.environ.get("VEXA_CHAT_TOOLS")
-                      or "Read,Write,Edit,Glob,Grep,Bash,WebSearch,WebFetch").split(",")
+        # run_harness_turn. Override with VEXA_CHAT_TOOLS (comma-separated), or the literal `none`
+        # for a TOOL-LESS turn — one that can only answer from what its prompt already contains.
+        # `none` exists because an empty string cannot express it: `os.environ.get(...) or default`
+        # reads "" as absent and hands the turn the full toolset back.
+        _raw_tools = os.environ.get("VEXA_CHAT_TOOLS")
+        chat_tools = ([] if (_raw_tools or "").strip().lower() == "none"
+                      else (_raw_tools or "Read,Write,Edit,Glob,Grep,Bash,WebSearch,WebFetch").split(","))
         session = os.environ.get("VEXA_CHAT_SESSION") or DEFAULT_CHAT_SESSION
         serve(
             client, out_topic=out_topic, in_topic=os.environ["VEXA_UNIT_IN_TOPIC"],

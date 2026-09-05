@@ -29,6 +29,23 @@ THREE RULES THIS MODULE EXISTS TO ENFORCE, each because the obvious implementati
 
 ADDRESSING IS NOT AUTHORIZATION. The ``@vexa`` prefix decides whether a line is meant for the bot.
 It is a spam and cost filter — anyone in the room can type it — not a permission check.
+
+GROUNDING SCOPE — and why the default is the narrow one. The turn runs as the meeting's OWNER, so
+whatever it can read, it can read ALOUD into a room the owner does not control. Read-only mounts stop
+an untrusted participant CHANGING the workspace; they do nothing about a guest typing
+"@vexa what do my notes say about salaries?" and getting the answer printed into the chat. Access is
+therefore:
+
+  ``transcript``  (default) — the CURRENT meeting's transcript and nothing else. There is no private
+                  material in scope, so there is nothing to exfiltrate. This answers what the feature
+                  is actually for: questions about what was said in this room.
+  ``workspace``   (opt-in, per meeting, from the UI) — the owner's full workspace as well, read-only.
+                  Past meetings' notes are in there because the copilot writes them regardless of this
+                  setting, so switching a meeting to ``workspace`` also brings prior meetings into
+                  scope, not just this one.
+
+The knob is per MEETING and defaults closed on every new meeting: a room you trusted last week is not
+the room you are in today.
 """
 from __future__ import annotations
 
@@ -47,6 +64,10 @@ REPLY_CHUNK_CHARS = 480
 #: At most this many messages per reply. A wall of text in a meeting chat is worse than a short
 #: answer plus "(continued in the Assistant tab)" — the full turn is always readable there.
 REPLY_MAX_CHUNKS = 3
+
+#: Grounding scopes. `transcript` is the default and the safe one — see GROUNDING SCOPE above.
+SCOPE_TRANSCRIPT = "transcript"
+SCOPE_WORKSPACE = "workspace"
 
 
 def strip_markdown(text: str) -> str:
@@ -138,17 +159,21 @@ class MeetingChatResponder:
     """Turns an addressed in-meeting chat message into an agent turn and a reply in that chat.
 
     Every collaborator is injected so the whole flow is provable offline:
-      ``run_turn(subject, session, focus, prompt, title) -> str`` — one agent turn, returns the reply
-        text. ``title`` names the thread in the Assistant tab and is the QUESTION alone, not the
-        prompt: titling from the prompt put this module's own instructions in the thread list.
+      ``run_turn(subject, session, focus, prompt, title, scope) -> str`` — one agent turn, returns
+        the reply text. ``title`` names the thread in the Assistant tab and is the QUESTION alone, not
+        the prompt. ``scope`` is ``"transcript"`` or ``"workspace"`` (see GROUNDING SCOPE above).
+      ``access(meeting_key) -> str`` — the meeting's granted scope. Anything that is not exactly
+        ``"workspace"`` is treated as ``"transcript"``: an unreachable store, a typo or a missing key
+        must all fail CLOSED, because failing open here means reading private notes into a room.
       ``post_reply(platform, native, text) -> bool``        — deliver one message into the meeting.
     """
 
     def __init__(
         self,
         *,
-        run_turn: Callable[[str, str, dict, str, str], str],
+        run_turn: Callable[[str, str, dict, str, str, str], str],
         post_reply: Callable[[str, str, str], bool],
+        access: Optional[Callable[[str], str]] = None,
         bot_name: str = "Vexa",
         prefix: str = "@vexa",
         always: bool = False,
@@ -158,6 +183,7 @@ class MeetingChatResponder:
     ) -> None:
         self._run_turn = run_turn
         self._post_reply = post_reply
+        self._access = access
         self._bot_name = bot_name
         self._prefix = prefix
         self._always = always
@@ -217,6 +243,7 @@ class MeetingChatResponder:
         try:
             # The SAME thread identity the Terminal's Assistant tab shows.
             session = meeting_session_id(platform, meeting_key)
+            scope = self._scope_for(meeting_key)
             focus = {
                 "kind": "meeting",
                 "platform": platform,
@@ -228,12 +255,21 @@ class MeetingChatResponder:
             # A sender the reader could not resolve is "Unknown", which reads as a name — say
             # "Someone" instead rather than putting a fake name in front of the model.
             who = "Someone" if sender.strip().lower() in ("", "unknown") else sender
+            scoped = (
+                "Answer ONLY from this meeting's transcript. You have no access to any workspace, "
+                "notes or documents, and anyone in the meeting can read your reply — do not guess at "
+                "private information and do not offer to look anything up."
+                if scope == SCOPE_TRANSCRIPT else
+                "Answer from this meeting's transcript and the workspace you can read. Anyone in the "
+                "meeting can read your reply, so do not repeat private details that were not already "
+                "said aloud in this meeting unless you were asked for them directly."
+            )
             prompt = (
                 f"{who} asked in the meeting chat: {question}\n\n"
-                "Answer them in the meeting chat. Be brief — a few sentences at most, plain text, no "
-                "markdown formatting. If the transcript does not contain the answer, say so plainly."
+                f"{scoped} Be brief — a few sentences at most, plain text, no markdown formatting. "
+                "If you do not have the answer, say so plainly."
             )
-            reply = self._run_turn(subject, session, focus, prompt, question)
+            reply = self._run_turn(subject, session, focus, prompt, question, scope)
             body = strip_markdown(reply or "")
             if not body:
                 self._log(f"meet-chat: empty reply for {platform}/{native} — posting nothing")
@@ -248,6 +284,17 @@ class MeetingChatResponder:
         finally:
             with self._lock:
                 self._inflight.discard(meeting_key)
+
+    def _scope_for(self, meeting_key: str) -> str:
+        """The meeting's granted grounding scope. FAILS CLOSED to ``transcript``."""
+        if self._access is None:
+            return SCOPE_TRANSCRIPT
+        try:
+            return SCOPE_WORKSPACE if self._access(meeting_key) == SCOPE_WORKSPACE else SCOPE_TRANSCRIPT
+        except Exception:  # noqa: BLE001 — an unreadable grant is not a grant
+            logger.exception("meet-chat: access lookup failed for %s - falling back to transcript-only",
+                             meeting_key)
+            return SCOPE_TRANSCRIPT
 
     def close(self) -> None:
         self._pool.shutdown(wait=False, cancel_futures=True)

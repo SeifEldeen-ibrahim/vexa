@@ -258,6 +258,12 @@
       "description": "treat EVERY meeting-chat line as addressed to the bot - a dedicated room only"
     },
     {
+      "key": "VEXA_MEET_CHAT_ANYONE",
+      "class": "defaulted",
+      "default": "false",
+      "description": "answer EVERY participant who addresses the bot, not just the meeting owner; off by default because the turn runs as the owner and Meet chat has no private replies"
+    },
+    {
       "key": "VEXA_MEET_CHAT_MIN_INTERVAL_S",
       "class": "defaulted",
       "default": "5",

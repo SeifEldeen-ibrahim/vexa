@@ -27,8 +27,17 @@ THREE RULES THIS MODULE EXISTS TO ENFORCE, each because the obvious implementati
    ``units.mode_for("message")`` grants ``rw`` because a chat turn is normally the owner typing; that
    assumption does not hold here, so the dispatch pins ``ro`` explicitly rather than inheriting it.
 
-ADDRESSING IS NOT AUTHORIZATION. The ``@vexa`` prefix decides whether a line is meant for the bot.
-It is a spam and cost filter — anyone in the room can type it — not a permission check.
+WHO MAY ASK. By default only the meeting's OWNER is answered; everyone else is read and ignored.
+That is the real permission check — the ``@vexa`` prefix is only a spam and cost filter, and anyone
+in the room can type it.
+
+Matching is by DISPLAY NAME, because that is all Google Meet gives a bot: its chat carries a
+participant's name and no email, account id or any other identity. So "is this the owner?" is
+answered by comparing the chat name against the owner's account name and their email's local part.
+That is a heuristic, and it is stated as one: a participant who sets their Meet display name to the
+owner's would pass it. It bounds casual use, not a determined impersonator — the transcript-only
+default is what bounds the damage either way. Set ``VEXA_MEET_CHAT_ANYONE=true`` to answer the whole
+room instead.
 
 GROUNDING SCOPE — and why the default is the narrow one. The turn runs as the meeting's OWNER, so
 whatever it can read, it can read ALOUD into a room the owner does not control. Read-only mounts stop
@@ -39,10 +48,12 @@ therefore:
   ``transcript``  (default) — the CURRENT meeting's transcript and nothing else. There is no private
                   material in scope, so there is nothing to exfiltrate. This answers what the feature
                   is actually for: questions about what was said in this room.
-  ``workspace``   (opt-in, per meeting, from the UI) — the owner's full workspace as well, read-only.
-                  Past meetings' notes are in there because the copilot writes them regardless of this
-                  setting, so switching a meeting to ``workspace`` also brings prior meetings into
-                  scope, not just this one.
+  ``workspace``   (opt-in, per meeting, from the UI) — the owner's full workspace, READ-ONLY, plus
+                  the search and web tools that make it useful. Past meetings' notes are in there
+                  because the copilot writes them regardless of this setting, so switching a meeting
+                  to ``workspace`` also brings prior meetings into scope, not just this one. Write
+                  and shell tools stay off in BOTH scopes: the request comes from a room the owner
+                  does not control.
 
 The knob is per MEETING and defaults closed on every new meeting: a room you trusted last week is not
 the room you are in today.
@@ -68,6 +79,38 @@ REPLY_MAX_CHUNKS = 3
 #: Grounding scopes. `transcript` is the default and the safe one — see GROUNDING SCOPE above.
 SCOPE_TRANSCRIPT = "transcript"
 SCOPE_WORKSPACE = "workspace"
+
+
+def owner_display_names(name: "str | None", email: "str | None") -> set:
+    """The display names that count as the owner, lower-cased.
+
+    Google Meet shows a chosen display name ("Seif Ibrahim"), while the account may only have an
+    email ("seif@biami.io"). So the local part is included, and matching is per WORD as well as
+    whole-string: "seif" matches "Seif Ibrahim". Dots and underscores in a local part are split too
+    ("ada.lovelace@x" → "ada", "lovelace")."""
+    out: set = set()
+    for v in (name, email):
+        v = (v or "").strip().lower()
+        if not v:
+            continue
+        if "@" in v:
+            v = v.split("@", 1)[0]
+        out.add(v)
+        for part in re.split(r"[.\s_+-]+", v):
+            if len(part) >= 3:
+                out.add(part)
+    return {v for v in out if v}
+
+
+def is_owner(sender: "str | None", accepted: set) -> bool:
+    """Does this chat display name belong to the owner? Empty ``accepted`` ⇒ False (fail closed:
+    an identity we could not resolve is not a match)."""
+    who = (sender or "").strip().lower()
+    if not who or not accepted:
+        return False
+    if who in accepted:
+        return True
+    return any(w in accepted for w in re.split(r"[.\s_+-]+", who) if len(w) >= 3)
 
 
 def strip_markdown(text: str) -> str:
@@ -133,6 +176,22 @@ def meeting_session_id(platform: str, meeting_key: str) -> str:
     return f"meet-{safe(platform)}-{safe(meeting_key)}"
 
 
+def address_to(reply: str, sender: str) -> str:
+    """Prefix a reply with the asker's name, so a busy chat shows who each answer is for.
+
+    THIS IS NOT PRIVACY, and the distinction matters. Google Meet's in-call chat has no direct
+    messages — every message goes to everyone in the room, and a bot cannot opt out of that. So the
+    most that can be done here is to ADDRESS the reply; everyone still sees it. Anything that must
+    not be readable by the room must not be asked for in the room: that is what the transcript-only
+    default is for.
+
+    An unresolved sender gets no prefix rather than a fake one ("Unknown, ...")."""
+    who = (sender or "").strip()
+    if not who or who.lower() in ("unknown", "someone"):
+        return reply
+    return f"@{who} {reply}"
+
+
 def addressed_question(text: str, *, bot_name: str, prefix: str, always: bool = False) -> Optional[str]:
     """The question a chat line is asking the bot, or ``None`` when it is not addressed to it.
 
@@ -177,6 +236,8 @@ class MeetingChatResponder:
         bot_name: str = "Vexa",
         prefix: str = "@vexa",
         always: bool = False,
+        anyone: bool = False,
+        owner_identity: Optional[Callable[[str], "tuple"]] = None,
         max_workers: int = 2,
         min_interval_s: float = 5.0,
         log: Optional[Callable[[str], None]] = None,
@@ -187,6 +248,8 @@ class MeetingChatResponder:
         self._bot_name = bot_name
         self._prefix = prefix
         self._always = always
+        self._anyone = anyone
+        self._owner_identity = owner_identity
         self._min_interval_s = min_interval_s
         self._log = log or (lambda m: logger.info("%s", m))
         # Bounded on purpose: a Meet bot is already most of this box's CPU, and every turn is a
@@ -210,7 +273,8 @@ class MeetingChatResponder:
         """Consider one ``source:'chat'`` segment. Returns a verdict string (for logs and tests);
         never raises, never blocks, and never runs the turn on the caller's thread.
 
-        Verdicts: ``not-addressed`` · ``no-owner`` · ``busy`` · ``rate-limited`` · ``accepted``.
+        Verdicts: ``not-addressed`` · ``no-owner`` · ``not-owner`` · ``busy`` · ``rate-limited`` ·
+        ``accepted``.
         """
         try:
             question = addressed_question(text, bot_name=self._bot_name, prefix=self._prefix, always=self._always)
@@ -223,6 +287,10 @@ class MeetingChatResponder:
                 self._log(f"meet-chat: no ownerUserId on {platform}/{native} — refusing to answer "
                           f"(a placeholder subject would answer from the wrong workspace)")
                 return "no-owner"
+            # WHO MAY ASK — the real permission check, before any work is done.
+            if not self._anyone and not self._sender_is_owner(subject, sender):
+                self._log(f"meet-chat: ignoring a question from {sender!r} — not the meeting owner")
+                return "not-owner"
             now = time.monotonic()
             with self._lock:
                 if meeting_key in self._inflight:
@@ -260,9 +328,11 @@ class MeetingChatResponder:
                 "notes or documents, and anyone in the meeting can read your reply — do not guess at "
                 "private information and do not offer to look anything up."
                 if scope == SCOPE_TRANSCRIPT else
-                "Answer from this meeting's transcript and the workspace you can read. Anyone in the "
-                "meeting can read your reply, so do not repeat private details that were not already "
-                "said aloud in this meeting unless you were asked for them directly."
+                "Answer from this meeting's transcript, the workspace you can read, and the web if "
+                "it helps. You cannot change anything — you have no write or shell tools, so do not "
+                "offer to edit or create files. EVERYONE IN THE MEETING CAN READ YOUR REPLY: do not "
+                "volunteer private details from the workspace that were not already said aloud here "
+                "unless you were asked for them directly."
             )
             prompt = (
                 f"{who} asked in the meeting chat: {question}\n\n"
@@ -274,6 +344,7 @@ class MeetingChatResponder:
             if not body:
                 self._log(f"meet-chat: empty reply for {platform}/{native} — posting nothing")
                 return
+            body = address_to(body, sender)
             for chunk in chunk_reply(body):
                 if not self._post_reply(platform, native, chunk):
                     self._log(f"meet-chat: reply delivery failed for {platform}/{native}")
@@ -284,6 +355,18 @@ class MeetingChatResponder:
         finally:
             with self._lock:
                 self._inflight.discard(meeting_key)
+
+    def _sender_is_owner(self, subject: str, sender: str) -> bool:
+        """Is this chat display name the meeting's owner? FAILS CLOSED — an identity service that is
+        down means nobody is answered, which is quieter than answering everybody."""
+        if self._owner_identity is None:
+            return False
+        try:
+            name, email = self._owner_identity(subject)
+        except Exception:  # noqa: BLE001
+            logger.exception("meet-chat: owner identity lookup failed for subject %s", subject)
+            return False
+        return is_owner(sender, owner_display_names(name, email))
 
     def _scope_for(self, meeting_key: str) -> str:
         """The meeting's granted grounding scope. FAILS CLOSED to ``transcript``."""

@@ -300,6 +300,7 @@ agentApi:
     enabled: false
     prefix: "@vexa"
     always: false               # true = treat EVERY chat line as addressed; a dedicated room only
+    anyone: false               # true = answer every participant, not just the meeting owner
     minIntervalSeconds: 5       # bounds a participant pasting the address repeatedly
   replicaCount: 1               # shares a workspace store with spawned workers; keep single for RWO PVC
   image:

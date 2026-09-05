@@ -58,10 +58,16 @@ to an unmounted surface returns `404` on every deployment.
   or the transcript API.
 
 <Warning>
-**Anyone in the meeting can address the assistant, and it answers as you.** The `@vexa` prefix
-decides whether a line is *meant* for the bot; it is not a permission check, and a guest in the room
-can type it. The turn runs under the meeting owner's identity — so whatever it can read, it can read
-**aloud into a room you do not control**.
+**By default only you are answered.** Anyone in the room can type `@vexa`, but the assistant replies
+only to the meeting's owner and ignores everyone else. The turn runs under your identity, so whatever
+it can read it could read **aloud into a room you do not control** — the owner check is what stops a
+guest driving it.
+
+That check matches on **display name**, because Meet's chat gives a bot a name and nothing else — no
+email, no account id. It is compared against your account name and your email's local part. Treat it
+as a guard against casual use, not against someone deliberately renaming themselves to you; the
+transcript-only default below is what bounds the damage either way. `VEXA_MEET_CHAT_ANYONE=true`
+opens it to the whole room.
 
 That is why the default is narrow: a meeting-chat turn is grounded in **that meeting's transcript
 only**, and is dispatched with **no tools**, so it cannot open a file even in a workspace that is
@@ -75,8 +81,10 @@ they do nothing about one asking the assistant to read your notes out to the roo
 
 On a live meeting the Terminal shows a toggle: **`@vexa: transcript only`** ⇄ **`@vexa: workspace`**.
 
-Granting `workspace` lets that meeting's assistant also read your workspace, read-only — which
-includes **past meetings' notes**, since the copilot writes those regardless of this setting. Grant
+Granting `workspace` lets that meeting's assistant also read your workspace, read-only, and use the
+web — which includes **past meetings' notes**, since the copilot writes those regardless of this
+setting. Write and shell tools stay off in both scopes: the request comes from a room you do not
+control, so the assistant answers and never changes anything. Grant
 it when the room is people you trust with that material, and remember that everyone in the room can
 then ask for it.
 

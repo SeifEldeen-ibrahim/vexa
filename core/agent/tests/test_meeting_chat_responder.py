@@ -19,7 +19,10 @@ import re
 
 from control_plane.meeting_chat_responder import (
     MeetingChatResponder,
+    address_to,
     addressed_question,
+    is_owner,
+    owner_display_names,
     chunk_reply,
     meeting_session_id,
     strip_markdown,
@@ -56,6 +59,10 @@ class _Recorder:
 
 def _responder(rec: _Recorder, **kw) -> MeetingChatResponder:
     kw.setdefault("min_interval_s", 0.0)
+    # These tests are about the rest of the flow, not about WHO may ask, so the owner gate is open
+    # unless a test says otherwise. The gate has its own tests (see "who may ask") which set
+    # `anyone=False` explicitly — the shipped default is owner-only.
+    kw.setdefault("anyone", True)
     return MeetingChatResponder(run_turn=rec.run_turn, post_reply=rec.post_reply, **kw)
 
 
@@ -106,7 +113,7 @@ def test_an_addressed_message_runs_a_turn_and_posts_the_answer_back_to_the_meeti
     r = _responder(rec)
     assert _offer(r, "@vexa what did we decide?") == "accepted"
     _settle(rec)
-    assert rec.posts == [("google_meet", "abc-defg-hij", "We decided to ship on Friday.")]
+    assert rec.posts == [("google_meet", "abc-defg-hij", "@Ada We decided to ship on Friday.")]
     r.close()
 
 
@@ -199,6 +206,15 @@ def test_the_thread_is_titled_with_the_question_not_the_prompt_scaffolding():
 
 # ── grounding scope: what a guest in the room can get read out to them ────────────────────
 
+def test_the_shipped_default_is_owner_only():
+    """The constructor default — not the test helper's — is that only the owner is answered."""
+    rec = _Recorder()
+    r = MeetingChatResponder(run_turn=rec.run_turn, post_reply=rec.post_reply, min_interval_s=0.0,
+                             owner_identity=lambda s: ("Seif", "seif@biami.io"))
+    assert _offer(r, "@vexa hi", sender="Marcin") == "not-owner"
+    r.close()
+
+
 def test_the_default_scope_is_transcript_only():
     """No access resolver at all ⇒ the narrow scope. A deployment that forgets to wire the grant
     store must not thereby grant everyone the owner's workspace."""
@@ -258,11 +274,23 @@ def test_the_prompt_tells_a_transcript_turn_it_has_no_workspace():
 
 
 def test_a_workspace_turn_is_still_warned_that_the_room_can_read_the_reply():
+    """Meet has no direct messages, so a workspace-scoped turn must know its answer is public."""
     rec = _Recorder()
     r = _responder(rec, access=lambda k: "workspace")
     _offer(r, "@vexa what did we decide?")
     _settle(rec)
-    assert "anyone in the meeting can read your reply" in rec.turns[0][3].lower()
+    prompt = rec.turns[0][3].lower()
+    assert "everyone in the meeting can read your reply" in prompt
+    r.close()
+
+
+def test_a_workspace_turn_is_told_it_cannot_change_anything():
+    """It has Read/Glob/Grep/Web but no Write/Edit/Bash — it must not offer edits it cannot make."""
+    rec = _Recorder()
+    r = _responder(rec, access=lambda k: "workspace")
+    _offer(r, "@vexa tidy up my notes")
+    _settle(rec)
+    assert "no write or shell tools" in rec.turns[0][3]
     r.close()
 
 
@@ -316,7 +344,7 @@ def test_a_failing_turn_never_escapes_and_frees_the_meeting_for_the_next_questio
 
     posts: list = []
     r = MeetingChatResponder(run_turn=boom, post_reply=lambda *a: posts.append(a) or True,
-                             min_interval_s=0.0)
+                             min_interval_s=0.0, anyone=True)
     assert _offer(r, "@vexa hi") == "accepted"
     time.sleep(0.2)
     assert posts == []
@@ -331,6 +359,28 @@ def test_an_empty_reply_posts_nothing():
     _offer(r, "@vexa hi")
     time.sleep(0.2)
     assert rec.posts == []
+    r.close()
+
+
+# ── addressing the reply ──────────────────────────────────────────────────────────────────
+# Meet's in-call chat has NO direct messages: every message reaches the whole room and a bot cannot
+# opt out. Naming the asker is the most that is achievable — it is a readability aid, NOT privacy.
+
+def test_the_reply_names_who_asked():
+    assert address_to("Friday.", "Ada Lovelace") == "@Ada Lovelace Friday."
+
+
+def test_an_unresolved_asker_gets_no_fake_name():
+    for who in ("", "   ", "Unknown", "someone"):
+        assert address_to("Friday.", who) == "Friday."
+
+
+def test_the_posted_reply_is_addressed():
+    rec = _Recorder(reply="Friday.")
+    r = _responder(rec)
+    _offer(r, "@vexa when do we ship?", sender="Grace Hopper")
+    _settle(rec)
+    assert rec.posts[0][2] == "@Grace Hopper Friday."
     r.close()
 
 
@@ -369,3 +419,73 @@ def test_chunking_an_empty_reply_yields_nothing():
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))
+
+
+# ── who may ask ───────────────────────────────────────────────────────────────────────────
+# Meet's chat gives a bot a display NAME and nothing else — no email, no account id — so the owner
+# check is name matching, and is documented as the heuristic it is.
+
+def test_owner_names_cover_the_account_name_and_the_email_local_part():
+    got = owner_display_names("Seif Ibrahim", "seif@biami.io")
+    assert "seif ibrahim" in got and "seif" in got and "ibrahim" in got
+    assert "biami.io" not in got            # the domain is not a name
+
+
+def test_owner_names_split_a_dotted_local_part():
+    got = owner_display_names(None, "ada.lovelace@example.test")
+    assert "ada" in got and "lovelace" in got
+
+
+def test_owner_names_drop_initials_too_short_to_identify_anyone():
+    assert "a" not in owner_display_names(None, "a.lovelace@example.test")
+
+
+def test_the_owner_is_recognised_by_their_meet_display_name():
+    accepted = owner_display_names(None, "seif@biami.io")
+    assert is_owner("Seif Ibrahim", accepted)      # the real case, from a live meeting
+    assert is_owner("seif", accepted)
+    assert is_owner("SEIF IBRAHIM", accepted)
+
+
+def test_a_stranger_is_not_the_owner():
+    accepted = owner_display_names("Seif Ibrahim", "seif@biami.io")
+    for who in ("Marcin", "Guest", "", None, "Unknown"):
+        assert not is_owner(who, accepted), who
+
+
+def test_an_unresolvable_identity_matches_nobody():
+    """Fail closed: answering everybody is worse than answering nobody."""
+    assert not is_owner("Seif Ibrahim", set())
+    assert not is_owner("Seif Ibrahim", owner_display_names(None, None))
+
+
+def test_only_the_owner_gets_an_answer():
+    rec = _Recorder()
+    r = _responder(rec, anyone=False, owner_identity=lambda s: ("Seif Ibrahim", "seif@biami.io"))
+    assert _offer(r, "@vexa what did we decide?", sender="Marcin") == "not-owner"
+    time.sleep(0.05)
+    assert rec.turns == [] and rec.posts == []
+    assert _offer(r, "@vexa what did we decide?", sender="Seif Ibrahim") == "accepted"
+    _settle(rec)
+    assert len(rec.posts) == 1
+    r.close()
+
+
+def test_a_failing_identity_lookup_answers_nobody():
+    def boom(_s):
+        raise RuntimeError("admin-api down")
+
+    rec = _Recorder()
+    r = _responder(rec, anyone=False, owner_identity=boom)
+    assert _offer(r, "@vexa hi", sender="Seif Ibrahim") == "not-owner"
+    time.sleep(0.05)
+    assert rec.turns == []
+    r.close()
+
+
+def test_anyone_mode_answers_the_whole_room():
+    rec = _Recorder()
+    r = _responder(rec, anyone=True, owner_identity=lambda s: ("Seif", "seif@biami.io"))
+    assert _offer(r, "@vexa hi", sender="A Total Stranger") == "accepted"
+    _settle(rec)
+    r.close()

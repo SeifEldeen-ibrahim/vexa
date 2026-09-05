@@ -925,6 +925,22 @@ def create_app() -> FastAPI:
         row = await db.get(PlatformSetting, key)
         return dict(row.value) if row is not None and isinstance(row.value, dict) else {}
 
+    @app.get("/internal/users/{user_id}/identity", include_in_schema=False)
+    async def get_user_identity(user_id: str, request: Request, db: AsyncSession = Depends(get_db)):
+        """The owner's display identity — name + email — for callers that must decide whether a
+        HUMAN they only know by display name is this user.
+
+        The in-meeting chat assistant needs exactly this: Google Meet's chat gives a bot a display
+        name and nothing else (no email, no account id), so "is this message from the meeting's
+        owner?" can only be answered by comparing that name against what we know of them. Returning
+        the pair rather than a yes/no keeps the matching rule in the caller, where it can be tuned
+        without an identity-service deploy.
+
+        Internal tier only (never exposed through the gateway): it discloses a user's email."""
+        _check_internal(request)
+        user = await _load_user(user_id, db)
+        return {"id": user.id, "name": user.name or None, "email": user.email}
+
     @app.get("/internal/users/{user_id}/bot-context", include_in_schema=False)
     async def get_bot_context(user_id: str, request: Request, db: AsyncSession = Depends(get_db)):
         _check_internal(request)

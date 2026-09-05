@@ -97,6 +97,8 @@ spec:
               value: {{ .Values.agentApi.meetChat.prefix | default "@vexa" | quote }}
             - name: VEXA_MEET_CHAT_ALWAYS
               value: {{ .Values.agentApi.meetChat.always | default false | quote }}
+            - name: VEXA_MEET_CHAT_ANYONE
+              value: {{ .Values.agentApi.meetChat.anyone | default false | quote }}
             - name: VEXA_MEET_CHAT_MIN_INTERVAL_S
               value: {{ .Values.agentApi.meetChat.minIntervalSeconds | default 5 | quote }}
             # The responder answers to this name as well as to the prefix.

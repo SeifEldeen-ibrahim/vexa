@@ -1211,6 +1211,11 @@ def create_app(
         start_id = cursor or "0-0"
         return {"native_id": body.native_id, "meeting_id": row_id, "processing": True, "resumed_from": start_id}
 
+    #: What a WORKSPACE-scoped meeting-chat turn may use: the owner's workspace (read), the search
+    #: tools that make it useful, and the network. Deliberately NOT Write/Edit/Bash — the request
+    #: comes from a room the owner does not control, so the turn answers and never changes anything.
+    MEET_CHAT_WORKSPACE_TOOLS = ["Read", "Glob", "Grep", "WebSearch", "WebFetch"]
+
     def _meet_chat_access_key(row: str) -> str:
         return f"meetchat:meeting:{row}:workspace"
 
@@ -2405,11 +2410,16 @@ def create_app(
         # TRANSCRIPT scope is TOOL-LESS. unit.v1 requires at least one granted workspace, so the
         # mount cannot simply be removed — but a turn with no tools cannot open a file in it either,
         # and that is the property that matters: there is nothing private it can read out loud.
-        # WORKSPACE scope keeps the read-only mount and the ordinary chat toolset.
+        #
+        # WORKSPACE scope is the full research turn the Assistant tab gets — the workspace AND the
+        # network — minus the WRITE tools. The input is still untrusted (anyone in the room can
+        # address it), and a participant should not be able to make the owner's agent edit files or
+        # run shell; reading and answering is the whole job here. The mount is read-only as well, so
+        # the two guards are independent.
         inv = units.make_dispatch(
             subject=subject, trigger="message",
             start=units.entrypoint(inline=grounded), context=ctx,
-            tools=(tools if scope == SCOPE_WORKSPACE else ["none"]),
+            tools=(MEET_CHAT_WORKSPACE_TOOLS if scope == SCOPE_WORKSPACE else ["none"]),
             workspaces=[{"id": subject, "mode": "ro"}],
         )
         unit_id = units.dispatch_id(inv)
@@ -2482,6 +2492,30 @@ def create_app(
         return SCOPE_WORKSPACE if r.get(_meet_chat_access_key(str(meeting_key))) == SCOPE_WORKSPACE \
             else SCOPE_TRANSCRIPT
 
+    _owner_identity_cache: dict = {}
+
+    def _meet_chat_owner_identity(subject: str):
+        """(name, email) for a subject, from the identity service's internal tier. Cached — a
+        meeting's owner does not change mid-call, and this is on the path of every question."""
+        import urllib.request
+
+        key = str(subject)
+        if key in _owner_identity_cache:
+            return _owner_identity_cache[key]
+        secret = os.environ.get("INTERNAL_API_SECRET", "")
+        base = (os.environ.get("VEXA_ADMIN_API_URL") or os.environ.get("ADMIN_API_URL") or "").rstrip("/")
+        if not (secret and base):
+            logger.warning("meet-chat: no internal identity route configured - nobody will be "
+                           "recognised as the owner")
+            return (None, None)
+        req = urllib.request.Request(f"{base}/internal/users/{key}/identity",
+                                     headers={"Authorization": f"Bearer {secret}"})
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            body = json.loads(resp.read().decode() or "{}")
+        ident = (body.get("name"), body.get("email"))
+        _owner_identity_cache[key] = ident
+        return ident
+
     responder = None
     if _env_flag("VEXA_MEET_CHAT_ENABLED", default=False):
         responder = MeetingChatResponder(
@@ -2491,6 +2525,9 @@ def create_app(
             bot_name=os.environ.get("DEFAULT_BOT_NAME", "Vexa"),
             prefix=os.environ.get("VEXA_MEET_CHAT_PREFIX", "@vexa"),
             always=_env_flag("VEXA_MEET_CHAT_ALWAYS", default=False),
+            # Default: only the meeting's OWNER is answered. Everyone else is read and ignored.
+            anyone=_env_flag("VEXA_MEET_CHAT_ANYONE", default=False),
+            owner_identity=_meet_chat_owner_identity,
             min_interval_s=float(os.environ.get("VEXA_MEET_CHAT_MIN_INTERVAL_S", "5")),
         )
         app.state.meet_chat_responder = responder

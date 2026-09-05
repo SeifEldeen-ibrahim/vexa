@@ -206,6 +206,29 @@ def _worker_cwd(root: str, subject: str, mounts: list[dict]) -> str:
     return normal["path"] if normal else f"{root}/{subject}"
 
 
+def _apply_granted_modes(mounts: list[dict], granted: list[dict]) -> list[dict]:
+    """Downgrade each mount to read-only where the dispatch granted ``mode: "ro"``.
+
+    Matching is by workspace id against the mount's slug. A grant that names no mount is ignored (the
+    stack is the source of truth for WHICH workspaces exist); a grant of ``rw`` is a no-op, because
+    this seam may only ever narrow access. An unparseable grant list leaves the stack untouched —
+    failing OPEN on the mount set is wrong, but so is dropping a turn's workspaces on a bad shape, so
+    the narrowing is best-effort and the caller's own gate (tools, trigger) remains the backstop."""
+    try:
+        ro = {str(g.get("id")) for g in granted
+              if isinstance(g, dict) and str(g.get("mode", "")).lower() == "ro"}
+    except Exception:  # noqa: BLE001 — a malformed grant must not break the dispatch
+        return mounts
+    if not ro:
+        return mounts
+    out: list[dict] = []
+    for m in mounts:
+        if m.get("write") and str(m.get("slug")) in ro:
+            m = {**m, "write": False}
+        out.append(m)
+    return out
+
+
 def build_unit_env(settings: Settings, invocation: dict, *, unit_id: str, token: str,
                    memberships: Optional[list[dict]] = None,
                    model_config: Optional[dict] = None) -> dict[str, str]:
@@ -220,6 +243,18 @@ def build_unit_env(settings: Settings, invocation: dict, *, unit_id: str, token:
     # The whole store root is already bound by the runtime, so this is a WORKER-FACING contract (the paths
     # + roles the turn respects), not a per-mount bind — it generalizes uniformly across all three backends.
     mounts = build_mount_set(settings, subject, memberships)
+    # The GRANT on the invocation is authoritative over the rebuilt stack.
+    #
+    # build_mount_set re-derives the active set from the workspace store and stamps `write: True` on
+    # the private baseline unconditionally, which silently discarded a caller's `mode: "ro"` grant:
+    # `unit.v1` said read-only, `VEXA_WORKSPACES` said read-only, and `VEXA_MOUNTS` — the list the
+    # worker actually materializes — said read-write. Proved live: a turn dispatched `ro` from an
+    # untrusted input surface (a question typed in a meeting's own chat, by anyone in the room)
+    # created and COMMITTED a file in the owner's private workspace.
+    #
+    # A grant can only ever REMOVE write here, never add it: a workspace the stack built read-only
+    # (the platform `_global` tier) stays read-only whatever the invocation asks for.
+    mounts = _apply_granted_modes(mounts, invocation.get("workspaces") or [])
     env = {
         "VEXA_OWNER": subject,                                    # quota + cred-brokerage axis = the person
         "VEXA_LAUNCHER": identity["launcher"],

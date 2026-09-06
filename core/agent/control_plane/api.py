@@ -34,6 +34,7 @@ from jsonschema.exceptions import ValidationError
 from pydantic import BaseModel
 
 from control_plane import meeting_steering
+from control_plane.meet_identity import MeetIdentityResolver
 from control_plane.meeting_chat_responder import (
     MeetingChatResponder, SCOPE_TRANSCRIPT, SCOPE_WORKSPACE,
 )
@@ -2514,6 +2515,38 @@ def create_app(
 
     _owner_identity_cache: dict = {}
 
+    def _meet_google_credentials(subject: str):
+        """(refresh_token, google_account_id) for a subject, from the identity tier."""
+        import urllib.request
+
+        secret = os.environ.get("INTERNAL_API_SECRET", "")
+        base = (os.environ.get("VEXA_ADMIN_API_URL") or "").rstrip("/")
+        if not (secret and base):
+            return (None, None)
+        req = urllib.request.Request(f"{base}/internal/users/{subject}/google-grant",
+                                     headers={"X-Internal-Secret": secret})
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            body = json.loads(resp.read().decode() or "{}")
+        return (body.get("refresh_token"), body.get("sub"))
+
+    _meet_resolver = None
+    if _env_flag("VEXA_GOOGLE_MEET_IDENTITY", default=False):
+        _gid = os.environ.get("GOOGLE_CLIENT_ID", "")
+        _gsecret = os.environ.get("GOOGLE_CLIENT_SECRET", "")
+        if _gid and _gsecret:
+            _meet_resolver = MeetIdentityResolver(
+                credentials=_meet_google_credentials, client_id=_gid, client_secret=_gsecret)
+        else:
+            logger.warning("VEXA_GOOGLE_MEET_IDENTITY is on but GOOGLE_CLIENT_ID/SECRET are unset - "
+                           "the in-meeting assistant cannot identify anyone")
+
+    def _meet_chat_identity(subject: str, native: str, sender: str) -> dict:
+        """Ask Google who this chat sender is. Returns the resolver's verdict, or a neutral
+        'unavailable' when Meet identity is not configured — never a match."""
+        if _meet_resolver is None:
+            return {"status": "unconfigured", "user_id": None, "is_owner": False}
+        return _meet_resolver.resolve(subject, native, sender)
+
     def _meet_chat_owner_identity(subject: str):
         """(name, email) for a subject, from the identity service's internal tier. Cached — a
         meeting's owner does not change mid-call, and this sits on the path of every question."""
@@ -2564,6 +2597,9 @@ def create_app(
             anyone=_env_flag("VEXA_MEET_CHAT_ANYONE", default=False),
             anyone_for=_meet_chat_anyone,
             owner_identity=_meet_chat_owner_identity,
+            # Google's own answer to "which account is this?", when the deployment has the grant.
+            # It outranks every name comparison — see the responder's identity ladder.
+            meet_identity=_meet_chat_identity,
             # Extra display names that count as the owner. Needed because Meet shows a chosen name
             # ("Seif Ibrahim") while an account may only know an email ("seif@..."), and the match is
             # whole-name — a first name is not an identity.

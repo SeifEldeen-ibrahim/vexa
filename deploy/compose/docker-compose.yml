@@ -273,6 +273,11 @@ services:
       # getting the owner's agent to answer in front of the room.
       - VEXA_MEET_CHAT_ANYONE=${VEXA_MEET_CHAT_ANYONE:-false}
       - VEXA_MEET_CHAT_OWNER_NAMES=${VEXA_MEET_CHAT_OWNER_NAMES:-}
+      # Ask GOOGLE which account a meeting-chat sender is, instead of trusting a display name that
+      # two accounts can share. Needs the owner's one-time read-only grant at sign-in.
+      - VEXA_GOOGLE_MEET_IDENTITY=${VEXA_GOOGLE_MEET_IDENTITY:-false}
+      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID:-}
+      - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET:-}
       - VEXA_MEET_CHAT_MIN_INTERVAL_S=${VEXA_MEET_CHAT_MIN_INTERVAL_S:-5}
       # The name the responder answers to, alongside the prefix.
       - DEFAULT_BOT_NAME=${DEFAULT_BOT_NAME:-Vexa}
@@ -554,6 +559,10 @@ services:
       #   Microsoft → ${NEXTAUTH_URL}/api/auth/callback/microsoft
       - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID:-}
       - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET:-}
+      # When on, the Google sign-in also asks for the read-only Meet scope and keeps the refresh
+      # token, so the in-meeting assistant can ask Google WHICH ACCOUNT typed a chat message. Adds a
+      # line to the consent screen and forces prompt=consent, so it is opt-in.
+      - VEXA_GOOGLE_MEET_IDENTITY=${VEXA_GOOGLE_MEET_IDENTITY:-false}
       - MICROSOFT_CLIENT_ID=${MICROSOFT_CLIENT_ID:-}
       - MICROSOFT_CLIENT_SECRET=${MICROSOFT_CLIENT_SECRET:-}
       # Microsoft tenant: "common" = work/school + personal accounts; or a specific tenant id for org-only.

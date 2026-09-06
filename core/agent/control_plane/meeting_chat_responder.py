@@ -42,7 +42,13 @@ two Google accounts can carry the same one, and anyone in a meeting can set thei
                   was wrong — Meet exposes one so rarely that the workspace grant became unreachable,
                   which is a worse failure than the one it prevented.
 
-Identity, in order of strength:
+Identity, in order of strength — and the top rung is the reason this module exists:
+
+  GOOGLE  the Meet REST API says which ACCOUNT each participant in the room is. It settles the
+          question in both directions: a non-owner account is refused outright, and two accounts on
+          one display name are refused out loud. Requires the owner's one-time read-only grant.
+
+
 
   EMAIL   — exact match, and decisive when present. Meet's CHAT carries no email, so the bot reads
             the people panel for one; Meet exposes an address for some participants (typically
@@ -283,6 +289,7 @@ class MeetingChatResponder:
         anyone: bool = False,
         anyone_for: Optional[Callable[[str], bool]] = None,
         owner_identity: Optional[Callable[[str], "tuple"]] = None,
+        meet_identity: Optional[Callable[[str, str, str], dict]] = None,
         owner_names: "list | None" = None,
         max_workers: int = 2,
         min_interval_s: float = 5.0,
@@ -297,6 +304,7 @@ class MeetingChatResponder:
         self._anyone = anyone
         self._anyone_for = anyone_for
         self._owner_identity = owner_identity
+        self._meet_identity = meet_identity
         self._owner_names = owner_names or []
         self._min_interval_s = min_interval_s
         self._log = log or (lambda m: logger.info("%s", m))
@@ -340,11 +348,41 @@ class MeetingChatResponder:
                 self._log(f"meet-chat: no ownerUserId on {platform}/{native} — refusing to answer "
                           f"(a placeholder subject would answer from the wrong workspace)")
                 return "no-owner"
-            # AMBIGUOUS NAME. Two people in the room are using this one, so the message cannot be
-            # attributed to either — and one of them may be the owner. An email settles it; without
-            # one there is nothing to settle it WITH, so say so out loud instead of guessing or
-            # going quiet. `anyone` mode has nobody to impersonate, so it is unaffected.
-            if sender_ambiguous and not sender_email and not anyone:
+            # ── the identity ladder ────────────────────────────────────────────────────────
+            # GOOGLE FIRST, when the deployment has the owner's grant. It is the only source that
+            # knows which ACCOUNT a participant is, rather than what they have called themselves,
+            # and its verdict settles the question in both directions: `matched` means an account
+            # was identified, and a non-owner account is refused outright rather than falling
+            # through to a name comparison the impersonator would pass.
+            meet = self._meet_verdict(subject, native, sender) if not anyone else {"status": "skipped"}
+            meet_status = meet.get("status")
+            if meet_status == "matched":
+                if not meet.get("is_owner"):
+                    logger.warning("meet-chat: REFUSED %r - Google says that is account %s, not the "
+                                   "meeting owner", sender, meet.get("user_id"))
+                    return "not-owner"
+                identity_verified = True
+            elif meet_status == "ambiguous":
+                # Google can SEE two accounts on this name. That is the strongest possible evidence
+                # that the message cannot be attributed — say so out loud.
+                logger.warning("meet-chat: REFUSED %r - Google reports two accounts in this meeting "
+                               "using that display name", sender)
+                try:
+                    self._post_reply(str(owner), platform, native,
+                                     AMBIGUOUS_NAME_REPLY.format(name=sender))
+                except Exception:  # noqa: BLE001
+                    logger.exception("meet-chat: could not post the ambiguous-name notice")
+                return "ambiguous-name"
+            elif meet_status == "anonymous":
+                logger.warning("meet-chat: REFUSED %r - an unauthenticated guest, so that name has "
+                               "no account behind it", sender)
+                return "not-owner"
+            else:
+                identity_verified = False   # unconfigured / unavailable / unknown / no-grant
+
+            # AMBIGUOUS NAME, as the PAGE saw it. Only consulted when Google could not answer —
+            # otherwise the roster above is both more authoritative and more complete.
+            if not identity_verified and sender_ambiguous and not sender_email and not anyone:
                 logger.warning("meet-chat: REFUSED %r - two participants share that display name", sender)
                 try:
                     self._post_reply(str(owner), platform, native,
@@ -352,8 +390,9 @@ class MeetingChatResponder:
                 except Exception:  # noqa: BLE001 — explaining is best effort; the refusal stands
                     logger.exception("meet-chat: could not post the ambiguous-name notice")
                 return "ambiguous-name"
-            # WHO MAY ASK — the real permission check, before any work is done.
-            if not anyone and not self._sender_is_owner(subject, sender, sender_email):
+            # WHO MAY ASK. Skipped when Google already said this IS the owner.
+            if not anyone and not identity_verified \
+                    and not self._sender_is_owner(subject, sender, sender_email):
                 return "not-owner"   # _sender_is_owner already logged WHY, loudly
             now = time.monotonic()
             with self._lock:
@@ -365,7 +404,7 @@ class MeetingChatResponder:
                 self._inflight.add(meeting_key)
                 self._last_at[meeting_key] = now
             self._pool.submit(self._answer, meeting_key, platform, native, subject, sender, question,
-                              sender_email, sender_name_unique)
+                              sender_email, sender_name_unique, identity_verified)
             return "accepted"
         except Exception:  # noqa: BLE001 — the watcher thread must survive anything that happens here
             logger.exception("meet-chat: offer failed for %s", meeting_key)
@@ -374,7 +413,8 @@ class MeetingChatResponder:
     # ── the turn (pool thread) ─────────────────────────────────────────────────────────────────
     def _answer(self, meeting_key: str, platform: str, native: str, subject: str, sender: str,
                 question: str, sender_email: "str | None" = None,
-                sender_name_unique: "bool | None" = None) -> None:
+                sender_name_unique: "bool | None" = None,
+                identity_verified: bool = False) -> None:
         try:
             # The SAME thread identity the Terminal's Assistant tab shows.
             session = meeting_session_id(platform, meeting_key)
@@ -391,7 +431,10 @@ class MeetingChatResponder:
             #                           identifies them. A rename to the owner's name makes it
             #                           NON-unique, which is refused outright above.
             #   no roster at all      — unknown, not "unique". Narrow, and say why.
-            if scope == SCOPE_WORKSPACE and not sender_email and not sender_name_unique:
+            # A Google-verified account is the strongest identity there is, so it opens the archive
+            # on its own — that is the whole reason for building the Meet identity path.
+            if scope == SCOPE_WORKSPACE and not identity_verified \
+                    and not sender_email and not sender_name_unique:
                 logger.warning(
                     "meet-chat: %r asked in a WORKSPACE-scoped meeting with no verified email and no "
                     "roster confirming their name is unique here - answering from the transcript "
@@ -450,6 +493,16 @@ class MeetingChatResponder:
         except Exception:  # noqa: BLE001
             logger.exception("meet-chat: anyone-grant lookup failed for %s", meeting_key)
             return False
+
+    def _meet_verdict(self, subject: str, native: str, sender: str) -> dict:
+        """Google's verdict on who this sender is. Any fault is 'unavailable' — never a match."""
+        if self._meet_identity is None:
+            return {"status": "unconfigured", "is_owner": False}
+        try:
+            return self._meet_identity(subject, native, sender) or {"status": "unavailable", "is_owner": False}
+        except Exception:  # noqa: BLE001
+            logger.exception("meet-chat: Meet identity lookup failed for %s/%s", subject, native)
+            return {"status": "unavailable", "is_owner": False}
 
     def _sender_is_owner(self, subject: str, sender: str, sender_email: "str | None" = None) -> bool:
         """Is this chat display name the meeting's owner? FAILS CLOSED — an identity service that is

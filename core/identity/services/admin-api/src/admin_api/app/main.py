@@ -925,6 +925,53 @@ def create_app() -> FastAPI:
         row = await db.get(PlatformSetting, key)
         return dict(row.value) if row is not None and isinstance(row.value, dict) else {}
 
+    @app.put("/internal/users/{user_id}/google-grant", include_in_schema=False)
+    async def put_google_grant(user_id: str, payload: dict, request: Request,
+                               db: AsyncSession = Depends(get_db)):
+        """Record a user's Google grant: the refresh token, and the account id Google calls them.
+
+        Both come from the sign-in that the user themselves just completed, and both are needed to
+        answer one question later: is the person typing in a meeting's chat the same Google account
+        that owns the meeting? Meet's chat exposes only a display name, and two accounts can carry
+        the same one — so the account ID is the identity and the name is merely how a chat line is
+        matched to a roster row.
+
+        A refresh token is a long-lived credential: it is stored in the user's own record, marked
+        secret so it is masked on every read-back, and never leaves the internal tier."""
+        _check_internal(request)
+        user = await _load_user(user_id, db)
+        data = dict(user.data if isinstance(user.data, dict) else {})
+        google = dict(data.get("google") or {})
+        # A re-sign-in without `prompt=consent` returns no refresh token; keeping the previous one is
+        # correct — dropping it would silently revoke a working grant on an ordinary login.
+        token = (payload or {}).get("refresh_token")
+        if token:
+            google["refresh_token"] = token
+        sub = (payload or {}).get("sub")
+        if sub:
+            google["sub"] = str(sub)
+        scopes = (payload or {}).get("scopes")
+        if scopes:
+            google["scopes"] = scopes
+        from datetime import datetime, timezone
+        google["updated_at"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        data["google"] = google
+        user.data = data
+        await db.commit()
+        return {"id": user.id, "has_refresh_token": bool(google.get("refresh_token")),
+                "sub": google.get("sub")}
+
+    @app.get("/internal/users/{user_id}/google-grant", include_in_schema=False)
+    async def get_google_grant(user_id: str, request: Request, db: AsyncSession = Depends(get_db)):
+        """The stored Google grant, IN THE CLEAR — internal tier only, loopback only, never through
+        the gateway. The caller needs the actual refresh token to mint an access token."""
+        _check_internal(request)
+        user = await _load_user(user_id, db)
+        data = user.data if isinstance(user.data, dict) else {}
+        google = data.get("google") or {}
+        return {"id": user.id, "refresh_token": google.get("refresh_token"),
+                "sub": google.get("sub"), "scopes": google.get("scopes")}
+
     @app.get("/internal/users/{user_id}/identity", include_in_schema=False)
     async def get_user_identity(user_id: str, request: Request, db: AsyncSession = Depends(get_db)):
         """The owner's display identity — name + email — for callers that must decide whether a

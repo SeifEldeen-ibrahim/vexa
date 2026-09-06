@@ -270,6 +270,25 @@
       "description": "extra Meet display names that count as the meeting owner, comma separated; needed when the account knows only an email and the owner's Meet name is fuller (the match is whole-name)"
     },
     {
+      "key": "VEXA_GOOGLE_MEET_IDENTITY",
+      "class": "defaulted",
+      "default": "false",
+      "description": "ask the Meet REST API which Google ACCOUNT a meeting-chat sender is, using the owner's own read-only grant; Meet's chat carries only a display name and two accounts can share one"
+    },
+    {
+      "key": "GOOGLE_CLIENT_ID",
+      "class": "defaulted",
+      "default": "",
+      "description": "the Google OAuth client the sign-in uses; also mints the access token for the Meet identity lookup"
+    },
+    {
+      "key": "GOOGLE_CLIENT_SECRET",
+      "class": "defaulted",
+      "default": "",
+      "secret": true,
+      "description": "secret half of the Google OAuth client, used only to exchange a stored refresh token"
+    },
+    {
       "key": "INTERNAL_API_SECRET",
       "class": "defaulted",
       "default": "",

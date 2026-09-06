@@ -109,6 +109,16 @@ spec:
               value: {{ .Values.agentApi.meetChat.anyone | default false | quote }}
             - name: VEXA_MEET_CHAT_OWNER_NAMES
               value: {{ .Values.agentApi.meetChat.ownerNames | default "" | quote }}
+            - name: VEXA_GOOGLE_MEET_IDENTITY
+              value: {{ .Values.agentApi.meetChat.googleIdentity | default false | quote }}
+            - name: GOOGLE_CLIENT_ID
+              value: {{ .Values.auth.googleClientId | default "" | quote }}
+            - name: GOOGLE_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "vexa.adminTokenSecretName" . }}
+                  key: GOOGLE_CLIENT_SECRET
+                  optional: true
             - name: VEXA_MEET_CHAT_MIN_INTERVAL_S
               value: {{ .Values.agentApi.meetChat.minIntervalSeconds | default 5 | quote }}
             # The responder answers to this name as well as to the prefix.

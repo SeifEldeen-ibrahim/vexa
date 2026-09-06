@@ -711,3 +711,105 @@ def test_every_offer_input_reaches_the_worker_that_uses_it():
                    "platform", "native"}
     missing = (offer_args & per_message) - answer_args - {"text", "sender_ambiguous"}
     assert not missing, f"offer() accepts {sorted(missing)} but _answer() cannot see them"
+
+
+# ── the identity ladder: Google outranks every name comparison ────────────────────────────
+
+def _meet(status, is_owner=False, user_id="1"):
+    return lambda subject, native, sender: {"status": status, "user_id": user_id, "is_owner": is_owner}
+
+
+def test_google_saying_owner_beats_a_name_that_would_not_match():
+    """The account is the identity. A display name the local check would reject is irrelevant once
+    Google has said which account it is."""
+    rec = _Recorder()
+    r = _responder(rec, anyone=False,
+                   owner_identity=lambda s: ("Somebody Else", "other@example.test"),
+                   meet_identity=_meet("matched", is_owner=True))
+    assert _offer(r, "@vexa hi", sender="anything at all") == "accepted"
+    _settle(rec)
+    r.close()
+
+
+def test_google_saying_NOT_owner_beats_a_name_that_would_match():
+    """The impersonation case: the display name is the owner's, and Google says the account is not."""
+    rec = _Recorder()
+    r = _responder(rec, anyone=False,
+                   owner_identity=lambda s: ("Seif Ibrahim", "seif@biami.io"),
+                   meet_identity=_meet("matched", is_owner=False, user_id="attacker"))
+    assert _offer(r, "@vexa secrets", sender="Seif Ibrahim") == "not-owner"
+    time.sleep(0.05)
+    assert rec.turns == []
+    r.close()
+
+
+def test_google_seeing_two_accounts_on_one_name_refuses_out_loud():
+    rec = _Recorder()
+    r = _responder(rec, anyone=False,
+                   owner_identity=lambda s: ("Seif Ibrahim", "seif@biami.io"),
+                   meet_identity=_meet("ambiguous"))
+    assert _offer(r, "@vexa hi", sender="Seif Ibrahim") == "ambiguous-name"
+    assert rec.turns == [] and len(rec.posts) == 1
+    r.close()
+
+
+def test_an_unauthenticated_guest_is_refused_however_they_are_named():
+    rec = _Recorder()
+    r = _responder(rec, anyone=False,
+                   owner_identity=lambda s: ("Seif Ibrahim", "seif@biami.io"),
+                   meet_identity=_meet("anonymous"))
+    assert _offer(r, "@vexa hi", sender="Seif Ibrahim") == "not-owner"
+    r.close()
+
+
+def test_a_google_verified_owner_opens_the_archive_on_its_own():
+    """The whole point of the Meet identity path: no email, no roster, still verified."""
+    rec = _Recorder()
+    r = _responder(rec, anyone=False,
+                   owner_identity=lambda s: (None, "seif@biami.io"),
+                   meet_identity=_meet("matched", is_owner=True),
+                   access=lambda k: "workspace")
+    assert _offer(r, "@vexa what did we decide last week?", sender="Seif Ibrahim") == "accepted"
+    _settle(rec)
+    assert rec.turns[0][5] == "workspace"
+    r.close()
+
+
+def test_google_being_unavailable_falls_back_to_the_name_path():
+    """A deployment without the grant, or an API outage, must still work as before — just without
+    the stronger identity."""
+    for status in ("unconfigured", "unavailable", "no-grant", "unknown", "no-live-conference"):
+        rec = _Recorder()
+        r = _responder(rec, anyone=False,
+                       owner_identity=lambda s: ("Seif Ibrahim", "seif@biami.io"),
+                       meet_identity=_meet(status))
+        assert _offer(r, "@vexa hi", sender="Seif Ibrahim") == "accepted", status
+        assert _offer(r, "@vexa hi", sender="A Stranger", key="9") == "not-owner", status
+        _settle(rec)
+        r.close()
+
+
+def test_a_throwing_meet_resolver_never_becomes_a_match():
+    def boom(subject, native, sender):
+        raise RuntimeError("meet api down")
+
+    rec = _Recorder()
+    r = _responder(rec, anyone=False,
+                   owner_identity=lambda s: ("Seif Ibrahim", "seif@biami.io"), meet_identity=boom)
+    # Falls back to the name path rather than failing the turn.
+    assert _offer(r, "@vexa hi", sender="Seif Ibrahim") == "accepted"
+    assert _offer(r, "@vexa hi", sender="A Stranger", key="9") == "not-owner"
+    _settle(rec)
+    r.close()
+
+
+def test_anyone_mode_does_not_call_google_at_all():
+    """No identity question to answer, so no API call to spend."""
+    calls = []
+    rec = _Recorder()
+    r = _responder(rec, anyone=True,
+                   meet_identity=lambda s, n, sender: calls.append(sender) or {"status": "matched", "is_owner": False})
+    assert _offer(r, "@vexa hi", sender="Anyone") == "accepted"
+    _settle(rec)
+    assert calls == []
+    r.close()

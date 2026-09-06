@@ -522,9 +522,10 @@ export function createGmeetChat(opts: GmeetChatOptions): GmeetChat {
     // silently degraded to name matching.
     if (autoOpen) ensureGmeetPeopleOpen();
     const rows = scrapeGmeetParticipantRows();
-    // Report the roster ONCE, whatever it contains. Logging only on success cannot distinguish
-    // "the panel had no emails" from "the panel never opened" — which is exactly the question that
-    // decides whether DOM scraping can carry identity at all, and it cost a live meeting to notice.
+    // Report the roster ONCE, whatever it contains. Logging only on success cannot tell an open
+    // panel that carries no emails apart from a panel that never opened — which is exactly the
+    // question that decides whether DOM scraping can carry identity at all, and it cost a live
+    // meeting to notice.
     if (!rosterReported) {
       rosterReported = true;
       const panel = firstMatch(document, gmeetPeoplePanelSelectors);

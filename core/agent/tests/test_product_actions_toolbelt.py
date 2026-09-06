@@ -1,0 +1,196 @@
+"""The chat assistant's ACTING toolbelt: a tool.v1 descriptor → an MCP attachment on the turn.
+
+The loop is speak → the copilot proposes → someone agrees → the assistant acts. These cover the last
+hop: how a name in `unit.v1.tools` becomes a tool the turn can actually call, and how the tool
+behaves when the service behind it is missing or broken.
+
+The registry mechanism already existed and was unwired — nothing in production resolved a tool name.
+These drive the SHIPPED path (`attach_toolbelt`) over the REAL descriptor in `tools-seed/`, so a
+descriptor that stops matching its server is a red here rather than a silent no-op in a meeting.
+"""
+from __future__ import annotations
+
+import json
+import pathlib
+import subprocess
+import sys
+
+import contracts
+import pytest
+
+from shared.tools import ToolRegistry, attach_toolbelt
+
+_AGENT = pathlib.Path(__file__).resolve().parents[1]
+_SEED = _AGENT / "tools-seed"
+_SERVER = _SEED / "product-actions" / "server.py"
+
+
+def _registry() -> ToolRegistry:
+    return ToolRegistry.from_dir(_SEED)
+
+
+# ── the descriptor ────────────────────────────────────────────────────────────────────────
+
+def test_the_shipped_descriptor_is_a_conformant_tool_v1():
+    spec = json.loads((_SEED / "product-actions.json").read_text())
+    contracts.validate_tool(spec["tool"])
+
+
+def test_the_descriptor_launches_a_server_that_EXISTS_in_the_image():
+    """The launch path is absolute (`/app/...`) because that is where the worker image puts it. If
+    the Dockerfile stops copying tools-seed, or the file moves, the tool fails at call time inside a
+    meeting — where nobody can see why. Pin the file's repo-relative location instead."""
+    spec = json.loads((_SEED / "product-actions.json").read_text())
+    launched = pathlib.Path(spec["mcp"]["args"][-1])
+    assert launched.name == _SERVER.name
+    assert launched.parent.name == "product-actions"
+    assert _SERVER.exists(), "the descriptor names a server the repo does not carry"
+
+
+# ── name → allow-set + .mcp.json ──────────────────────────────────────────────────────────
+
+def test_a_toolbelt_name_becomes_an_mcp_attachment(tmp_path):
+    allowed, mcp_config = attach_toolbelt(tmp_path / "belt", ["product-actions"], _registry())
+    assert allowed == ["mcp__product-actions"]
+    assert mcp_config and json.loads(pathlib.Path(mcp_config).read_text())["mcpServers"]["product-actions"]
+
+
+def test_builtins_pass_through_and_NOTHING_is_added(tmp_path):
+    """The dispatch's list is the whole tool set. A turn dispatched with three read tools must not
+    come out of here holding Write — that list is the only thing standing between an untrusted
+    question and the owner's workspace."""
+    asked = ["Read", "Glob", "Grep", "WebSearch", "WebFetch", "product-actions"]
+    allowed, _ = attach_toolbelt(tmp_path / "belt", asked, _registry())
+    assert allowed == ["Read", "Glob", "Grep", "WebSearch", "WebFetch", "mcp__product-actions"]
+    assert "Write" not in allowed and "Edit" not in allowed and "Bash" not in allowed
+
+
+def test_a_turn_with_no_toolbelt_names_attaches_no_server(tmp_path):
+    allowed, mcp_config = attach_toolbelt(tmp_path / "belt", ["Read", "WebSearch"], _registry())
+    assert allowed == ["Read", "WebSearch"] and mcp_config is None
+
+
+def test_a_tool_less_turn_stays_tool_less(tmp_path):
+    """`[]` is a caller saying 'no tools' — the meeting copilot's own state."""
+    assert attach_toolbelt(tmp_path / "belt", [], _registry()) == ([], None)
+
+
+def test_the_config_is_written_OUTSIDE_the_workspace(tmp_path):
+    """The turn that needs tools is the one whose workspaces are mounted read-only. Writing the
+    config into a `:ro` bind fails, and the failure would look like a broken assistant."""
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    belt = tmp_path / "belt"
+    _, mcp_config = attach_toolbelt(belt, ["product-actions"], _registry())
+    assert mcp_config and pathlib.Path(mcp_config).is_relative_to(belt)
+    assert not (ws / ".claude").exists()
+
+
+def test_an_unknown_name_is_not_silently_granted(tmp_path):
+    """An unknown name is a builtin as far as this is concerned — it is passed to the harness, which
+    is the component that decides whether it exists. What must NOT happen is it acquiring an MCP
+    server it never named."""
+    allowed, mcp_config = attach_toolbelt(tmp_path / "belt", ["NotATool"], _registry())
+    assert allowed == ["NotATool"] and mcp_config is None
+
+
+# ── the server itself, over real stdio ────────────────────────────────────────────────────
+
+def _rpc(*messages, env=None) -> list:
+    proc = subprocess.run([sys.executable, str(_SERVER)],
+                          input="".join(json.dumps(m) + "\n" for m in messages),
+                          capture_output=True, text=True, timeout=30, env=env)
+    return [json.loads(line) for line in proc.stdout.splitlines() if line.strip()]
+
+
+def _call(tool: str, description: str, env=None) -> dict:
+    out = _rpc({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {"name": tool, "arguments": {"description": description}}}, env=env)
+    return json.loads(out[0]["result"]["content"][0]["text"])
+
+
+def test_the_server_advertises_the_five_products():
+    out = _rpc({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+    names = {t["name"] for t in out[0]["result"]["tools"]}
+    assert names == {"partic_create_pipeline", "biami_create_process", "matrix_create_task",
+                     "contentmorph_transform", "tenx_request"}
+
+
+def test_every_advertised_tool_takes_a_description():
+    out = _rpc({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+    for t in out[0]["result"]["tools"]:
+        assert t["inputSchema"]["required"] == ["description"]
+
+
+def test_with_no_endpoint_it_answers_in_the_SHAPE_a_real_one_would():
+    """The stub is what makes the loop demonstrable before any of the five has an endpoint. It
+    answers `accepted` with the same fields, so pointing the tool at a real URL changes where the
+    work happens and nothing about what the assistant then says."""
+    got = _call("partic_create_pipeline", "sync Stripe charges into Postgres")
+    assert got["status"] == "accepted" and got["stub"] is True
+    assert "Partic pipeline" in got["message"]
+    assert got["request"] == "sync Stripe charges into Postgres"
+
+
+def test_an_unreachable_endpoint_REPORTS_failure_rather_than_raising(monkeypatch):
+    """A tool that throws inside a turn reads to the model as a broken tool rather than a service
+    that is down — and it will then tell the meeting something confident and wrong."""
+    import os
+    env = dict(os.environ, PARTIC_ENDPOINT="http://127.0.0.1:9/never")
+    got = _call("partic_create_pipeline", "anything", env=env)
+    assert got["status"] == "failed" and "could not reach" in got["message"]
+
+
+def test_an_unknown_tool_is_an_error_not_a_silent_success():
+    out = _rpc({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {"name": "delete_production", "arguments": {}}})
+    assert out[0]["error"]["code"] == -32601
+
+
+def test_a_malformed_frame_does_not_kill_the_server():
+    proc = subprocess.run([sys.executable, str(_SERVER)],
+                          input='not json\n{"jsonrpc":"2.0","id":7,"method":"tools/list"}\n',
+                          capture_output=True, text=True, timeout=30)
+    assert json.loads(proc.stdout.splitlines()[0])["id"] == 7
+
+
+if __name__ == "__main__":
+    raise SystemExit(pytest.main([__file__, "-q"]))
+
+
+# ── what an in-meeting turn is actually granted ───────────────────────────────────────────
+
+def test_both_scopes_can_act_on_an_agreed_proposal():
+    """Acting is not a question of how much history may be read. A transcript-scoped meeting is the
+    ordinary case — the copilot proposed something out loud and the owner said yes — and refusing to
+    act there would make the whole loop depend on a workspace grant nobody was asked for."""
+    from control_plane.meeting_chat_responder import (
+        MEET_CHAT_WEB_TOOLS, MEET_CHAT_WORKSPACE_TOOLS,
+    )
+    assert "product-actions" in MEET_CHAT_WEB_TOOLS
+    assert "product-actions" in MEET_CHAT_WORKSPACE_TOOLS
+
+
+def test_neither_scope_can_CHANGE_anything_in_the_workspace():
+    """The question comes from a room the owner does not control."""
+    from control_plane.meeting_chat_responder import (
+        MEET_CHAT_WEB_TOOLS, MEET_CHAT_WORKSPACE_TOOLS,
+    )
+    for granted in (MEET_CHAT_WEB_TOOLS, MEET_CHAT_WORKSPACE_TOOLS):
+        assert not ({"Write", "Edit", "Bash", "NotebookEdit"} & set(granted))
+
+
+def test_every_granted_name_is_either_a_builtin_or_a_REAL_descriptor(tmp_path):
+    """A granted name the registry cannot resolve becomes a bare string handed to the harness — the
+    turn then reports success and simply cannot do the thing. Anything hyphenated is a toolbelt
+    name by convention; it must exist in tools-seed."""
+    from control_plane.meeting_chat_responder import MEET_CHAT_WORKSPACE_TOOLS
+    known = set(_registry().names())
+    for name in MEET_CHAT_WORKSPACE_TOOLS:
+        assert name in known or name.isalnum(), f"{name!r} resolves to nothing"
+
+
+def test_the_workspace_grant_resolves_end_to_end(tmp_path):
+    from control_plane.meeting_chat_responder import MEET_CHAT_WORKSPACE_TOOLS
+    allowed, mcp_config = attach_toolbelt(tmp_path / "belt", MEET_CHAT_WORKSPACE_TOOLS, _registry())
+    assert "mcp__product-actions" in allowed and mcp_config

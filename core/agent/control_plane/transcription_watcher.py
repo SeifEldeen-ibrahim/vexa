@@ -218,7 +218,7 @@ def _resume_cursor(r, key: str) -> str:
     return str(cursor) if cursor else "0-0"
 
 
-def start_suggestion_relay(redis_url: str, *, post_reply, owner_for) -> threading.Thread:
+def start_suggestion_relay(redis_url: str, *, post_reply, owner_for, remember=None) -> threading.Thread:
     """Deliver the copilot's suggestions into the meeting they came from.
 
     The copilot has no tools and no network — deliberately, since it consumes an untrusted
@@ -227,16 +227,21 @@ def start_suggestion_relay(redis_url: str, *, post_reply, owner_for) -> threadin
     uses: the sandboxed producer writes a carrier, the control plane owns every socket.
 
     ``owner_for(meeting_key)`` supplies the account to post as; without one the suggestion is
-    DROPPED. A proposal posted under a guessed identity would be worse than one never made."""
+    DROPPED. A proposal posted under a guessed identity would be worse than one never made.
+
+    ``remember(meeting_key, text)`` records what was just proposed, so that when someone answers
+    "@vexa yes" the assistant knows what it is agreeing to. The proposal is posted into the meeting
+    by THIS thread and not by an agent turn, so without this the assistant would have no record of
+    ever having offered anything."""
     t = threading.Thread(
-        target=_run_suggestions, args=(redis_url, post_reply, owner_for),
+        target=_run_suggestions, args=(redis_url, post_reply, owner_for, remember),
         daemon=True, name="tx-suggest",
     )
     t.start()
     return t
 
 
-def _run_suggestions(redis_url: str, post_reply, owner_for) -> None:
+def _run_suggestions(redis_url: str, post_reply, owner_for, remember=None) -> None:
     import redis as redislib
 
     r = redislib.from_url(redis_url, decode_responses=True, socket_keepalive=True, health_check_interval=10)
@@ -262,12 +267,13 @@ def _run_suggestions(redis_url: str, post_reply, owner_for) -> None:
             for msg_id, fields in entries:
                 try:
                     r.xack(SUGGESTIONS, SUGGESTION_GROUP, msg_id)
-                    _deliver_suggestion(json.loads(fields.get("payload") or "{}"), post_reply, owner_for)
+                    _deliver_suggestion(json.loads(fields.get("payload") or "{}"), post_reply,
+                                        owner_for, remember)
                 except Exception:  # noqa: BLE001
                     logger.exception("bad suggestion frame; skipping")
 
 
-def _deliver_suggestion(p: dict, post_reply, owner_for) -> None:
+def _deliver_suggestion(p: dict, post_reply, owner_for, remember=None) -> None:
     key = str(p.get("meeting_id") or "")
     native = str(p.get("native_id") or key)
     platform = p.get("platform") or "google_meet"
@@ -297,6 +303,14 @@ def _deliver_suggestion(p: dict, post_reply, owner_for) -> None:
                     "delivered" if ok else "delivery FAILED", platform, native, title or body[:60])
     except Exception:  # noqa: BLE001
         logger.exception("meet-suggest: delivery raised for %s/%s", platform, native)
+        return
+    # Only a proposal that actually REACHED the room is worth remembering: an approval can only
+    # follow something someone read. Recorded after delivery, and never allowed to fail the relay.
+    if ok and remember is not None:
+        try:
+            remember(key, body or title)
+        except Exception:  # noqa: BLE001
+            logger.exception("meet-suggest: could not record the pending proposal for %s", key)
 
 
 def start(redis_url: str, dispatcher, live, *, subject: str = "u_live", chat_responder=None) -> threading.Thread:

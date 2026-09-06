@@ -36,7 +36,8 @@ from pydantic import BaseModel
 from control_plane import meeting_steering
 from control_plane.meet_identity import MeetIdentityResolver
 from control_plane.meeting_chat_responder import (
-    MeetingChatResponder, SCOPE_TRANSCRIPT, SCOPE_WORKSPACE,
+    MeetingChatResponder, MEET_CHAT_WEB_TOOLS, MEET_CHAT_WORKSPACE_TOOLS,
+    SCOPE_TRANSCRIPT, SCOPE_WORKSPACE,
 )
 from control_plane import schedule_digest as schedule_digest_mod
 from control_plane import routines as routines_mod
@@ -1216,23 +1217,18 @@ def create_app(
         start_id = cursor or "0-0"
         return {"native_id": body.native_id, "meeting_id": row_id, "processing": True, "resumed_from": start_id}
 
-    #: The two scopes differ by WHAT HISTORY is in reach, not by whether the assistant is capable.
-    #: The web is on in both — an assistant that cannot look anything up is not an assistant, and
-    #: nothing private leaks through a search engine.
-    #:
-    #:   transcript — THIS meeting, plus the web. No file tools, so no past records.
-    #:   workspace  — the above PLUS the owner's stored records (past meetings, notes), read-only.
-    #:
-    #: Write/Edit/Bash are absent from BOTH: the request comes from a room the owner does not
-    #: control, so the assistant answers and never changes anything.
-    MEET_CHAT_WEB_TOOLS = ["WebSearch", "WebFetch"]
-    MEET_CHAT_WORKSPACE_TOOLS = ["Read", "Glob", "Grep"] + MEET_CHAT_WEB_TOOLS
-
     def _meet_chat_access_key(row: str) -> str:
         return f"meetchat:meeting:{row}:workspace"
 
     def _meet_chat_anyone_key(row: str) -> str:
         return f"meetchat:meeting:{row}:anyone"
+
+    def _meet_chat_pending_key(row: str) -> str:
+        return f"meetchat:meeting:{row}:pending"
+
+    #: How long an unanswered proposal stays live. A suggestion is about what is being discussed
+    #: NOW; agreeing to one half an hour later means agreeing to something nobody remembers saying.
+    MEET_CHAT_PENDING_TTL_SEC = 15 * 60
 
     #: How long a workspace grant survives without being refreshed. A meeting is over in hours; the
     #: grant must not outlive it and silently apply to a re-send of the same link next week.
@@ -2584,6 +2580,28 @@ def create_app(
             logger.exception("meet-chat: anyone-grant lookup failed for %s", meeting_key)
             return False
 
+    def _meet_chat_remember(meeting_key: str, text: str) -> None:
+        """Record the proposal just posted into a meeting, so an approval has a referent."""
+        import redis as _redis
+
+        try:
+            r = _redis.from_url(redis_url, decode_responses=True)
+            r.setex(_meet_chat_pending_key(str(meeting_key)), MEET_CHAT_PENDING_TTL_SEC, text)
+        except Exception:  # noqa: BLE001
+            logger.exception("meet-chat: could not record the pending proposal for %s", meeting_key)
+
+    def _meet_chat_pending(meeting_key: str) -> "str | None":
+        """The proposal this meeting is waiting on, or None. A fault reads as 'nothing pending' —
+        the assistant then answers the message as an ordinary question, which is the safe miss."""
+        import redis as _redis
+
+        try:
+            r = _redis.from_url(redis_url, decode_responses=True)
+            return r.get(_meet_chat_pending_key(str(meeting_key)))
+        except Exception:  # noqa: BLE001
+            logger.exception("meet-chat: pending-proposal lookup failed for %s", meeting_key)
+            return None
+
     responder = None
     if _env_flag("VEXA_MEET_CHAT_ENABLED", default=False):
         responder = MeetingChatResponder(
@@ -2604,12 +2622,16 @@ def create_app(
             # ("Seif Ibrahim") while an account may only know an email ("seif@..."), and the match is
             # whole-name — a first name is not an identity.
             owner_names=[n.strip() for n in os.environ.get("VEXA_MEET_CHAT_OWNER_NAMES", "").split(",") if n.strip()],
+            # What the copilot offered and nobody has answered. The relay posts proposals directly
+            # into the room, so this is the assistant's only record of having offered anything.
+            pending_suggestion=_meet_chat_pending,
             min_interval_s=float(os.environ.get("VEXA_MEET_CHAT_MIN_INTERVAL_S", "5")),
         )
         app.state.meet_chat_responder = responder
     # The suggestion relay lives in the composition root but needs create_app's poster, so it is
     # published here rather than reached for — the same handshake as the responder above.
     app.state.meet_chat_post = _meet_chat_post
+    app.state.meet_chat_remember = _meet_chat_remember
 
     return app
 
@@ -2691,6 +2713,7 @@ def _build_production_app() -> FastAPI:
                 settings.redis_url,
                 post_reply=_poster,
                 owner_for=lambda k: transcription_watcher.MEETING_OWNERS.get(str(k)),
+                remember=getattr(app.state, "meet_chat_remember", None),
             )
     return app
 

@@ -113,6 +113,27 @@ AMBIGUOUS_NAME_REPLY = (
 SCOPE_TRANSCRIPT = "transcript"
 SCOPE_WORKSPACE = "workspace"
 
+#: What each scope may DO — the `unit.v1.tools` list an in-meeting turn is dispatched with.
+#:
+#: The two scopes differ by WHAT HISTORY is in reach, not by whether the assistant is capable. The
+#: web is on in both — an assistant that cannot look anything up is not an assistant, and nothing
+#: private leaks through a search engine.
+#:
+#:   transcript — THIS meeting, plus the web. No file tools, so no past records.
+#:   workspace  — the above PLUS the owner's stored records (past meetings, notes), read-only.
+#:
+#: Write/Edit/Bash are absent from BOTH: the request comes from a room the owner does not control,
+#: so the assistant answers and never changes anything IN THE WORKSPACE.
+#:
+#: `product-actions` is the exception, and a deliberate one: it is a `tool.v1` toolbelt name (the
+#: worker resolves it against the tool registry into an MCP attachment) whose every tool is one
+#: outbound HTTP call to a product's own endpoint, which owns whatever gets created. It is on in
+#: both scopes because doing what was agreed to is not a question of how much history may be read —
+#: the copilot proposed it out loud in the room, and someone the owner gate accepted said yes.
+MEET_CHAT_ACTION_TOOLS = ["product-actions"]
+MEET_CHAT_WEB_TOOLS = ["WebSearch", "WebFetch"] + MEET_CHAT_ACTION_TOOLS
+MEET_CHAT_WORKSPACE_TOOLS = ["Read", "Glob", "Grep"] + MEET_CHAT_WEB_TOOLS
+
 
 def _norm(v: "str | None") -> str:
     """Lower-case, collapse whitespace. The only normalisation applied to a display name."""
@@ -291,6 +312,7 @@ class MeetingChatResponder:
         owner_identity: Optional[Callable[[str], "tuple"]] = None,
         meet_identity: Optional[Callable[[str, str, str], dict]] = None,
         owner_names: "list | None" = None,
+        pending_suggestion: Optional[Callable[[str], "str | None"]] = None,
         max_workers: int = 2,
         min_interval_s: float = 5.0,
         log: Optional[Callable[[str], None]] = None,
@@ -306,6 +328,7 @@ class MeetingChatResponder:
         self._owner_identity = owner_identity
         self._meet_identity = meet_identity
         self._owner_names = owner_names or []
+        self._pending_suggestion = pending_suggestion
         self._min_interval_s = min_interval_s
         self._log = log or (lambda m: logger.info("%s", m))
         # Bounded on purpose: a Meet bot is already most of this box's CPU, and every turn is a
@@ -479,6 +502,7 @@ class MeetingChatResponder:
             )
             prompt = (
                 f"{who} asked in the meeting chat: {question}\n\n"
+                f"{self._pending_clause(meeting_key)}"
                 f"{scoped} Be brief — a few sentences at most, plain text, no markdown formatting. "
                 "If you do not have the answer, say so plainly."
             )
@@ -498,6 +522,34 @@ class MeetingChatResponder:
         finally:
             with self._lock:
                 self._inflight.discard(meeting_key)
+
+    def _pending_clause(self, meeting_key: str) -> str:
+        """The proposal this meeting is waiting on, phrased for the prompt — or "" when there is none.
+
+        The copilot's suggestion is posted into the room by the RELAY, not by an agent turn, so the
+        assistant has no memory of having offered anything. Without this, "@vexa yes" arrives as a
+        word with no referent and the assistant asks what is meant — in a meeting, that reads as the
+        bot having forgotten its own question ten seconds later.
+
+        Deliberately not an approval PARSER. Whether "yes", "go on then" or "no, drop it" is
+        agreement is a judgement about language, which is what the model is for; what it cannot do
+        is know what was proposed. Only the gate above decides WHO may agree."""
+        if self._pending_suggestion is None:
+            return ""
+        try:
+            pending = (self._pending_suggestion(meeting_key) or "").strip()
+        except Exception:  # noqa: BLE001
+            logger.exception("meet-chat: pending-proposal lookup failed for %s", meeting_key)
+            return ""
+        if not pending:
+            return ""
+        return (
+            f"CONTEXT: you recently offered in this chat: \"{pending}\" and nobody has answered yet. "
+            "If what they just said is AGREEMENT to that, carry it out now — call the matching "
+            "product-actions tool with a description built from what was proposed, and say what came "
+            "back in one line. If it is a refusal, acknowledge it in a few words and do nothing "
+            "else. If it is neither, ignore this paragraph and answer their question.\n\n"
+        )
 
     def _meeting_allows_anyone(self, meeting_key: str) -> bool:
         """Has this meeting's owner opened the assistant to everyone in the room? Fails closed."""

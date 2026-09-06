@@ -95,3 +95,35 @@ def test_a_failing_owner_lookup_does_not_raise():
         _deliver_suggestion(_payload(), _Poster(), boom)
     except RuntimeError:
         raise AssertionError("an owner-lookup fault escaped the relay")
+
+
+# ── remembering what was proposed, so an approval has a referent ──────────────────────────
+
+def test_a_DELIVERED_proposal_is_remembered():
+    """The relay posts into the room directly, not through an agent turn — so without this record
+    the assistant has no memory of having offered anything, and "@vexa yes" arrives as a word with
+    no referent."""
+    seen: list = []
+    _deliver_suggestion(_payload(), _Poster(), lambda key: "6",
+                        lambda key, text: seen.append((key, text)))
+    assert seen == [("42", "Shall I create a Partic pipeline for the Stripe sync")]
+
+
+def test_an_UNDELIVERED_proposal_is_not_remembered():
+    """An approval can only follow something someone actually read. Remembering a proposal that
+    never reached the room would leave the assistant ready to act on a question nobody was asked."""
+    seen: list = []
+    _deliver_suggestion(_payload(), _Poster(ok=False), lambda key: "6",
+                        lambda key, text: seen.append(key))
+    _deliver_suggestion(_payload(), _Poster(), lambda key: None,
+                        lambda key, text: seen.append(key))
+    assert seen == []
+
+
+def test_a_failing_recorder_does_not_raise():
+    def boom(_key, _text):
+        raise RuntimeError("redis gone")
+
+    post = _Poster()
+    _deliver_suggestion(_payload(), post, lambda key: "6", boom)
+    assert len(post.posts) == 1        # the proposal still reached the meeting

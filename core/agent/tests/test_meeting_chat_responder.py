@@ -868,3 +868,61 @@ def test_anyone_mode_answers_even_when_two_people_share_a_name():
     assert _offer(r, "@vexa hi", sender="Seif Ibrahim") == "accepted"
     _settle(rec)
     r.close()
+
+
+# ── acting on a copilot proposal ──────────────────────────────────────────────────────────
+
+def test_an_open_proposal_is_put_in_front_of_the_model():
+    """The relay posts the copilot's proposal into the room directly, so the assistant's own thread
+    carries no record of it. Without the proposal in the prompt, "@vexa yes" is a word with no
+    referent and the assistant asks what is meant — which reads, in a meeting, as the bot having
+    forgotten its own question ten seconds later."""
+    rec = _Recorder()
+    r = _responder(rec, pending_suggestion=lambda key: "Shall I create a Partic pipeline for the Stripe sync")
+    _offer(r, "@vexa yes")
+    _settle(rec)
+    prompt = rec.turns[0][3]
+    assert "Partic pipeline for the Stripe sync" in prompt
+    assert "product-actions" in prompt
+
+
+def test_with_nothing_pending_the_prompt_carries_no_proposal_clause():
+    rec = _Recorder()
+    r = _responder(rec, pending_suggestion=lambda key: None)
+    _offer(r, "@vexa what did we decide about pricing?")
+    _settle(rec)
+    assert "product-actions" not in rec.turns[0][3]
+
+
+def test_the_responder_asks_about_THIS_meeting_only():
+    """A proposal open in one meeting must not be offered to a different room."""
+    rec = _Recorder()
+    asked: list = []
+    r = _responder(rec, pending_suggestion=lambda key: asked.append(key) or None)
+    _offer(r, "@vexa yes", key="7")
+    _settle(rec)
+    assert asked == ["7"]
+
+
+def test_a_broken_pending_lookup_still_answers_the_question():
+    """The store is best-effort. Losing the proposal costs an approval; failing the turn costs the
+    answer AND the approval."""
+    def boom(_key):
+        raise RuntimeError("redis gone")
+
+    rec = _Recorder()
+    _offer(_responder(rec, pending_suggestion=boom), "@vexa what time is it in Cairo?")
+    _settle(rec)
+    assert len(rec.posts) == 1
+
+
+def test_the_assistant_is_not_told_to_PARSE_the_approval():
+    """Whether "go on then" is agreement is a judgement about language, which is what the model is
+    for. What it cannot know is what was proposed — that, and only that, is what the clause adds.
+    A refusal must be an available reading, or the clause becomes a one-way ratchet into acting."""
+    rec = _Recorder()
+    r = _responder(rec, pending_suggestion=lambda key: "Shall I create a Matrix task for the churn question")
+    _offer(r, "@vexa no, leave it")
+    _settle(rec)
+    prompt = rec.turns[0][3].lower()
+    assert "refusal" in prompt and "do nothing" in prompt

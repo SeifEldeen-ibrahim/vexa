@@ -37,6 +37,7 @@ from llm import (
 )
 from llm.errors import _AUTH_SIGNATURE_RE  # noqa: F401 — re-exported for the worker.worker shim
 from shared.seeding import resolve_seed_dir, seed_workspace, validate_seed
+from shared.tools import ToolRegistry, attach_toolbelt
 
 log = logging.getLogger("agent_api.worker")
 
@@ -297,6 +298,7 @@ def _extra_mount_paths(work: Path) -> list[Path]:
 def run_turn_over_workspace(
     work: Path, prompt: str, *, model: str | None = None, allowed_tools: list[str] | None = None,
     commit: bool = True, session_continuity: bool = True, session: str = DEFAULT_CHAT_SESSION,
+    mcp_config: str | None = None,
 ) -> Iterator[dict]:
     """One governed agent turn over the mounted workspace SET: resume from the session file, DECLARE the
     active mounts to the model, drive ``run_harness_turn`` (which commits EACH changed mount, authored by
@@ -306,7 +308,9 @@ def run_turn_over_workspace(
     propose-only (no-write) turn, or ``[]`` for a TOOL-LESS turn that can only answer from its prompt.
     ``[]`` and ``None`` are deliberately different: an empty list is a caller saying "no tools", and
     reading it as "use the defaults" is how a restricted turn silently gets Read/Write/Edit back.
-    ``session`` namespaces the continuity file so chat threads stay distinct (default ``"main"``)."""
+    ``session`` namespaces the continuity file so chat threads stay distinct (default ``"main"``).
+    ``mcp_config`` attaches the turn's MCP servers (``shared.tools.attach_toolbelt`` writes it); the
+    harness runs ``--strict-mcp-config``, so the turn gets those servers and no others."""
     _ensure_repo(work)
     # Resolve the harness through the worker.worker seam at call time so a test patching
     # `worker.worker.harness_factory` reaches this call site (the harness was one module historically).
@@ -330,13 +334,13 @@ def run_turn_over_workspace(
     extras = _extra_mount_paths(work)
     turn_prompt = kg_links_preamble() + mounts_preamble(mounts) + prompt
     gen = run_harness_turn(work, turn_prompt, harness, allowed_tools=allowed, session=resume, model=model,
-                           commit=commit, author=author, extra_mounts=extras)
+                           commit=commit, author=author, extra_mounts=extras, mcp_config=mcp_config)
     first = next(gen, None)
     if resume and first is not None and first.get("type") == "done" and not first.get("ok", True):
         if sess_file.exists():
             sess_file.unlink()
         gen = run_harness_turn(work, turn_prompt, harness, allowed_tools=allowed, session=None, model=model,
-                               commit=commit, author=author, extra_mounts=extras)
+                               commit=commit, author=author, extra_mounts=extras, mcp_config=mcp_config)
         first = next(gen, None)
     captured: str | None = None
     for ev in (gen if first is None else itertools.chain([first], gen)):
@@ -533,9 +537,16 @@ def main() -> None:  # pragma: no cover — the container entrypoint (wired in t
         _raw_tools = os.environ.get("VEXA_CHAT_TOOLS")
         chat_tools = ([] if (_raw_tools or "").strip().lower() == "none"
                       else (_raw_tools or "Read,Write,Edit,Glob,Grep,Bash,WebSearch,WebFetch").split(","))
+        # A name in that list may be a `tool.v1` toolbelt entry rather than a builtin: the registry
+        # attaches its MCP server and the rest pass through untouched. This is the whole reason a
+        # dispatch can hand a turn a capability the worker image knows nothing about.
+        chat_tools, mcp_config = attach_toolbelt(
+            Path(os.environ.get("VEXA_TOOLBELT_DIR") or "/tmp/vexa-toolbelt"), chat_tools,
+            ToolRegistry.from_dir(os.environ.get("VEXA_TOOLS_SEED_DIR") or "/app/tools-seed"))
         session = os.environ.get("VEXA_CHAT_SESSION") or DEFAULT_CHAT_SESSION
         serve(
             client, out_topic=out_topic, in_topic=os.environ["VEXA_UNIT_IN_TOPIC"],
-            turn=lambda prompt: run_turn_over_workspace(work, prompt, model=model, allowed_tools=chat_tools, session=session),
+            turn=lambda prompt: run_turn_over_workspace(work, prompt, model=model, allowed_tools=chat_tools,
+                                                        session=session, mcp_config=mcp_config),
             start=json.loads(os.environ.get("VEXA_START", "{}")), idle_ms=idle_ms,
         )

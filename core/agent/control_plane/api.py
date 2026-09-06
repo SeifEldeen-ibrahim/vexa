@@ -2607,6 +2607,9 @@ def create_app(
             min_interval_s=float(os.environ.get("VEXA_MEET_CHAT_MIN_INTERVAL_S", "5")),
         )
         app.state.meet_chat_responder = responder
+    # The suggestion relay lives in the composition root but needs create_app's poster, so it is
+    # published here rather than reached for — the same handshake as the responder above.
+    app.state.meet_chat_post = _meet_chat_post
 
     return app
 
@@ -2678,6 +2681,17 @@ def _build_production_app() -> FastAPI:
     from control_plane import transcription_watcher
     transcription_watcher.start(settings.redis_url, dispatcher, app.state.live_meetings,
                                 chat_responder=getattr(app.state, "meet_chat_responder", None))
+    # The copilot's proposals → the meeting's own chat. Its own thread, because delivering a
+    # suggestion is an HTTP call and the arm loop is the sole re-arm/reap arbiter for every copilot
+    # on the deployment — the same reason the chat responder does not run there either.
+    if _env_flag("VEXA_MEET_CHAT_ENABLED", default=False):
+        _poster = getattr(app.state, "meet_chat_post", None)
+        if _poster is not None:
+            transcription_watcher.start_suggestion_relay(
+                settings.redis_url,
+                post_reply=_poster,
+                owner_for=lambda k: transcription_watcher.MEETING_OWNERS.get(str(k)),
+            )
     return app
 
 

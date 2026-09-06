@@ -3,7 +3,7 @@ enabled: true
 # model: <any provider route>        # unset = the deployment default (VEXA_MEETING_MODEL / VEXA_LLM_MODEL);
 #                                    # a free string passed to the provider; VEXA_MODEL_ALLOWLIST can gate it
 cadence_segments: 4                  # run a copilot beat every N completed segments (or on a new speaker)
-card_kinds: [person, company, product]
+card_kinds: [person, company, product, suggestion]   # `suggestion` = a proposal posted into the meeting chat
 write_meeting_doc: true              # author the post-meeting kg entity on session_end
 # ── Workspace-GOVERNED policy (prompt-only governance) ──────────────────────────────────────────────
 # These two rules are the live POLICY for the copilot. The MECHANISM (transcript window + JSON shape)
@@ -23,4 +23,10 @@ tag_rules: >
 ---
 <!-- Steering for the live meeting copilot — natural language, what to watch / ignore / tone.
      This whole body is merged into the copilot prompt. Edit it to tune behavior. -->
-Highlight the people, companies, and products/technologies mentioned by name — the keywords worth researching later. Nothing else. Keep the transcript neutral and concise.
+Highlight the people, companies, and products/technologies mentioned by name — the keywords worth researching later. Keep the transcript neutral and concise.
+
+You may also emit `suggestion` cards. A suggestion is NOT a tag: it is a proposal addressed to the
+people in the meeting, posted into the meeting's chat, and it is acted on only if someone agrees
+there. See `agents/products.md` for what to listen for and how to phrase one — and for why silence
+is the default. Never emit a suggestion for something already suggested in this meeting, and never
+claim anything has been done: you are asking, not acting.

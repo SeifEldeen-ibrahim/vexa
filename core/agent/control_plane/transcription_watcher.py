@@ -36,6 +36,8 @@ from shared import units
 logger = logging.getLogger("agent_api.tx_watch")
 
 SRC = "transcription_segments"           # the wire every bot publishes to (configurable upstream)
+SUGGESTIONS = "meet_suggestions"         # the copilot's proposals, awaiting delivery into a meeting chat
+SUGGESTION_GROUP = "agent_suggestions"   # our consumer group on it
 GROUP = "agent_copilot"                  # our consumer group — independent of the collector's
 REARM_SEC = 30.0                         # re-touch a meeting's dispatch at most this often (keep-alive)
 # Rolling TTL the arm block refreshes on the ``proc:meeting:{row}:on`` flag while segments flow —
@@ -53,6 +55,9 @@ _native: dict[str, tuple[str, str]] = {}  # numeric meeting_id → (native_meeti
 # retried on the next segment — the new meeting's row may not be visible in the gateway list yet),
 # but we throttle the refetch per meeting_id so a quiet miss doesn't hammer the gateway every segment.
 _resolve_miss_at: dict[str, float] = {}  # numeric meeting_id → last failed-resolve (monotonic)
+#: meeting ROW id → owning user id, learned from the segments the bot stamps. Read by the suggestion
+#: relay, which sees no transcript of its own.
+MEETING_OWNERS: dict[str, str] = {}
 RESOLVE_RETRY_SEC = 3.0
 # The gateway/meeting-api caps `limit` at 100 (>100 → HTTP 422 Unprocessable Entity). Asking for more
 # made EVERY resolve fail, so _resolve_native always returned None. Post-P0 the carrier no longer
@@ -213,6 +218,87 @@ def _resume_cursor(r, key: str) -> str:
     return str(cursor) if cursor else "0-0"
 
 
+def start_suggestion_relay(redis_url: str, *, post_reply, owner_for) -> threading.Thread:
+    """Deliver the copilot's suggestions into the meeting they came from.
+
+    The copilot has no tools and no network — deliberately, since it consumes an untrusted
+    transcript — so it cannot speak into the meeting itself. It writes proposals to one shared
+    stream and this thread does the talking, which is the same split the bot's transcript already
+    uses: the sandboxed producer writes a carrier, the control plane owns every socket.
+
+    ``owner_for(meeting_key)`` supplies the account to post as; without one the suggestion is
+    DROPPED. A proposal posted under a guessed identity would be worse than one never made."""
+    t = threading.Thread(
+        target=_run_suggestions, args=(redis_url, post_reply, owner_for),
+        daemon=True, name="tx-suggest",
+    )
+    t.start()
+    return t
+
+
+def _run_suggestions(redis_url: str, post_reply, owner_for) -> None:
+    import redis as redislib
+
+    r = redislib.from_url(redis_url, decode_responses=True, socket_keepalive=True, health_check_interval=10)
+    try:
+        r.xgroup_create(SUGGESTIONS, SUGGESTION_GROUP, id="$", mkstream=True)
+    except redislib.exceptions.ResponseError as e:
+        if "BUSYGROUP" not in str(e):
+            raise
+    # A suggestion is only worth making WHILE the thing is being discussed. One that surfaces after a
+    # restart, minutes late and out of context, is noise — so the group starts at `$` and a backlog is
+    # never replayed.
+    logger.info("suggestion relay up — consuming %s (group=%s)", SUGGESTIONS, SUGGESTION_GROUP)
+    while True:
+        try:
+            resp = r.xreadgroup(SUGGESTION_GROUP, "agent-api", {SUGGESTIONS: ">"}, count=10, block=5000)
+        except (redislib.exceptions.TimeoutError, redislib.exceptions.ConnectionError):
+            continue
+        except Exception:  # noqa: BLE001 — the relay must never die on a bad frame
+            logger.exception("suggestion xreadgroup failed; retrying")
+            time.sleep(1)
+            continue
+        for _stream, entries in resp or []:
+            for msg_id, fields in entries:
+                try:
+                    r.xack(SUGGESTIONS, SUGGESTION_GROUP, msg_id)
+                    _deliver_suggestion(json.loads(fields.get("payload") or "{}"), post_reply, owner_for)
+                except Exception:  # noqa: BLE001
+                    logger.exception("bad suggestion frame; skipping")
+
+
+def _deliver_suggestion(p: dict, post_reply, owner_for) -> None:
+    key = str(p.get("meeting_id") or "")
+    native = str(p.get("native_id") or key)
+    platform = p.get("platform") or "google_meet"
+    title = (p.get("title") or "").strip()
+    body = (p.get("body") or "").strip()
+    if not key or not (title or body):
+        return
+    # The lookup is injected, so it is not this module's to trust. A registry fault must read as
+    # "no owner" — which drops the suggestion — rather than killing the relay for every meeting.
+    try:
+        owner = owner_for(key)
+    except Exception:  # noqa: BLE001
+        logger.exception("meet-suggest: owner lookup failed for meeting %s", key)
+        owner = None
+    if not owner:
+        logger.warning("meet-suggest: no owner known for meeting %s — dropping %r", key, title or body)
+        return
+    # The proposal is posted as a QUESTION, and says how to accept it. Someone reading a meeting chat
+    # mid-conversation needs to know instantly that nothing has happened yet and what would.
+    text = body or title
+    if not text.rstrip().endswith("?"):
+        text = f"{text.rstrip().rstrip('.')}?"
+    text = f"{text} — reply \"@vexa yes\" and I'll do it."
+    try:
+        ok = post_reply(str(owner), platform, native, text)
+        logger.info("meet-suggest: %s for %s/%s — %r",
+                    "delivered" if ok else "delivery FAILED", platform, native, title or body[:60])
+    except Exception:  # noqa: BLE001
+        logger.exception("meet-suggest: delivery raised for %s/%s", platform, native)
+
+
 def start(redis_url: str, dispatcher, live, *, subject: str = "u_live", chat_responder=None) -> threading.Thread:
     """Spawn the watcher (the ARM daemon thread) and return it (tests/introspection). ``keymap``
     (numeric meeting_id → row-id routing key) is the arm thread's own state.
@@ -340,6 +426,11 @@ def _handle(r, dispatcher, live, subject, p, last_arm, keymap, first_seen, chat_
     # can't drop the meeting from the list — it reappears on the first segment. Throttle only the spawn.
     # session_uid == the ROW id `mid` too, so the copilot out-stream (unit:agent-meet-{mid}) and the
     # transcript carrier (tc:meeting:{mid}) agree — the terminal SSE reads both by the same id.
+    # Remember who owns this meeting. The suggestion relay has no transcript of its own to learn it
+    # from, and a proposal posted under a guessed identity is worse than one never made.
+    owner_seen = p.get("owner_user_id")
+    if owner_seen:
+        MEETING_OWNERS[key] = str(owner_seen)
     live.add({
         "meeting_id": key, "session_uid": key, "native_id": native, "platform": platform,
         "title": _title(platform, native), "unit_id": f"agent-meet-{key}",

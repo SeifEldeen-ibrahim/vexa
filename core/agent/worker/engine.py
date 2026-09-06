@@ -423,6 +423,7 @@ def main() -> None:  # pragma: no cover — the container entrypoint (wired in t
     # Meeting entry functions imported function-locally to avoid an import cycle at module load
     # (worker.meeting imports the generic helpers from this module).
     from worker.meeting import (
+        SUGGESTION_STREAM,
         meeting_card_turn,
         meeting_doc_turn,
         serve_meeting,
@@ -507,6 +508,13 @@ def main() -> None:  # pragma: no cover — the container entrypoint (wired in t
             cursor_key=f"proc:meeting:{row_id}:cursor",
             on_proc_note=on_proc_note,
             on_envelope=on_envelope,
+            # A copilot SUGGESTION goes to one shared stream the control plane consumes and posts
+            # into the meeting's own chat — the same carrier shape as the bot's transcript. The
+            # worker stays tool-less and networkless; the host does the talking.
+            on_suggestion=lambda card: stream.xadd(SUGGESTION_STREAM, {"payload": json.dumps({
+                "meeting_id": str(session_uid), "native_id": str(native), "platform": platform,
+                "title": card.get("title") or "", "body": card.get("body") or "",
+            })}),
             # Provenance stamped on every processed-notes entry: what pipeline/provider/model
             # produced this cleaned view — persisted verbatim into the durable view's `params`
             # (meeting.data processed views) by the meeting-api db-writer (reproducibility).

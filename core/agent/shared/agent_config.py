@@ -79,6 +79,12 @@ _FRONTMATTER = re.compile(r"^\s*---\s*\n(.*?)\n---\s*\n?(.*)$", re.DOTALL)
 # Where the per-agent config lives in the workspace (visible, git-governed).
 MEETING_CONFIG_PATH = "agents/meeting.md"
 
+#: Companion steering files appended to ``agents/meeting.md``'s body, in this order. They exist so a
+#: long, slow-changing knowledge base (what the products ARE, what phrases signal them) can be edited
+#: on its own without touching the copilot's polish/tag rules — and so an operator can delete one file
+#: to switch the suggestions off without unpicking prose from the config that governs cleanup.
+MEETING_STEERING_INCLUDES = ("agents/products.md",)
+
 
 def _split_frontmatter(text: str) -> tuple[dict, str]:
     """Return (frontmatter-dict, body). Tolerant: no fence ⇒ ({}, whole-text-as-body); bad yaml ⇒
@@ -160,6 +166,19 @@ def load_meeting_config(work: Path) -> MeetingConfig:
         return MeetingConfig()
 
     fm, body = _split_frontmatter(text)
+    # Companion steering: appended AFTER the body, so the meeting-specific steering a user wrote is
+    # read first and an include cannot quietly override it. A missing or unreadable include is simply
+    # skipped — steering is prose, and half of it is better than failing a meeting.
+    for rel in MEETING_STEERING_INCLUDES:
+        inc = Path(work) / rel
+        try:
+            if inc.is_file():
+                extra = inc.read_text().strip()
+                if extra:
+                    body = f"{body.rstrip()}\n\n{extra}" if body.strip() else extra
+        except OSError:
+            log.warning("%s: unreadable steering include — continuing without it", rel)
+
     return MeetingConfig(
         enabled=_as_bool(fm.get("enabled"), True),
         model=_as_model(fm.get("model")),

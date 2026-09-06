@@ -48,6 +48,15 @@ def run_turn_over_workspace(*args, **kwargs):
 
 log = logging.getLogger("agent_api.worker")
 
+#: A card kind that is not a tag but a PROPOSAL: "shall I do X?", addressed to the people in the
+#: meeting rather than to the Terminal's card rail.
+SUGGESTION_KIND = "suggestion"
+
+#: The one stream every meeting's suggestions land on, consumed by the control plane and posted into
+#: the meeting's chat. Mirrors `transcription_segments`: one shared carrier, one consumer, and no
+#: network egress from a worker that is deliberately tool-less.
+SUGGESTION_STREAM = "meet_suggestions"
+
 
 # ── meeting mode: consume the transcript Stream, gate, emit proactive cards ───────────────────────
 
@@ -438,6 +447,7 @@ def serve_meeting(
     cursor_key: str | None = None,
     on_proc_note: Callable[[dict], None] | None = None,
     on_envelope: Callable[[dict], None] | None = None,
+    on_suggestion: Callable[[dict], None] | None = None,
     proc_params: dict | None = None,
 ) -> None:
     """Consume the meeting's ``transcript.v1`` Stream (the meetings⊥agent seam — read by schema), gate
@@ -520,7 +530,17 @@ def serve_meeting(
         staged = [{**seg, "rewrite_pass": int(seg.get("_rewrite_passes", 0)) + 1} for seg in segs]
         for ev in card_turn(staged):
             if ev.get("type") == "card":
-                _accumulate_card(cards, seen_titles, ev.get("card") or {})
+                card = ev.get("card") or {}
+                _accumulate_card(cards, seen_titles, card)
+                # A `suggestion` is not a tag: it ASKS FOR SOMETHING TO HAPPEN and is addressed to
+                # the people in the meeting, so it leaves by a different door. This container has no
+                # tools and no network by design, so it hands the card to the host, which knows the
+                # meeting's identity and can reach its chat.
+                if on_suggestion and (card.get("kind") or "").strip().lower() == SUGGESTION_KIND:
+                    try:
+                        on_suggestion(card)
+                    except Exception:  # noqa: BLE001 — an extra, never worth failing a beat over
+                        log.exception("suggestion sink rejected a card")
             elif ev.get("type") == "note":
                 # The LLM rewrite returned a valid note for this id → UPGRADE the cleaned-stream text
                 # (baseline already emitted at ingest; this is the richer pass, still 1:1 by segment_id).

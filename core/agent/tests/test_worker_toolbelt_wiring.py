@@ -92,3 +92,59 @@ def test_the_config_is_not_written_into_the_workspace(monkeypatch, tmp_path):
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))
+
+
+# ── the copilot's suggestion sink, as the container entrypoint builds it ───────────────────
+
+def _run_meeting_worker(monkeypatch, tmp_path) -> dict:
+    """Boot the worker's MEETING branch and capture the callbacks it hands `serve_meeting`."""
+    import worker.meeting as meeting
+
+    added: list = []
+
+    class _Redis:
+        def xadd(self, stream, fields):
+            added.append((stream, fields))
+
+        def __getattr__(self, _name):        # every other redis call is a no-op here
+            return lambda *a, **kw: None
+
+    monkeypatch.setitem(sys.modules, "redis", types.SimpleNamespace(from_url=lambda *a, **kw: _Redis()))
+    for k, v in {
+        "REDIS_URL": "redis://x", "VEXA_UNIT_OUT_TOPIC": "unit:1:out", "VEXA_UNIT_IN_TOPIC": "unit:1:in",
+        "VEXA_WORKSPACE_PATH": str(tmp_path / "ws"), "VEXA_TRANSCRIPT_STREAM": "tc:meeting:36",
+        "VEXA_MEETING_NUMERIC_ID": "36", "VEXA_MEETING_ID": "svf-ddio-udq",
+        "VEXA_MEETING_SESSION_UID": "36", "VEXA_MEETING_PLATFORM": "google_meet",
+        "VEXA_START": "{}",
+    }.items():
+        monkeypatch.setenv(k, v)
+
+    captured: dict = {}
+    monkeypatch.setattr(meeting, "serve_meeting", lambda *a, **kw: captured.update(kw))
+    monkeypatch.setattr(engine, "preflight_provider_guard", lambda: None)
+    engine.main()
+    return {"kwargs": captured, "added": added}
+
+
+def test_a_suggestion_card_REACHES_the_stream():
+    """The sink is a lambda built in the container entrypoint, and a name that does not exist in
+    that scope raises only when a real meeting produces a real suggestion — where it is swallowed as
+    "suggestion sink rejected a card" and the proposal is silently lost. Call it here instead."""
+    import pytest as _pytest
+
+    mp = _pytest.MonkeyPatch()
+    try:
+        import tempfile
+
+        got = _run_meeting_worker(mp, pathlib.Path(tempfile.mkdtemp()))
+        got["kwargs"]["on_suggestion"]({"kind": "suggestion", "title": "Partic pipeline",
+                                        "body": "Shall I create a Partic pipeline?"})
+    finally:
+        mp.undo()
+
+    assert len(got["added"]) == 1
+    stream, fields = got["added"][0]
+    assert stream == "meet_suggestions"
+    payload = json.loads(fields["payload"])
+    assert payload["native_id"] == "svf-ddio-udq" and payload["platform"] == "google_meet"
+    assert payload["title"] == "Partic pipeline" and payload["body"] == "Shall I create a Partic pipeline?"

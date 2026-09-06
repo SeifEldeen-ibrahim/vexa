@@ -48,13 +48,20 @@ def test_the_grant_matches_by_path_when_the_slug_is_the_workspace_name():
     """The bug in the FIRST fix: the grant is keyed on the subject ("6") and the private mount's slug
     is the workspace's own name ("seed"), so slug-only matching narrowed nothing at all."""
     out = _apply_granted_modes([dict(m) for m in REAL_MOUNTS], RO_GRANT)
-    assert all(m["write"] is False for m in out), out
+    assert next(m for m in out if m["role"] == "private")["write"] is False, out
 
 
-def test_the_private_system_mount_is_narrowed_too():
-    """A turn declared read-only has no business writing the agent's private memory either."""
+def test_the_platform_continuity_tier_is_NOT_narrowed():
+    """A grant says what the turn may change in the SUBJECT'S CONTENT. `_system` is not content — it
+    is where worker code keeps the thread's continuity file, and no model tool addresses it.
+
+    Narrowing it bought nothing and cost the turn: a live meeting-chat answer streamed out and then
+    the worker died writing `sessions/meet-google_meet-37.session` onto a read-only mount, taking the
+    thread with it."""
     out = _apply_granted_modes(_stack(), RO_GRANT)
-    assert next(m for m in out if m["role"] == "system")["write"] is False
+    assert next(m for m in out if m["role"] == "system")["write"] is True
+    # …and the thing the grant IS about is still narrowed.
+    assert next(m for m in out if m["role"] == "private")["write"] is False
 
 
 def test_the_default_rw_dispatch_is_unchanged():

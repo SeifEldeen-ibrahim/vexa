@@ -433,3 +433,34 @@ def test_arm_omits_numeric_meeting_id_when_key_is_not_numeric(monkeypatch):
     assert meeting["meeting_id"] == "sess-uid-fallback"    # keyed on the (non-numeric) uid fallback
     assert "numeric_meeting_id" not in meeting            # no row id → the durable-proc hint is omitted
     assert live.by_uid["sess-uid-fallback"]["numeric_meeting_id"] is None
+
+
+def test_the_copilot_is_granted_WRITE_to_the_workspace_it_authors_into(monkeypatch):
+    """The copilot's meeting doc, envelope and running transcript file are its PRODUCT — it is a
+    writer, not a reader. `transcription` derives `ro` from input-trust, so the grant has to be made
+    explicitly at the dispatch or every write fails with `Read-only file system` deep inside a beat,
+    where it is caught and logged and the meeting simply produces nothing.
+
+    What makes it safe is the toolset, not the mode: a meeting turn carries no tools, so no model
+    ever reaches the filesystem. Every write is worker code, to paths worker code chooses."""
+    _reset_module_caches()
+    monkeypatch.setattr(w, "_resolve_native", lambda mid: ("aaa-aaaa-aaa", "google_meet"))
+
+    r, disp, live = _FakeRedis(), _FakeDispatcher(), _FakeLive()
+    r.set("proc:meeting:42:on", "1")
+    w._handle(r, disp, live, "u_live", _payload("42"), *_fresh_state())
+
+    assert disp.dispatched[0]["workspaces"] == [{"id": "u_live", "mode": "rw"}]
+
+
+def test_the_copilot_turn_is_granted_NO_tools(monkeypatch):
+    """The other half of the pair above. It consumes an untrusted transcript, so it gets write access
+    and no way for the model to use it — an empty toolbelt, which the worker reads as tool-less."""
+    _reset_module_caches()
+    monkeypatch.setattr(w, "_resolve_native", lambda mid: ("aaa-aaaa-aaa", "google_meet"))
+
+    r, disp, live = _FakeRedis(), _FakeDispatcher(), _FakeLive()
+    r.set("proc:meeting:42:on", "1")
+    w._handle(r, disp, live, "u_live", _payload("42"), *_fresh_state())
+
+    assert not disp.dispatched[0].get("tools")

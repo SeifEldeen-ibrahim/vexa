@@ -348,8 +348,16 @@ def run_turn_over_workspace(
             captured = ev["sessionId"]
         yield ev
     if captured and session_continuity:
-        sess_file.parent.mkdir(parents=True, exist_ok=True)
-        sess_file.write_text(captured)
+        # Losing continuity costs the NEXT turn its memory of this one. Failing here costs THIS turn
+        # everything: the answer has already streamed out, and an exception at this point kills the
+        # worker with the reply half-delivered and the thread gone. A read-only continuity tier is a
+        # deployment fault to fix, not a reason to lose an answer someone is waiting on.
+        try:
+            sess_file.parent.mkdir(parents=True, exist_ok=True)
+            sess_file.write_text(captured)
+        except OSError:
+            log.warning("could not persist the session id at %s — this thread starts fresh next turn",
+                        sess_file, exc_info=True)
 
 
 def start_prompt(start: dict) -> str | None:
@@ -515,7 +523,7 @@ def main() -> None:  # pragma: no cover — the container entrypoint (wired in t
             # A copilot SUGGESTION goes to one shared stream the control plane consumes and posts
             # into the meeting's own chat — the same carrier shape as the bot's transcript. The
             # worker stays tool-less and networkless; the host does the talking.
-            on_suggestion=lambda card: stream.xadd(SUGGESTION_STREAM, {"payload": json.dumps({
+            on_suggestion=lambda card: client.xadd(SUGGESTION_STREAM, {"payload": json.dumps({
                 "meeting_id": str(session_uid), "native_id": str(native), "platform": platform,
                 "title": card.get("title") or "", "body": card.get("body") or "",
             })}),

@@ -222,8 +222,11 @@ def _apply_granted_modes(mounts: list[dict], granted: list[dict]) -> list[dict]:
     path's owning segment, and verify against a mount set captured from a real dispatch rather than
     an invented one.
 
-    ``_system`` (``/workspaces/.system/<subject>``) is narrowed by the same rule, deliberately: a turn
-    the caller declared read-only has no business writing the agent's private memory either.
+    The platform's own ``_system`` tier is NOT narrowed. A grant says what the turn may change in the
+    SUBJECT'S CONTENT; ``/workspaces/.system/<subject>`` is not content — it is where worker code keeps
+    the thread's continuity file, and no model tool addresses it. Narrowing it bought nothing and cost
+    the turn: a live meeting-chat answer streamed out and then the worker died writing
+    ``sessions/meet-google_meet-36.session`` onto a read-only mount, taking the thread with it.
 
     This seam may only ever REMOVE write, never add it, so a tier the stack built read-only stays
     read-only. A malformed grant leaves the stack untouched — dropping a turn's workspaces on a bad
@@ -237,6 +240,8 @@ def _apply_granted_modes(mounts: list[dict], granted: list[dict]) -> list[dict]:
         return mounts
 
     def owns(mount: dict) -> bool:
+        if str(mount.get("role")) == "system":
+            return False                       # the platform's continuity tier — see above
         if str(mount.get("slug")) in ro:
             return True
         # The owning segment of the mount path: /workspaces/6 -> "6";

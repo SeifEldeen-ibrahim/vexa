@@ -544,6 +544,16 @@ def _arm(dispatcher, subject: str, key: str, platform: str, *, transcript_start_
         subject=subject, trigger="transcription",
         start=units.entrypoint(inline=_BRIEF),
         context={"kind": "meeting", "meeting": meeting_ref},
+        # The copilot WRITES: the meeting doc, the envelope and the running transcript file are its
+        # product, not a side effect. `transcription` derives `ro` from input-trust, which is the
+        # right default for a turn driven by an untrusted transcript — so the grant is made HERE,
+        # explicitly, where someone reading the copilot can see it.
+        #
+        # What makes it safe is not the mode but the TOOLSET: a meeting turn is dispatched with no
+        # tools at all, so the model cannot open, read or write a single file. Every write is done
+        # by worker code, to paths worker code chooses, from content the model returned as JSON.
+        # The mode governs the model; here there is no model reaching the filesystem to govern.
+        workspaces=[{"id": subject, "mode": "rw"}],
     )
     try:
         dispatcher.dispatch(inv)  # idempotent: spawns if reaped, touches if running

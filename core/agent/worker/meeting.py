@@ -72,17 +72,19 @@ _CARD_FRAME = (
     "processing window. Each line is sent through at most three passes; pass 1 is fresh, pass 2 should "
     "repair obvious ASR/name/entity errors, and pass 3 should be the final clean version before the line "
     "freezes and leaves this window.\n\n{lines}\n\n"
-    "Return a processed transcript plus tag cards. For each input line, emit one note with the SAME id "
+    "Return a processed transcript plus cards. For each input line, emit one note with the SAME id "
     "and speaker, following the POLISH RULES below.\n\n"
     "## Polish rules (governed by this workspace)\n{polish}\n\n"
     "Do not create topic headings. Set chapter to an empty string unless the source text itself gives a "
     "literal section title.\n\n"
     "## Tag rules (governed by this workspace)\n{tags}\n\n"
-    "Emit tags ONLY as cards of these kinds: {kinds}. Do not use any other kind.\n\n"
+    "Emit cards ONLY of these kinds: {kinds}. Do not use any other kind. The tag rules above govern "
+    "the TAG kinds — the ones that mark something said. A kind that asks for something to happen is "
+    "not a tag and is not bound by them; the workspace instructions below say when to emit one.\n\n"
     "Respond with ONLY this JSON object (no prose, no markdown fence, and do NOT write any files):\n"
     "{{\"notes\":[{{\"id\":\"<input id>\",\"speaker\":\"<speaker>\",\"chapter\":\"\",\"text\":\"<clean one-line note>\"}}],"
     "\"cards\":[{{\"kind\":\"<one of {kinds}>\",\"title\":\"<short>\",\"body\":\"<one line>\",\"actionable\":true}}]}}\n"
-    "Use an empty cards array if these specific lines add no tags.{steering}"
+    "Use an empty cards array if these specific lines warrant no cards.{steering}"
 )
 
 # Appended to the frame only when the workspace config carries non-empty steering.

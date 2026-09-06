@@ -51,6 +51,9 @@ export interface GmeetPipeline {
 export function createGmeetPipeline(opts: GmeetPipelineOptions): GmeetPipeline {
   const UNKNOWN = opts.unknownLabel ?? 'Speaker';
   const ONSET_GAP = opts.onsetGapMs ?? 1000;
+  //: How many confirmed utterances of conversation to carry as STT context. The character budget at
+  //: the STT boundary is the real cap; this only bounds the list over a long meeting.
+  const RECENT_TURNS = 12;
   const mgr = new SpeakerStreamManager(opts.config);
   const inflight = new Set<Promise<void>>();
   // Per channel: the CURRENT turn's stream key, bound name, last-audio time, turn counter.
@@ -77,10 +80,30 @@ export function createGmeetPipeline(opts: GmeetPipelineOptions): GmeetPipeline {
   const langOf = (l: string | undefined): string | undefined =>
     l && l !== 'unknown' ? l : undefined;
 
+  // The STT context window, as a MEETING rather than as one speaker's stream.
+  //
+  // This used to be `mgr.getLastConfirmedText(speakerId)` — the last confirmed line of the stream
+  // the audio arrived on. Meet re-binds a stream per TURN (see ONSET_GAP), and a fresh stream's
+  // confirmed text is empty, so every pause longer than a second sent Whisper no context at all:
+  // measured on a live meeting, 48 of 73 calls carried none, and every mangled product name landed
+  // in that group. A conversation does not restart when the speaker pauses, and neither should the
+  // context the transcriber is given.
+  //
+  // Bounded by ENTRIES here and by characters at the boundary (`buildSttPrompt` keeps the newest
+  // end): this list only has to be short enough not to grow without limit over a long meeting.
+  const recent: string[] = [];
+  const rememberSaid = (text: string): void => {
+    const t = text.trim();
+    if (!t) return;
+    if (recent[recent.length - 1] === t) return;   // a re-confirmation is not a new utterance
+    recent.push(t);
+    if (recent.length > RECENT_TURNS) recent.shift();
+  };
+
   mgr.onSegmentReady = (speakerId, _name, audio) => {
     const p = (async () => {
       try {
-        const r = await opts.transcribe(audio, mgr.getLastConfirmedText(speakerId) || undefined);
+        const r = await opts.transcribe(audio, recent.join(' ') || undefined);
         const segs = r?.segments;
         mgr.handleTranscriptionResult(speakerId, (r?.text || '').trim(), segs?.[segs.length - 1]?.end, segs, langOf(r?.language));
       } catch (e) {
@@ -94,6 +117,7 @@ export function createGmeetPipeline(opts: GmeetPipelineOptions): GmeetPipeline {
 
   mgr.onSegmentConfirmed = (speakerId, speakerName, text, startMs, endMs, _segmentId, lang) => {
     if (!text.trim()) return;
+    rememberSaid(text);                          // …and it becomes context for the NEXT window
     opts.sink.segment(segOf(speakerName, speakerId, text, startMs, endMs, true, lang));
   };
   mgr.onSegmentPending = (speakerId, speakerName, text, startMs, lang) => {

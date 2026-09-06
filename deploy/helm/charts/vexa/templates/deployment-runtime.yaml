@@ -74,6 +74,8 @@ spec:
               value: {{ .Values.runtime.speakerStream.maxBufferSec | default "" | quote }}
             - name: BOT_SPEAKER_IDLE_TIMEOUT_SEC
               value: {{ .Values.runtime.speakerStream.idleTimeoutSec | default "" | quote }}
+            - name: BOT_STT_VOCABULARY
+              value: {{ .Values.runtime.sttVocabulary | default "" | quote }}
             - name: INTERNAL_API_SECRET
               valueFrom:
                 secretKeyRef:

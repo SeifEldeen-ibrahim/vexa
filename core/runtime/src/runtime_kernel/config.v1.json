@@ -192,6 +192,13 @@
    "targets": ["compose", "helm", "lite"]
   },
   {
+   "key": "BOT_STT_VOCABULARY",
+   "class": "defaulted",
+   "default": "(unset — no vocabulary bias)",
+   "description": "comma-separated names this deployment says out loud (products, people, companies); forwarded to spawned bots, which send them as the Whisper prompt so speech-to-text stops inventing spellings for words it has never heard",
+   "targets": ["compose", "helm", "lite"]
+  },
+  {
    "key": "AGENT_IMAGE",
    "class": "capability",
    "capability": "agent_spawn",

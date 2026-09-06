@@ -17,3 +17,4 @@ export type {
 } from './transcription-client.js';
 export { isLowConfidenceSegment } from './confidence.js';
 export { setLogger } from './log.js';
+export { buildSttPrompt, isVocabularyEcho, parseVocabulary, vocabularyPrompt, STT_PROMPT_CHAR_BUDGET } from './prompt.js';

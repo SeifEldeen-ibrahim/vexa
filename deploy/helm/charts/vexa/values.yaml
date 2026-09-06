@@ -248,6 +248,10 @@ runtime:
     idleTimeoutSec: ""
   # Active-phase remote-audio silence window. Empty uses the bot's 10-minute default.
   aloneSilenceWindowMs: ""
+  # Comma-separated names this deployment says out loud (products, people, companies). Sent as the
+  # Whisper prompt with every audio window, so speech-to-text stops inventing spellings for words it
+  # has never heard. Empty = no vocabulary bias.
+  sttVocabulary: ""
   resources:
     requests: { cpu: 50m, memory: 256Mi }
     limits:   { cpu: 500m, memory: 768Mi }

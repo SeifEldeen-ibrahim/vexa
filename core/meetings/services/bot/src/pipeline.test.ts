@@ -150,6 +150,69 @@ async function main(): Promise<void> {
     check('no transcriptionModel → default whisper-1 (wire unchanged)', modelParts[1] === 'whisper-1', JSON.stringify(modelParts[1]));
   }
 
+  // ── 4b) The STT VOCABULARY rides every window (measured fix) ──
+  // A live meeting produced "Baratik", "Paratic" and "Barathek Bible" for one spoken product and
+  // "Claview" for Klaviyo. Whisper's `prompt` is the documented remedy, and this is the one place
+  // every lane's audio leaves for the service — so it is applied here, where no lane can forget it.
+  // Observed at the WIRE (stubbed fetch, real client), because a prompt built and never sent is
+  // exactly the shape of bug this replaces.
+  {
+    const realFetch = globalThis.fetch;
+    const prompts: Array<string | null> = [];
+    (globalThis as any).fetch = async (_url: unknown, init: { body: Buffer }) => {
+      const m = Buffer.from(init.body).toString('latin1').match(/name="prompt"\r\n\r\n([\s\S]*?)\r\n--/);
+      prompts.push(m ? m[1] : null);
+      return new Response(JSON.stringify({ text: '', language: 'en', duration: 0.1, segments: [] }), { status: 200 });
+    };
+    const pcm = new Float32Array(1600).fill(0.05);
+    const inv = baseInv({ transcriptionServiceUrl: 'http://stt.test' });
+    const vocab = { BOT_STT_VOCABULARY: 'Partic, Klaviyo, Vexa' } as NodeJS.ProcessEnv;
+
+    await createTranscribe(inv, vocab)(pcm);                                  // no conversation yet
+    await createTranscribe(inv, vocab)(pcm, 'we were discussing the pipeline');
+    await createTranscribe(inv, {} as NodeJS.ProcessEnv)(pcm, 'just the conversation');
+    await createTranscribe(inv, {} as NodeJS.ProcessEnv)(pcm);                // nothing to say
+    (globalThis as any).fetch = realFetch;
+
+    check('vocabulary reaches the wire with NO conversation (the 48-of-73 case)',
+      !!prompts[0] && prompts[0]!.includes('Partic') && prompts[0]!.includes('Klaviyo'), JSON.stringify(prompts[0]));
+    check('vocabulary and conversation ride TOGETHER, vocabulary first',
+      !!prompts[1] && prompts[1]!.indexOf('Partic') < prompts[1]!.indexOf('discussing'), JSON.stringify(prompts[1]));
+    check('unset vocabulary leaves the prompt exactly as the lane passed it',
+      prompts[2] === 'just the conversation', JSON.stringify(prompts[2]));
+    check('nothing to say → no prompt part on the wire at all', prompts[3] === null, JSON.stringify(prompts[3]));
+  }
+
+  // ── 4c) …and the prompt must never come BACK as transcript ──
+  // Conditioning cuts both ways: on a window with little speech the prompt is the strongest signal
+  // present and the model returns it. Measured on a real tape — a 1.8s near-silent window answered
+  // with the name list verbatim. Published, that is a fabricated line under a real speaker's name.
+  {
+    const realFetch = globalThis.fetch;
+    let reply = '';
+    (globalThis as any).fetch = async () =>
+      new Response(JSON.stringify({ text: reply, language: 'en', duration: 1.8,
+        segments: [{ start: 0, end: 1.8, text: reply }] }), { status: 200 });
+    const pcm = new Float32Array(1600).fill(0.05);
+    const inv = baseInv({ transcriptionServiceUrl: 'http://stt.test' });
+    const vocab = { BOT_STT_VOCABULARY: 'Partic, Klaviyo, Vexa, BIAMI, Matrix' } as NodeJS.ProcessEnv;
+
+    reply = 'Take Klaviyo, Vexa, BIAMI, Matrix, Partic.';
+    const echoed = await createTranscribe(inv, vocab)(pcm);
+    reply = 'The Partic pipeline will move the data from Klaviyo to PostgreSQL.';
+    const spoken = await createTranscribe(inv, vocab)(pcm);
+    reply = 'Take Klaviyo, Vexa, BIAMI, Matrix, Partic.';
+    const noVocab = await createTranscribe(inv, {} as NodeJS.ProcessEnv)(pcm);
+    (globalThis as any).fetch = realFetch;
+
+    check('an echoed prompt is reported as SILENCE, not as speech',
+      echoed.text === '' && echoed.segments.length === 0, JSON.stringify(echoed.text));
+    check('real speech about the same products survives untouched',
+      spoken.text.includes('Partic') && spoken.text.includes('Klaviyo'), JSON.stringify(spoken.text));
+    check('with no vocabulary configured the guard never fires',
+      noVocab.text === 'Take Klaviyo, Vexa, BIAMI, Matrix, Partic.', JSON.stringify(noVocab.text));
+  }
+
   // ── 5) LEGACY MIXED LANE (Zoom/Jitsi) speaker-label boundary (#890): a turn the lane has NOT
   //     yet attributed publishes under its provisional cluster id (speaker 'seg_N'). At the bot
   //     boundary that must become the stable 'Speaker' label — NEVER the seg_N string as a display

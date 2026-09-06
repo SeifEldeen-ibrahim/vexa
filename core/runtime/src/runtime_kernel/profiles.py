@@ -142,6 +142,10 @@ def default_registry() -> ProfileRegistry:
             "BOT_SPEAKER_CONFIRM_THRESHOLD",
             "BOT_SPEAKER_MAX_BUFFER_SEC",
             "BOT_SPEAKER_IDLE_TIMEOUT_SEC",
+            # The names this deployment says out loud. Whisper biases decoding toward the words in
+            # its prompt, and a name it has never heard is the one error no downstream repair can
+            # undo — a live meeting produced "Baratik" and "Barathek Bible" for one spoken product.
+            "BOT_STT_VOCABULARY",
         )
         if os.environ.get(key, "").strip()
     }

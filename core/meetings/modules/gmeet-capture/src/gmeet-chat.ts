@@ -30,6 +30,9 @@ export interface GmeetChatMessage {
   text: string;
   /** The sender's email, when Meet exposes one. Absent on most calls — see `senderEmail`. */
   senderEmail?: string;
+  /** True when the roster confirms exactly ONE person in the room uses this display name. Absent
+   *  when there is no roster at all — which is "unknown", not "unique". */
+  senderNameUnique?: boolean;
   /** True when TWO OR MORE people in the room are using this display name. A chat message carries
    *  only a name, so in that case there is no way to tell which of them sent it — and the honest
    *  answer is to say so rather than to guess. */
@@ -383,6 +386,7 @@ export function createGmeetChat(opts: GmeetChatOptions): GmeetChat {
   let dumped = false;
   let emails: Record<string, string> = {};
   let nameCounts: Record<string, number> = {};
+  let rosterReported = false;
 
   const textOf = (root: Element, selectors: string[]): string => {
     for (const sel of selectors) {
@@ -443,8 +447,11 @@ export function createGmeetChat(opts: GmeetChatOptions): GmeetChat {
     const senderEmail = emails[key];
     const msg: GmeetChatMessage = { sender, text };
     if (senderEmail) msg.senderEmail = senderEmail;
-    // Two people on one display name: a chat line cannot say which of them wrote it.
-    if ((nameCounts[key] || 0) > 1) msg.senderAmbiguous = true;
+    // Two people on one display name: a chat line cannot say which of them wrote it. Exactly one:
+    // within this room, the name does identify them. Zero (no roster): neither — say nothing.
+    const count = nameCounts[key] || 0;
+    if (count > 1) msg.senderAmbiguous = true;
+    else if (count === 1) msg.senderNameUnique = true;
     return msg;
   };
 
@@ -515,6 +522,16 @@ export function createGmeetChat(opts: GmeetChatOptions): GmeetChat {
     // silently degraded to name matching.
     if (autoOpen) ensureGmeetPeopleOpen();
     const rows = scrapeGmeetParticipantRows();
+    // Report the roster ONCE, whatever it contains. Logging only on success cannot distinguish
+    // "the panel had no emails" from "the panel never opened" — which is exactly the question that
+    // decides whether DOM scraping can carry identity at all, and it cost a live meeting to notice.
+    if (!rosterReported) {
+      rosterReported = true;
+      const panel = firstMatch(document, gmeetPeoplePanelSelectors);
+      log(`people panel: ${panel ? 'OPEN (' + rows.length + ' row(s))' : 'NOT FOUND'}; ` +
+          `with an email: ${rows.filter((r) => r.email).length}; ` +
+          `sample: ${JSON.stringify(rows.slice(0, 4))}`);
+    }
     if (rows.length) {
       const counts = participantNameCounts(rows);
       const dupes = Object.entries(counts).filter(([, n]) => n > 1).map(([n]) => n);

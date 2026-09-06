@@ -36,9 +36,11 @@ two Google accounts can carry the same one, and anyone in a meeting can set thei
 
   ``transcript``  a whole-name match is enough. An impersonator gains help with a meeting they are
                   already sitting in, and nothing private is in reach.
-  ``workspace``   a VERIFIED EMAIL is required. Past records are never handed out on the strength of
-                  a name. If Meet exposed no address for the asker, the turn silently narrows to
-                  ``transcript`` — it answers, it just does not open the archive.
+  ``workspace``   requires a verified email OR a display name the ROSTER confirms is unique in this
+                  room. A bare name is not enough; an unverifiable one narrows the turn to
+                  ``transcript`` rather than refusing it. Requiring an email outright was tried and
+                  was wrong — Meet exposes one so rarely that the workspace grant became unreachable,
+                  which is a worse failure than the one it prevented.
 
 Identity, in order of strength:
 
@@ -317,6 +319,7 @@ class MeetingChatResponder:
         text: str,
         sender_email: "str | None" = None,
         sender_ambiguous: bool = False,
+        sender_name_unique: "bool | None" = None,
     ) -> str:
         """Consider one ``source:'chat'`` segment. Returns a verdict string (for logs and tests);
         never raises, never blocks, and never runs the turn on the caller's thread.
@@ -362,7 +365,7 @@ class MeetingChatResponder:
                 self._inflight.add(meeting_key)
                 self._last_at[meeting_key] = now
             self._pool.submit(self._answer, meeting_key, platform, native, subject, sender, question,
-                              sender_email)
+                              sender_email, sender_name_unique)
             return "accepted"
         except Exception:  # noqa: BLE001 — the watcher thread must survive anything that happens here
             logger.exception("meet-chat: offer failed for %s", meeting_key)
@@ -370,23 +373,29 @@ class MeetingChatResponder:
 
     # ── the turn (pool thread) ─────────────────────────────────────────────────────────────────
     def _answer(self, meeting_key: str, platform: str, native: str, subject: str, sender: str,
-                question: str, sender_email: "str | None" = None) -> None:
+                question: str, sender_email: "str | None" = None,
+                sender_name_unique: "bool | None" = None) -> None:
         try:
             # The SAME thread identity the Terminal's Assistant tab shows.
             session = meeting_session_id(platform, meeting_key)
             scope = self._scope_for(meeting_key)
-            # RISK-PROPORTIONATE IDENTITY. A display name is not an identity — two accounts can
-            # carry the same one, and anyone in the room can set theirs to the owner's. So the weak
-            # check may only ever guard the harmless scope:
-            #   transcript — an impersonator gains help with a meeting they are already sitting in.
-            #   workspace  — an impersonator gains the owner's PAST RECORDS. Never on a name.
-            # Meet exposes an address for some participants and not others, so this can refuse a
-            # legitimate owner; it refuses toward the narrow scope rather than toward the records.
-            if scope == SCOPE_WORKSPACE and not sender_email:
+            # RISK-PROPORTIONATE IDENTITY. A display name alone is not an identity — anyone in the
+            # room can set theirs to the owner's — so the archive is not opened on a bare name. But
+            # requiring an EMAIL made the workspace grant unreachable in practice: Meet exposes no
+            # address for most accounts, so the toggle could be switched on and never do anything.
+            # That is a worse failure than the one it prevented, and it shipped.
+            #
+            # What actually settles it is whether the name identifies ONE person in this room:
+            #   verified email        — decisive.
+            #   name unique in roster — nobody else here answers to it, so within this room it
+            #                           identifies them. A rename to the owner's name makes it
+            #                           NON-unique, which is refused outright above.
+            #   no roster at all      — unknown, not "unique". Narrow, and say why.
+            if scope == SCOPE_WORKSPACE and not sender_email and not sender_name_unique:
                 logger.warning(
-                    "meet-chat: %r asked in a WORKSPACE-scoped meeting but Meet exposed no email for "
-                    "them - answering from the transcript only. A display name is not an identity, "
-                    "and stored records are not handed out on one.", sender)
+                    "meet-chat: %r asked in a WORKSPACE-scoped meeting with no verified email and no "
+                    "roster confirming their name is unique here - answering from the transcript "
+                    "only. Stored records are not opened on an unverifiable name.", sender)
                 scope = SCOPE_TRANSCRIPT
             focus = {
                 "kind": "meeting",

@@ -378,10 +378,14 @@ def _handle(r, dispatcher, live, subject, p, last_arm, keymap, first_seen, chat_
                 # `chat:dup:` means two people in the room share this display name, so the message
                 # cannot be attributed to either — the absence of an identity, not just a weak one.
                 ambiguous = skey.startswith("chat:dup:")
+                # `chat:uniq:` = the roster confirmed exactly one person here answers to this name.
+                # A plain `chat:<name>` means the roster was unavailable — unknown, not unique.
+                name_unique = True if skey.startswith("chat:uniq:") else (False if ambiguous else None)
                 verdict = chat_responder.offer(
                     meeting_key=key, platform=platform, native=native, owner=owner,
                     sender=str(seg.get("speaker") or "Someone"), text=text,
                     sender_email=sender_email, sender_ambiguous=ambiguous,
+                    sender_name_unique=name_unique,
                 )
                 if verdict != "not-addressed":
                     logger.info("meet-chat %s/%s: %s", platform, native, verdict)

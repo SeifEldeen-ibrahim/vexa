@@ -68,10 +68,10 @@ def _responder(rec: _Recorder, **kw) -> MeetingChatResponder:
 
 
 def _offer(r: MeetingChatResponder, text: str, *, owner="42", key="7", sender="Ada",
-           sender_email=None, sender_ambiguous=False) -> str:
+           sender_email=None, sender_ambiguous=False, sender_name_unique=None) -> str:
     return r.offer(meeting_key=key, platform="google_meet", native="abc-defg-hij",
                    owner=owner, sender=sender, text=text, sender_email=sender_email,
-                   sender_ambiguous=sender_ambiguous)
+                   sender_ambiguous=sender_ambiguous, sender_name_unique=sender_name_unique)
 
 
 def _settle(rec: _Recorder, n: int = 1, timeout: float = 5.0) -> None:
@@ -577,16 +577,42 @@ def test_without_an_email_it_falls_back_to_the_whole_name():
 # Two Google accounts can carry the same display name, and anyone in a room can set theirs to the
 # owner's. So the weak check may only guard the harmless scope.
 
-def test_workspace_scope_needs_a_verified_email_not_a_name():
-    """A name match opens the transcript. It must NOT open the owner's stored records."""
+def test_workspace_scope_is_not_opened_on_an_UNVERIFIABLE_name():
+    """No email and NO roster: the name is unknown, not unique. Narrow, but still answer."""
     rec = _Recorder()
     r = _responder(rec, anyone=False,
                    owner_identity=lambda s: ("Seif Ibrahim", "seif@biami.io"),
                    access=lambda k: "workspace")
-    # Name-only: accepted as the owner, but narrowed away from the archive.
     assert _offer(r, "@vexa what did we discuss last week?", sender="Seif Ibrahim") == "accepted"
     _settle(rec)
-    assert rec.turns[0][5] == "transcript", "past records were handed out on a display name"
+    assert rec.turns[0][5] == "transcript", "past records were handed out on an unverifiable name"
+    r.close()
+
+
+def test_workspace_scope_IS_opened_when_the_roster_says_the_name_is_unique():
+    """Requiring an email outright made the workspace grant unreachable — Meet exposes one so
+    rarely that the toggle could be switched on and never do anything, which is what shipped and
+    what the owner hit. A name the roster proves unique DOES identify someone within this room."""
+    rec = _Recorder()
+    r = _responder(rec, anyone=False,
+                   owner_identity=lambda s: ("Seif Ibrahim", "seif@biami.io"),
+                   access=lambda k: "workspace")
+    assert _offer(r, "@vexa what did we discuss last week?", sender="Seif Ibrahim",
+                  sender_name_unique=True) == "accepted"
+    _settle(rec)
+    assert rec.turns[0][5] == "workspace"
+    r.close()
+
+
+def test_a_duplicated_name_never_reaches_the_scope_question():
+    """It is refused before that — nobody is answered, so nothing is opened."""
+    rec = _Recorder()
+    r = _responder(rec, anyone=False,
+                   owner_identity=lambda s: ("Seif Ibrahim", "seif@biami.io"),
+                   access=lambda k: "workspace")
+    assert _offer(r, "@vexa secrets please", sender="Seif Ibrahim",
+                  sender_ambiguous=True) == "ambiguous-name"
+    assert rec.turns == []
     r.close()
 
 
@@ -668,3 +694,20 @@ def test_a_failing_anyone_lookup_stays_closed():
                    anyone_for=boom)
     assert _offer(r, "@vexa hi", sender="A Stranger") == "not-owner"
     r.close()
+
+
+def test_every_offer_input_reaches_the_worker_that_uses_it():
+    """A GUARD, not a behaviour test. `offer` validates on the caller's thread and hands off to
+    `_answer` on the pool, and three separate times a new input was added to `offer` and used in
+    `_answer` without being passed across — each one a NameError that only appeared once a real
+    turn ran. This pins the two signatures together so the next one fails here instead."""
+    import inspect
+    from control_plane.meeting_chat_responder import MeetingChatResponder as M
+
+    offer_args = set(inspect.signature(M.offer).parameters) - {"self"}
+    answer_args = set(inspect.signature(M._answer).parameters) - {"self"}
+    # Everything offer learns about the ASKER has to be forwarded; the rest is offer's own business.
+    per_message = {"sender", "text", "sender_email", "sender_ambiguous", "sender_name_unique",
+                   "platform", "native"}
+    missing = (offer_args & per_message) - answer_args - {"text", "sender_ambiguous"}
+    assert not missing, f"offer() accepts {sorted(missing)} but _answer() cannot see them"

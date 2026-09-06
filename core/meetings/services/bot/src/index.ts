@@ -273,7 +273,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<number
     // `completed` is immediate — a chat line has no draft phase.
     let chatSeq = 0;
     const publishChat = (sender: string, text: string, senderEmail?: string,
-                        senderAmbiguous?: boolean): void => {
+                        senderAmbiguous?: boolean, senderNameUnique?: boolean): void => {
       const nowMs = Date.now();
       void transcript.publish({
         segment_id: `${inv.connectionId ?? 'session'}:chat:${nowMs}:${chatSeq++}`,
@@ -283,8 +283,14 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<number
         // can set theirs to anyone's. `chat:email:` marks which of the two this is.
         // An email is an identity; a name shared by two people in the room is the ABSENCE of one,
         // and the consumer has to be able to tell those apart from an ordinary name.
+        // Three distinguishable states, because "unknown" must not read as "fine":
+        //   chat:email:<addr>  a verified address
+        //   chat:dup:<name>    two people here answer to this name — no identity at all
+        //   chat:uniq:<name>   the roster says exactly one person here does
+        //   chat:<name>        no roster; the name is unverified
         speaker_key: senderEmail ? `chat:email:${senderEmail}`
           : senderAmbiguous ? `chat:dup:${sender}`
+          : senderNameUnique ? `chat:uniq:${sender}`
           : `chat:${sender}`,
         text,
         start: nowMs / 1000,

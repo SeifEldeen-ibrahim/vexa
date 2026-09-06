@@ -26,7 +26,10 @@ services:
   # is the fork's.
   agent-worker:
     image: vexaai/v012-agent-worker:meetchat
+  # The runtime forwards the bot tuning knobs (BOT_STT_VOCABULARY among them) to every bot it
+  # spawns, so it carries source of its own — pinning the image is not optional here.
   runtime:
+    image: vexaai/v012-runtime:meetchat
     environment:
       - AGENT_WORKER_IMAGE=vexaai/v012-agent-worker:meetchat
   # The Terminal is the ONLY service exposed to the internet (nginx -> 127.0.0.1:13000), and it

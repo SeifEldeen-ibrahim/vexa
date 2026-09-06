@@ -19,7 +19,8 @@ polish_rules: >
 tag_rules: >
   Highlight ENTITY KEYWORDS worth researching: people, companies, and products/technologies mentioned by
   name. Surface only concrete named entities present in the lines — do not invent. Do NOT tag signals
-  (decisions, action items, questions, claims) or plain numbers; entities only.
+  (decisions, action items, questions, claims) or plain numbers; entities only. These rules govern
+  TAGS. A `suggestion` is not a tag and is not bound by them — see the standing instructions below.
 ---
 <!-- Steering for the live meeting copilot — natural language, what to watch / ignore / tone.
      This whole body is merged into the copilot prompt. Edit it to tune behavior. -->

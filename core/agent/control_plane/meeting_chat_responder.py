@@ -368,6 +368,11 @@ class MeetingChatResponder:
                 # Only the OWNER's own verified account unlocks the owner's archive. A different
                 # account, admitted because the room is open, is identified but not entitled.
                 identity_verified = bool(meet.get("is_owner"))
+                # Logged on SUCCESS too. Only mismatches were logged, so a working resolve left no
+                # trace at all — and "did Google identify me?" could not be answered from the logs,
+                # which is exactly the question asked after every test run.
+                logger.info("meet-identity: %r is account %s (owner=%s)",
+                            sender, meet.get("user_id"), meet.get("is_owner"))
             elif meet_status == "ambiguous" and not anyone:
                 # Google can SEE two accounts on this name. That is the strongest possible evidence
                 # that the message cannot be attributed — say so out loud.
@@ -462,11 +467,15 @@ class MeetingChatResponder:
                 "CANNOT open the user's stored records — no past meetings, notes or documents — so "
                 "do not claim to have checked them. Everyone in the meeting can read your reply."
                 if scope == SCOPE_TRANSCRIPT else
-                "Answer from this meeting's transcript, the workspace you can read, and the web if "
-                "it helps. You cannot change anything — you have no write or shell tools, so do not "
-                "offer to edit or create files. EVERYONE IN THE MEETING CAN READ YOUR REPLY: do not "
-                "volunteer private details from the workspace that were not already said aloud here "
-                "unless you were asked for them directly."
+                "The meeting owner has given you access to their workspace for this meeting. USE "
+                "IT: read their notes and past meeting records to answer, and search the web when "
+                "that helps. Do not say you cannot open past meetings — you can, and you were asked "
+                "to. You cannot CHANGE anything (no write or shell tools), so do not offer to edit "
+                "or create files.\n"
+                "Your reply is visible to everyone in the meeting. That is a reason to answer the "
+                "question asked and not to volunteer unrelated private material — it is NOT a reason "
+                "to refuse the owner. If something looks genuinely sensitive for a room, say so "
+                "briefly and answer what you can."
             )
             prompt = (
                 f"{who} asked in the meeting chat: {question}\n\n"

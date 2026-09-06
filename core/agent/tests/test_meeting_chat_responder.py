@@ -283,15 +283,33 @@ def test_a_transcript_turn_is_told_it_can_search_but_not_open_stored_records():
     r.close()
 
 
+def test_a_workspace_turn_is_told_to_USE_the_workspace():
+    """The first version of this prompt said "do not volunteer private details ... unless asked
+    directly", and the model read it as "never read the workspace aloud" — refusing the OWNER's
+    direct question while the file tools and the mount were both right there. The capability was
+    talked out of existing by its own instructions."""
+    rec = _Recorder()
+    r = _responder(rec, access=lambda k: "workspace",
+                   owner_identity=lambda s: (None, "ada@example.test"))
+    _offer(r, "@vexa what did we decide last week?", sender_email="ada@example.test")
+    _settle(rec)
+    prompt = rec.turns[0][3]
+    assert "USE IT" in prompt
+    assert "Do not say you cannot open past meetings" in prompt
+    r.close()
+
+
 def test_a_workspace_turn_is_still_warned_that_the_room_can_read_the_reply():
-    """Meet has no direct messages, so a workspace-scoped turn must know its answer is public."""
+    """Meet has no direct messages, so a workspace-scoped turn must know its answer is public —
+    but as a reason to stay on topic, NOT as a reason to refuse."""
     rec = _Recorder()
     r = _responder(rec, access=lambda k: "workspace",
                    owner_identity=lambda s: (None, "ada@example.test"))
     _offer(r, "@vexa what did we decide?", sender_email="ada@example.test")
     _settle(rec)
     prompt = rec.turns[0][3].lower()
-    assert "everyone in the meeting can read your reply" in prompt
+    assert "visible to everyone in the meeting" in prompt
+    assert "it is not a reason to refuse the owner" in prompt
     r.close()
 
 

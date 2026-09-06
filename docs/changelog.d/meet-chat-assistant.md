@@ -10,8 +10,9 @@
   deployment (`VEXA_MEET_CHAT_ENABLED`), and the bot must be sent with the interactive family enabled
   (`VOICE_AGENT_ENABLED`).
   **Only you are answered** — anyone can type `@vexa`, but the assistant replies to the meeting's
-  owner and ignores the rest of the room (matched on Meet display name, the only identity its chat
-  exposes). And it is grounded in that meeting's transcript *only*, with no tools, so it cannot read
+  owner and ignores the rest of the room. With `VEXA_GOOGLE_MEET_IDENTITY=true` it asks the Google
+  Meet API which **account** each participant is, rather than trusting a display name that two
+  accounts can share; without it, it falls back to name matching and says so. And it is grounded in that meeting's transcript *only*, with no tools, so it cannot read
   your workspace at all. A live meeting's toolbar has a per-meeting toggle to widen that to your
   workspace and the web (read-only, past meetings' notes included). Replies are addressed to whoever
   asked — Meet has no private chat, so everyone in the room still sees them. See

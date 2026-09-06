@@ -354,15 +354,21 @@ class MeetingChatResponder:
             # and its verdict settles the question in both directions: `matched` means an account
             # was identified, and a non-owner account is refused outright rather than falling
             # through to a name comparison the impersonator would pass.
-            meet = self._meet_verdict(subject, native, sender) if not anyone else {"status": "skipped"}
+            # Asked EVEN IN `anyone` mode. Opening the room decides who may ASK; it says nothing
+            # about who this person IS, and the archive still turns on identity. Skipping the lookup
+            # here meant enabling "anyone can ask" silently disabled workspace access for the owner
+            # too — the exact combination the owner tried first.
+            meet = self._meet_verdict(subject, native, sender)
             meet_status = meet.get("status")
             if meet_status == "matched":
-                if not meet.get("is_owner"):
+                if not meet.get("is_owner") and not anyone:
                     logger.warning("meet-chat: REFUSED %r - Google says that is account %s, not the "
                                    "meeting owner", sender, meet.get("user_id"))
                     return "not-owner"
-                identity_verified = True
-            elif meet_status == "ambiguous":
+                # Only the OWNER's own verified account unlocks the owner's archive. A different
+                # account, admitted because the room is open, is identified but not entitled.
+                identity_verified = bool(meet.get("is_owner"))
+            elif meet_status == "ambiguous" and not anyone:
                 # Google can SEE two accounts on this name. That is the strongest possible evidence
                 # that the message cannot be attributed — say so out loud.
                 logger.warning("meet-chat: REFUSED %r - Google reports two accounts in this meeting "
@@ -373,7 +379,7 @@ class MeetingChatResponder:
                 except Exception:  # noqa: BLE001
                     logger.exception("meet-chat: could not post the ambiguous-name notice")
                 return "ambiguous-name"
-            elif meet_status == "anonymous":
+            elif meet_status == "anonymous" and not anyone:
                 logger.warning("meet-chat: REFUSED %r - an unauthenticated guest, so that name has "
                                "no account behind it", sender)
                 return "not-owner"

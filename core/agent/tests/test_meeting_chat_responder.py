@@ -803,13 +803,50 @@ def test_a_throwing_meet_resolver_never_becomes_a_match():
     r.close()
 
 
-def test_anyone_mode_does_not_call_google_at_all():
-    """No identity question to answer, so no API call to spend."""
+def test_anyone_mode_STILL_identifies_people():
+    """Opening the room decides who may ASK. It says nothing about who someone IS, and the archive
+    still turns on identity — so the lookup must still happen. Skipping it meant enabling
+    "anyone can ask" silently disabled workspace access for the owner too, which is the first
+    combination the owner tried."""
     calls = []
     rec = _Recorder()
-    r = _responder(rec, anyone=True,
-                   meet_identity=lambda s, n, sender: calls.append(sender) or {"status": "matched", "is_owner": False})
-    assert _offer(r, "@vexa hi", sender="Anyone") == "accepted"
+    r = _responder(rec, anyone=True, access=lambda k: "workspace",
+                   meet_identity=lambda s, n, sender: calls.append(sender) or {
+                       "status": "matched", "user_id": "1", "is_owner": True})
+    assert _offer(r, "@vexa hi", sender="The Owner") == "accepted"
     _settle(rec)
-    assert calls == []
+    assert calls == ["The Owner"], "identity must still be resolved in anyone mode"
+    assert rec.turns[0][5] == "workspace", "an open room must not cost the owner their archive"
+    r.close()
+
+
+def test_anyone_mode_admits_a_stranger_WITHOUT_giving_them_the_archive():
+    """Admitted because the room is open; identified as somebody else, so not entitled to the
+    owner's records."""
+    rec = _Recorder()
+    r = _responder(rec, anyone=True, access=lambda k: "workspace",
+                   meet_identity=lambda s, n, sender: {"status": "matched", "user_id": "999",
+                                                       "is_owner": False})
+    assert _offer(r, "@vexa hi", sender="A Stranger") == "accepted"
+    _settle(rec)
+    assert rec.turns[0][5] == "transcript"
+    r.close()
+
+
+def test_anyone_mode_answers_a_guest_google_cannot_identify():
+    rec = _Recorder()
+    r = _responder(rec, anyone=True,
+                   meet_identity=lambda s, n, sender: {"status": "anonymous", "is_owner": False})
+    assert _offer(r, "@vexa hi", sender="Guest") == "accepted"
+    _settle(rec)
+    r.close()
+
+
+def test_anyone_mode_answers_even_when_two_people_share_a_name():
+    """Nothing to impersonate, so ambiguity costs nobody anything."""
+    rec = _Recorder()
+    r = _responder(rec, anyone=True,
+                   meet_identity=lambda s, n, sender: {"status": "ambiguous", "is_owner": False})
+    assert _offer(r, "@vexa hi", sender="Seif Ibrahim") == "accepted"
+    _settle(rec)
     r.close()

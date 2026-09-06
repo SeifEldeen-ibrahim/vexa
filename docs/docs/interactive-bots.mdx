@@ -63,11 +63,27 @@ only to the meeting's owner and ignores everyone else. The turn runs under your 
 it can read it could read **aloud into a room you do not control** — the owner check is what stops a
 guest driving it.
 
-That check matches on **display name**, because Meet's chat gives a bot a name and nothing else — no
-email, no account id. It is compared against your account name and your email's local part. Treat it
-as a guard against casual use, not against someone deliberately renaming themselves to you; the
-transcript-only default below is what bounds the damage either way. `VEXA_MEET_CHAT_ANYONE=true`
-opens it to the whole room.
+**How it knows who you are**, strongest first:
+
+1. **Google** (`VEXA_GOOGLE_MEET_IDENTITY=true`). With your one-time read-only grant, Vexa asks the
+   Meet API who is in the call and gets each signed-in participant's **account id**. An account is an
+   identity; a display name is not. A non-owner account is refused outright.
+2. **Display name**, when Google cannot answer. The whole name, against your account name. This is a
+   convention, not a control — two Google accounts can carry the same name.
+
+**What even Google cannot do:** bind a chat *message* to an account. Meet does not expose that link.
+So the rule is *"exactly one participant answers to this name, and that account is yours"* — and if
+**two** participants share a name, nobody is answered and the assistant says so. An impersonator does
+not become you; they make the name useless for both of you.
+
+`VEXA_MEET_CHAT_ANYONE=true`, or the meeting's own toggle, opens it to the whole room.
+
+<Note>
+**Turning on Google identity** needs three things: the **Google Meet API enabled** on your Cloud
+project, `https://www.googleapis.com/auth/meetings.space.readonly` allowed on the OAuth consent
+screen, and each user to sign in once more to grant it. Without all three, Vexa falls back to name
+matching and keeps working — it logs the reason rather than failing the turn.
+</Note>
 
 That is why the default is narrow: a meeting-chat turn is grounded in **that meeting's transcript
 only**, and is dispatched with **no tools**, so it cannot open a file even in a workspace that is

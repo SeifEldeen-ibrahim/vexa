@@ -5,8 +5,8 @@ display name is not an identity — two Google accounts can carry the same one, 
 can set theirs to the meeting owner's. Scraping the participants panel for an email was tried and
 Meet exposed none, so the page cannot answer "who sent this" at all.
 
-The Meet REST API can. ``conferenceRecords.participants.list`` filtered to ``latestEndTime IS NULL``
-returns who is in the call RIGHT NOW, and every signed-in participant carries a stable account id
+The Meet REST API can. ``conferenceRecords.participants.list``, narrowed to records with no
+``latestEndTime``, returns who is in the call RIGHT NOW, and every signed-in participant carries a stable account id
 (``signedinUser.user`` = ``users/{id}``) beside their display name. That id is the identity; the name
 is only the bridge from a chat line to a roster row.
 
@@ -131,16 +131,21 @@ def active_conference_for(space_name: str, access_token: str) -> Optional[str]:
 def live_participants(conference_name: str, access_token: str) -> list:
     """Who is in the call right now: ``[{display_name, user_id|None, anonymous: bool}]``.
 
-    ``latestEndTime IS NULL`` restricts the list to participants who have not left. Without it the
-    list includes everyone who was EVER in the call, which would let someone who has already gone
-    keep answering."""
-    q = urllib.parse.quote("latestEndTime IS NULL")
+    Someone who has ALREADY LEFT must not keep answering, so the list is narrowed to participants
+    still in the call. That narrowing is done HERE rather than server-side: the documented-looking
+    filter ``latestEndTime IS NULL`` is rejected by the API with ``400 INVALID_ARGUMENT``, which this
+    resolver would have read as "unavailable" and silently never matched anyone. A participant record
+    simply OMITS ``latestEndTime`` while they are still joined, so absence is the test — and it needs
+    no filter syntax anyone has to guess at.
+    """
     out: list = []
-    url = f"{MEET_API}/{conference_name}/participants?filter={q}&pageSize=100"
+    url = f"{MEET_API}/{conference_name}/participants?pageSize=100"
     seen_pages = 0
-    while url and seen_pages < 5:          # a meeting with >500 live participants is not our case
+    while url and seen_pages < 10:         # a meeting with >1000 participants is not our case
         body = _get_json(url, access_token)
         for p in body.get("participants") or []:
+            if p.get("latestEndTime"):
+                continue                    # they have left the call
             signed = p.get("signedinUser") or {}
             anon = p.get("anonymousUser") or {}
             phone = p.get("phoneUser") or {}
@@ -148,7 +153,7 @@ def live_participants(conference_name: str, access_token: str) -> list:
             uid = (signed.get("user") or "").split("/")[-1] if signed.get("user") else None
             out.append({"display_name": name, "user_id": uid, "anonymous": not signed})
         token = body.get("nextPageToken")
-        url = f"{MEET_API}/{conference_name}/participants?filter={q}&pageSize=100&pageToken={token}" if token else None
+        url = f"{MEET_API}/{conference_name}/participants?pageSize=100&pageToken={token}" if token else None
         seen_pages += 1
     return out
 

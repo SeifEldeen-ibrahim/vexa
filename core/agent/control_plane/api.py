@@ -2033,8 +2033,8 @@ def create_app(
         and a BIAMI process does not exist until someone runs the import. Claiming "created" would
         be a confident lie told to a customer in a live meeting."""
         if skill.id == "biami":
-            return ("Done — I've written the process definition into your BIAMI repo. It becomes a "
-                    "real process once you run the import there.")
+            return ("Done — the process is imported into your BIAMI database and pushed. It'll be "
+                    "there next time your cluster syncs.")
         return (f"Done — I've written the pipeline into your {skill.label} repo. It'll appear in "
                 f"{skill.label} once it imports.")
 
@@ -2139,6 +2139,26 @@ def create_app(
             return skill_actions.ActionResult(
                 "failed", f"I couldn't write into your {skill.label} repo. Nothing was changed.",
                 detail=str(exc)[:200])
+
+        # BIAMI: RUN ITS OWN IMPORTER. The TSV is a definition, not a process — the process lives in
+        # `db/pro_cess.db`, which the engine writes and the cluster syncs, while `temp/*.tsv` is not
+        # a synced surface at all. Pushing the file alone would deliver something that never becomes
+        # anything. Import is not execution: `cmd=import` registers a task, `cmd=request` runs one,
+        # and we only ever issue the first.
+        if skill.id == "biami":
+            try:
+                tail = skill_actions.biami_import(Path(repo), relpath)
+                logger.info("skill-act: BIAMI import for %s — %s", subject, tail[-200:])
+                sha = skill_actions.commit_all(
+                    Path(repo), f"Import BIAMI process {Path(relpath).stem} (via Vexa)",
+                    author=(name or subject, email or f"{subject}@vexa.local")) or sha
+            except Exception as exc:  # noqa: BLE001
+                skill_actions.rollback(Path(repo), sha)
+                logger.exception("skill-act: BIAMI import failed for %s", subject)
+                return skill_actions.ActionResult(
+                    "failed",
+                    "I wrote the process but BIAMI's importer wouldn't accept it, so I've undone it. "
+                    "Nothing was changed.", detail=str(exc)[-300:])
 
         # 4. PUSH. On a rejection roll the commit back — leaving it is what wedges the clone.
         try:

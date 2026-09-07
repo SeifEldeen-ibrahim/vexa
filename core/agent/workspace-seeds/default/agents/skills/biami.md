@@ -21,4 +21,7 @@ to touch.
 **Propose:** automating the process exactly as they described it.
 > "Shall I create a BIAMI process for the monthly invoice reconciliation you just described?"
 
-**Tool:** `biami_create_process`
+**Tool:** `biami_create_process` — you write the process as a TSV
+(`Stage | Business Task Name | Technical Task Name | Script | Parameter 1`, tab-separated, one row
+per stage, stage 0 naming the process). Vexa runs BIAMI's own importer over it, so the process is
+registered in the database — never RUN. Importing and running are different BIAMI commands.

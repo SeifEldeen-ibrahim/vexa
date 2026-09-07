@@ -117,3 +117,110 @@ def unique_relpath(repo: Path, directory: str, base: str, suffix: str, *, token:
     if not (Path(repo) / marked).exists():
         return marked
     raise FileExistsError(first)
+
+
+#: BIAMI's importer reads this path and only this path — it is hardcoded in the engine, which is why
+#: a process cannot simply be authored under its own name and left there.
+BIAMI_IMPORT_STAGING = "temp/import.tsv"
+
+#: How long the importer may take. It starts a JVM and writes a SQLite file; anything beyond this is
+#: stuck, not slow.
+BIAMI_IMPORT_TIMEOUT_SEC = 180
+
+
+def biami_import(repo: Path, relpath: str) -> str:
+    """Run BIAMI's OWN importer over a process definition, in the user's own checkout.
+
+    This is the step that makes a process real. A TSV alone creates nothing: the process lives in
+    `db/pro_cess.db`, the SQLite file the engine writes and the cluster syncs — `temp/*.tsv` is not
+    a synced surface at all. So authoring without importing would push a file that never becomes
+    anything, and say it had.
+
+    IMPORT IS NOT EXECUTION, and that is a property of BIAMI's own command set rather than a promise
+    we make: `cmd=import` registers a task, `cmd=request` runs one. Proven on a real checkout — a
+    probe process carrying a `run_command` stage imported (35 → 37 rows) without its command
+    running. We only ever issue `cmd=import`.
+
+    The importer's input path is HARDCODED to `../temp/import.tsv`, so the authored file is staged
+    into it. That file is also the record of what was last imported, which is why the authored copy
+    is kept under its own name beside it and this is a copy rather than a move.
+
+    SUCCESS IS MEASURED BY OUTCOME, not by the exit code. `core_run.sh` returns 4 from a perfectly
+    good import — it is a Talend job, and its exit status reports the job's own status rather than
+    whether the command did what was asked. Trusting it would fail every successful import; ignoring
+    it entirely would report success for every failed one. So the check is the only thing that
+    actually answers the question: is the process in the database now?
+
+    Returns the importer's tail output for the log. Raises when the process did not land — the
+    caller rolls the commit back, because a half-import is not something to push.
+    """
+    src = Path(repo) / relpath
+    staging = Path(repo) / BIAMI_IMPORT_STAGING
+    staging.parent.mkdir(parents=True, exist_ok=True)
+    definition = src.read_text(encoding="utf-8")
+    staging.write_text(definition, encoding="utf-8")
+    want = biami_process_name(definition)
+    before = biami_imported_names(Path(repo))
+    out = subprocess.run(
+        ["./core_run.sh", "--context_param", "cmd=import"],
+        cwd=str(Path(repo) / "core"), capture_output=True, text=True,
+        timeout=BIAMI_IMPORT_TIMEOUT_SEC, env=scrubbed_git_env(),
+    )
+    tail = ((out.stdout or "") + (out.stderr or "")).strip()[-400:]
+    after = biami_imported_names(Path(repo))
+    if want and want not in after:
+        raise RuntimeError(f"BIAMI did not register {want!r}: {tail}")
+    if not want and after == before:
+        raise RuntimeError(f"BIAMI imported nothing: {tail}")
+    return tail
+
+
+def biami_process_name(definition: str) -> str:
+    """The process's name, from the stage-0 row of its TSV.
+
+    That cell is what BIAMI stores as the business task name, so it is the value to look for in the
+    database afterwards — the file name is ours and means nothing to the engine."""
+    for line in (definition or "").splitlines():
+        cells = line.split("\t")
+        if len(cells) >= 2 and cells[0].strip() == "0":
+            return cells[1].strip()
+    return ""
+
+
+def biami_imported_names(repo: Path) -> set:
+    """The business-task names already in this checkout's database.
+
+    Read straight from BIAMI's own store so a duplicate is caught as what it is — a process that
+    already exists — rather than as a filename that happens to be taken."""
+    import sqlite3
+
+    db = Path(repo) / "db" / "pro_cess.db"
+    if not db.is_file():
+        return set()
+    try:
+        con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+        try:
+            rows = con.execute(
+                "select value from context where idx = 14 and key = 'generic'").fetchall()
+        finally:
+            con.close()
+    except Exception:  # noqa: BLE001 — a schema we cannot read must not block authoring
+        log.warning("could not read BIAMI's process names", exc_info=True)
+        return set()
+    return {str(r[0]).strip() for r in rows if r and r[0]}
+
+
+def commit_all(repo: Path, message: str, *, author: "tuple | None" = None) -> str:
+    """Commit everything the last step changed, or return "" when it changed nothing.
+
+    BIAMI's importer rewrites `db/pro_cess.db` and the staging TSV, and those are the files that
+    actually carry the process — so the commit has to be taken from the working tree rather than
+    from a path we chose."""
+    if not _git(repo, "status", "--porcelain"):
+        return ""
+    _git(repo, "add", "-A")
+    args = ["commit", "-m", message]
+    if author:
+        args += ["--author", f"{author[0]} <{author[1]}>"]
+    _git(repo, *args)
+    return _git(repo, "rev-parse", "HEAD")

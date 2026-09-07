@@ -10,13 +10,23 @@
 # `agent/contracts/...`), so those frozen files must be vendored into the image alongside src/.
 FROM python:3.12-slim
 
+# A Java 8 runtime, for ONE job: running BIAMI's own importer against a user's own checkout.
+#
+# BIAMI is a Talend-derived engine and its jars ship INSIDE the user's repo, so nothing of BIAMI is
+# vendored here — only the JRE that can start it. It is Java 8 because those jars are, and proven
+# rather than assumed: a headless `core_run.sh --context_param cmd=import` in a stock temurin:8
+# container registered a task (35 → 37 rows) and did NOT run it, which is the property the whole
+# feature depends on. `import` and `request` are different commands; we only ever issue the first.
+COPY --from=eclipse-temurin:8-jre /opt/java/openjdk /opt/java/openjdk
+ENV JAVA_HOME=/opt/java/openjdk
+
 RUN pip install --no-cache-dir uv==0.9.22
 
 ENV UV_LINK_MODE=copy \
     UV_PROJECT_ENVIRONMENT=/opt/venv \
     PYTHONUNBUFFERED=1 \
     PYTHONPATH=/app \
-    PATH=/opt/venv/bin:$PATH
+    PATH=/opt/venv/bin:/opt/java/openjdk/bin:$PATH
 
 WORKDIR /app
 

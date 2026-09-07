@@ -6,12 +6,12 @@
  *  the user server-side from the auth cookies — no user_id ever leaves this component (P20). The
  *  minted token value is shown ONCE (copy it now); it is never listed again.
  */
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Icon } from "../ui-kit";
 import { copyText } from "../ui-kit/ContextMenu";
 import { listTokens, createToken, revokeToken, TOKEN_SCOPES, type TokenInfo, type TokenScope, type MintedToken } from "./tokensApi";
 import { getGitToken, getSkillRepos, setGitToken, setSkillRepo,
-  type SavedGitToken, type SkillRepoState } from "./workspaceApi";
+  type GitRepoOption, type SavedGitToken, type SkillRepoState } from "./workspaceApi";
 import { presentError } from "./apiClient";
 
 const EXPIRIES: Array<{ label: string; seconds?: number }> = [
@@ -128,7 +128,7 @@ function CreateTokenForm({ onCreated }: { onCreated: (t: MintedToken) => void })
 /** The SAVE-ONCE reusable GitHub token (git_credentials). Stored server-side; the clear value is never
  *  shown again (only a ••••abcd mask). Applied as the fallback credential for push / pull / publish /
  *  attach across ALL of the user's repos, so they don't re-enter it per repo. */
-export function GitHubTokenCard() {
+export function GitHubTokenCard({ onTokenChange }: { onTokenChange?: () => void } = {}) {
   const [state, setState] = useState<SavedGitToken | null>(null);
   const [editing, setEditing] = useState(false);
   const [value, setValue] = useState("");
@@ -143,13 +143,16 @@ export function GitHubTokenCard() {
   const save = async () => {
     if (!value.trim() || busy) return;
     setBusy(true); setError(null);
-    try { const s = await setGitToken(value.trim()); setState(s); setValue(""); setEditing(false); }
+    // Saving a token changes what OTHER cards can do — the repo picker below is dead without one
+    // and cannot know on its own. Without this it kept saying "no GitHub token saved", with its
+    // dropdown disabled, until a hard refresh.
+    try { const s = await setGitToken(value.trim()); setState(s); setValue(""); setEditing(false); onTokenChange?.(); }
     catch (e: unknown) { setError(presentError(e).headline); }
     finally { setBusy(false); }
   };
   const clear = async () => {
     setBusy(true); setError(null);
-    try { const s = await setGitToken(null); setState(s); setValue(""); setEditing(false); }
+    try { const s = await setGitToken(null); setState(s); setValue(""); setEditing(false); onTokenChange?.(); }
     catch (e: unknown) { setError(presentError(e).headline); }
     finally { setBusy(false); }
   };
@@ -190,13 +193,120 @@ export function GitHubTokenCard() {
   );
 }
 
+/** A repo chooser that can be typed into.
+ *
+ *  A native <select> is fine for five options and unusable at a hundred, which is what a real
+ *  GitHub account has — so this filters as you type. Type-ahead on a <select> only matches from the
+ *  start of the string, and nobody remembers whether a repo is `vexa-vibe-pipe` or `vibe-pipe`;
+ *  matching anywhere in `owner/name` is what makes it findable.
+ *
+ *  A repo the token cannot push to stays visible but unselectable, with the reason next to it. It
+ *  matters that it is SHOWN: hiding it would read as "that repo is gone", and the person would go
+ *  looking for the repo instead of at the token, which is where the problem is.
+ */
+function RepoPicker({ repos, value, disabled, placeholder, onPick }: {
+  repos: GitRepoOption[];
+  value: string;
+  disabled?: boolean;
+  placeholder: string;
+  onPick: (url: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [q, setQ] = useState("");
+  const box = useRef<HTMLDivElement | null>(null);
+  const current = repos.find((r) => r.url === value);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => {
+      if (box.current && !box.current.contains(e.target as Node)) { setOpen(false); setQ(""); }
+    };
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, [open]);
+
+  const needle = q.trim().toLowerCase();
+  const shown = needle ? repos.filter((r) => r.full_name.toLowerCase().includes(needle)) : repos;
+
+  const field = { fontSize: 12, padding: "5px 8px", borderRadius: 6, border: "1px solid var(--line)",
+                  background: "var(--panel2)", color: "var(--t1)" } as const;
+
+  return (
+    <div ref={box} style={{ position: "relative", flex: 1, minWidth: 0 }}>
+      <button
+        type="button"
+        disabled={disabled}
+        onClick={() => { setOpen((v) => !v); setQ(""); }}
+        style={{ ...field, width: "100%", textAlign: "left", cursor: disabled ? "default" : "pointer",
+                 opacity: disabled ? 0.55 : 1, overflow: "hidden", textOverflow: "ellipsis",
+                 whiteSpace: "nowrap", color: current ? "var(--t1)" : "var(--t3)" }}
+      >
+        {current ? current.full_name : placeholder}
+      </button>
+      {open && (
+        <div style={{ position: "absolute", top: "calc(100% + 4px)", left: 0, right: 0, zIndex: 40,
+                      background: "var(--bg)", border: "1px solid var(--line2)", borderRadius: 8,
+                      boxShadow: "0 8px 24px rgba(0,0,0,0.18)", overflow: "hidden" }}>
+          <input
+            autoFocus
+            value={q}
+            placeholder="Search your repos…"
+            onChange={(e) => setQ(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Escape") { setOpen(false); setQ(""); }
+              if (e.key === "Enter" && shown.length && shown[0].can_push) {
+                onPick(shown[0].url); setOpen(false); setQ("");
+              }
+            }}
+            style={{ ...field, width: "100%", border: "none", borderBottom: "1px solid var(--line)",
+                     borderRadius: 0, outline: "none" }}
+          />
+          <div style={{ maxHeight: 220, overflowY: "auto" }}>
+            {value && (
+              <div role="button" tabIndex={0}
+                   onClick={() => { onPick(""); setOpen(false); setQ(""); }}
+                   style={{ padding: "6px 9px", fontSize: 12, color: "var(--t3)", cursor: "pointer" }}>
+                — unpin —
+              </div>
+            )}
+            {shown.length === 0 && (
+              <div style={{ padding: "8px 9px", fontSize: 11.5, color: "var(--t3)" }}>
+                {repos.length ? "No repo matches that." : "No repos to choose from."}
+              </div>
+            )}
+            {shown.map((r) => (
+              <div
+                key={r.full_name}
+                role="button"
+                tabIndex={r.can_push ? 0 : -1}
+                onClick={() => { if (r.can_push) { onPick(r.url); setOpen(false); setQ(""); } }}
+                title={r.can_push ? r.full_name : "This token can read that repo but not push to it."}
+                style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 9px",
+                         fontSize: 12, cursor: r.can_push ? "pointer" : "default",
+                         color: r.can_push ? "var(--t1)" : "var(--t3)",
+                         background: r.url === value ? "var(--panel2)" : "transparent" }}
+              >
+                <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis",
+                               whiteSpace: "nowrap" }}>{r.full_name}</span>
+                {!r.can_push && <span style={{ fontSize: 10.5, flex: "none" }}>read-only</span>}
+                {r.private && r.can_push && <span style={{ fontSize: 10.5, flex: "none", color: "var(--t3)" }}>private</span>}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+
 /** Which of your OWN repos backs each product skill.
  *
  *  A repo-backed product (Partic, BIAMI) is built by writing a document into a repo you already own
  *  and pushing it — the product reads from there, so authoring is a commit and nothing is executed
  *  by Vexa. Pinning CLONES the repo into your workspace store, which is why it lives here and not in
  *  a meeting: a clone is a network op, and a meeting is a bad place to discover a bad token. */
-export function SkillReposCard() {
+export function SkillReposCard({ reloadKey = 0 }: { reloadKey?: number } = {}) {
   const [state, setState] = useState<SkillRepoState | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -206,7 +316,9 @@ export function SkillReposCard() {
     void getSkillRepos().then((s) => { setState(s); setError(null); })
       .catch((e: unknown) => setError(presentError(e).headline));
   }, []);
-  useEffect(() => refresh(), [refresh]);
+  // `reloadKey` changes when the token above is saved or cleared: the repo list is a function of
+  // that credential, so it has to be re-asked rather than waiting for a reload.
+  useEffect(() => refresh(), [refresh, reloadKey]);
 
   const choose = (skill: string, url: string) => {
     setBusy(skill);
@@ -216,7 +328,8 @@ export function SkillReposCard() {
       .finally(() => setBusy(null));
   };
 
-  if (!state?.skills?.length) return null;
+  if (!state) return null;                 // first load; the card appears as soon as we know
+  if (!state.skills.length) return null;   // a build with no repo-backed product
 
   return (
     <div style={{ margin: "4px 4px 14px", padding: 10, borderRadius: 8, border: "1px solid var(--line)" }}>
@@ -238,19 +351,13 @@ export function SkillReposCard() {
       {state.skills.map((sk) => (
         <div key={sk.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 0" }}>
           <span style={{ width: 96, flex: "none", fontSize: 12.5, color: "var(--t1)" }}>{sk.label}</span>
-          <select
+          <RepoPicker
+            repos={state.repos}
             value={sk.pinned?.repo ?? ""}
             disabled={Boolean(busy) || !state.token_set}
-            onChange={(e) => choose(sk.id, e.target.value)}
-            style={{ ...field, flex: 1, minWidth: 0, opacity: busy === sk.id ? 0.55 : 1 }}
-          >
-            <option value="">{sk.pinned ? "— unpin —" : `Not set — ${sk.pin_hint}`}</option>
-            {state.repos.map((r) => (
-              <option key={r.full_name} value={r.url} disabled={!r.can_push}>
-                {r.full_name}{r.can_push ? "" : "  (read-only for this token)"}
-              </option>
-            ))}
-          </select>
+            placeholder={`Not set — ${sk.pin_hint}`}
+            onPick={(url) => choose(sk.id, url)}
+          />
         </div>
       ))}
     </div>

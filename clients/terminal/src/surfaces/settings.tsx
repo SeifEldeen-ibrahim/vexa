@@ -214,15 +214,29 @@ function AccountSection() {
   );
 }
 
+/** The GitHub credential and the repos it reaches, in one section and in that order.
+ *
+ *  They are rendered together because they are coupled: a repo cannot be chosen until a token is
+ *  saved, and the picker cannot discover on its own that one just was. Saving bumps a key the
+ *  picker re-fetches on — otherwise it keeps saying "no GitHub token saved" with its dropdown
+ *  disabled until the page is reloaded, which is what someone hits the moment they set this up. */
+function GitHubSection() {
+  const [reloadKey, setReloadKey] = useState(0);
+  return (
+    <>
+      <GitHubTokenCard onTokenChange={() => setReloadKey((k) => k + 1)} />
+      <SkillReposCard reloadKey={reloadKey} />
+    </>
+  );
+}
+
 function SettingsView() {
   const [section, setSection] = useState<SectionId>("calendar");
   const bodies: Record<SectionId, ReactNode> = {
     calendar: <CalendarConnectionsPanel />,
     models: <ModelsSection />,
     tokens: <TokensPanel />,
-    // The token and the repos it reaches, in one section and in that order: a repo cannot be
-    // chosen until a token is saved, and the card below says so rather than rendering an empty list.
-    github: <><GitHubTokenCard /><SkillReposCard /></>,
+    github: <GitHubSection />,
     account: <AccountSection />,
   };
   return (

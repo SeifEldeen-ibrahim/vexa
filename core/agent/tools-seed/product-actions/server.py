@@ -209,22 +209,17 @@ def _tool_list(enabled: "list | None" = None) -> list:
         label = next(l for t, (_e, l, _a) in TOOLS.items() if TOOL_SKILL.get(t) == skill)
         out.append({
             "name": name,
-            "description": f"Read the owner's {label} repo: its authoring contract, its real "
-                           f"connectors or script vocabulary, and what already exists. Call this "
-                           f"BEFORE writing one — the import gate rejects anything that does not "
-                           f"already match, and invented names are the usual reason.",
+            "description": f"Read this meeting's {label} repo: its authoring contract, its real "
+                           f"connectors or script vocabulary, and what already exists. "
+                           f"SAFE AND EXPECTED — it reads nothing but the product's own setup, "
+                           f"which the meeting owner enabled for this meeting, and changes nothing. "
+                           f"Use it freely to answer any question about {label}, and ALWAYS before "
+                           f"writing: the import gate rejects anything that does not already match, "
+                           f"and invented names are the usual reason. Only the create tool needs "
+                           f"someone's agreement first.",
             "inputSchema": {"type": "object", "properties": {}},
         })
     for name, (_env, label, arg_help) in TOOLS.items():
-        if name in DESCRIBE_SKILL:
-            d_skill = DESCRIBE_SKILL[name]
-            result = ({"status": "unavailable",
-                       "message": "That product isn't turned on for this meeting."}
-                      if d_skill not in _enabled_now() else _describe(d_skill))
-            return {"jsonrpc": "2.0", "id": mid, "result": {
-                "content": [{"type": "text", "text": json.dumps(result)}],
-                "isError": result.get("status") in ("failed", "invalid"),
-            }}
         skill = TOOL_SKILL.get(name, "")
         if skill not in ENABLED:
             continue
@@ -277,8 +272,22 @@ def _handle(msg: dict) -> "dict | None":
         if name not in TOOLS and name not in DESCRIBE_SKILL:
             return {"jsonrpc": "2.0", "id": mid,
                     "error": {"code": -32601, "message": f"unknown tool {name!r}"}}
+        enabled = _enabled_now()
+        # The READ tools first: they are not in TOOLS, and the generic path below indexes TOOLS by
+        # name. Falling through raised a KeyError, which killed the server mid-call — the model saw
+        # only "MCP error -32000: Connection closed" and told the meeting the integration was
+        # flapping, which was a true description of the symptom and no help at all.
+        if name in DESCRIBE_SKILL:
+            d_skill = DESCRIBE_SKILL[name]
+            result = ({"status": "unavailable",
+                       "message": "That product isn't turned on for this meeting."}
+                      if d_skill not in enabled else _describe(d_skill))
+            return {"jsonrpc": "2.0", "id": mid, "result": {
+                "content": [{"type": "text", "text": json.dumps(result)}],
+                "isError": result.get("status") in ("failed", "invalid"),
+            }}
         skill = TOOL_SKILL.get(name, "")
-        if skill not in _enabled_now():
+        if skill not in enabled:
             result = {"status": "unavailable",
                       "message": f"{TOOLS[name][1]} isn't turned on for this meeting."}
         elif skill in REPO_BACKED:
@@ -303,7 +312,16 @@ def main() -> None:
             msg = json.loads(line)
         except json.JSONDecodeError:
             continue                      # a malformed frame is dropped, never fatal
-        reply = _handle(msg)
+        try:
+            reply = _handle(msg)
+        except Exception as e:  # noqa: BLE001
+            # A fault handling ONE call must not end the server. It did: a KeyError on an unlisted
+            # tool name killed the process mid-call, and all the model ever saw was
+            # "MCP error -32000: Connection closed" — so it told the meeting the integration was
+            # flapping, which described the symptom perfectly and pointed nowhere near the cause.
+            # An error frame keeps the session alive and says which call failed.
+            reply = {"jsonrpc": "2.0", "id": msg.get("id"),
+                     "error": {"code": -32603, "message": f"{type(e).__name__}: {e}"[:200]}}
         if reply is not None:
             sys.stdout.write(json.dumps(reply) + "\n")
             sys.stdout.flush()

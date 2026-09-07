@@ -589,8 +589,31 @@ class MeetingChatResponder:
                 "narrower, not lesser: you answer them from this meeting and the web, never from "
                 "the owner's stored records.\n\n"
             )
+            # WHICH PRODUCTS THIS TURN MAY ACT ON. Only for someone the gate identified as the
+            # owner: `anyone` decides who may ASK, and letting it also decide who may commit to the
+            # owner's repo would make a switch about conversation into a switch about their GitHub
+            # account. A guest is answered; a guest does not get the tools.
+            #
+            # Resolved BEFORE the prompt, which names it. Assigning it after cost every turn in the
+            # deployment — a NameError inside the one try/except that must never take the pool
+            # thread down, so the assistant went silent rather than erroring anywhere visible.
+            skills = self._skills_now(meeting_key) if asker_is_owner else []
+
+            # The products this meeting is about, and what reading them means. Without this the
+            # assistant treats its own product tools as sensitive and asks permission to look —
+            # observed: "if you confirm you want repo details posted into this shared chat, I can
+            # run the read-only describe". The owner enabled the product FOR this meeting; asking
+            # again is not caution, it is a turn wasted on something already decided.
+            products = (
+                "This meeting has product tools available to you. Reading one — its contract, its "
+                "connectors, what already exists — is safe, changes nothing, and is what the "
+                "owner enabled it for: do it whenever someone asks about that product, without "
+                "asking permission first. Only CREATING something needs agreement in the chat.\n\n"
+                if skills else ""
+            )
             prompt = (
                 f"{who} asked in the meeting chat: {question}\n\n"
+                f"{products}"
                 f"{standing}"
                 f"{self._pending_clause(meeting_key)}"
                 f"{scoped} Be brief — a few sentences at most, plain text, no markdown formatting. "
@@ -604,11 +627,6 @@ class MeetingChatResponder:
                     self._suggestion_answered(meeting_key)
                 except Exception:  # noqa: BLE001
                     logger.exception("meet-chat: could not close the proposal for %s", meeting_key)
-            # WHICH PRODUCTS THIS TURN MAY ACT ON. Only for someone the gate identified as the
-            # owner: `anyone` decides who may ASK, and letting it also decide who may commit to the
-            # owner's repo would make a switch about conversation into a switch about their GitHub
-            # account. A guest is answered; a guest does not get the tools.
-            skills = self._skills_now(meeting_key) if asker_is_owner else []
             reply = self._run_turn(subject, session, focus, prompt, question, scope, skills)
             body = strip_markdown(reply or "")
             if not body:

@@ -198,6 +198,29 @@ const CHROME_WORDS = new Set([
   'send', 'edit', 'report', 'translate', 'jump to bottom', 'everyone',
 ]);
 
+/** Chrome labels are VERB-first, and Google keeps lengthening them — the pin action was "Pin" and
+ *  is now "Pin message", which an exact-match set missed. Live, that made a message's author
+ *  "Pin message", and the owner gate then refused a message the owner had just typed.
+ *
+ *  So a leaf whose FIRST word is one of these is chrome too. It costs a real participant called
+ *  "Save" or "Pin", which nobody is, and this is only ever the fallback for a row whose header gave
+ *  no name at all. */
+const CHROME_LEADERS = new Set([
+  'keep', 'save', 'copy', 'pin', 'unpin', 'more', 'delete', 'remove', 'reply', 'send', 'edit',
+  'report', 'translate', 'jump', 'download', 'open', 'add', 'mark', 'show', 'hide', 'dismiss',
+]);
+
+/** Is this leaf text a UI affordance rather than a person's name? */
+export function isChromeLabel(value: string): boolean {
+  const v = (value || '').trim().toLowerCase();
+  if (!v) return true;
+  if (CHROME_WORDS.has(v)) return true;
+  const first = v.split(/\s+/)[0];
+  // Two or three words, verb-first: "pin message", "copy text", "save to keep". A longer phrase is
+  // not a button, and a single word is already covered above.
+  return v.split(/\s+/).length <= 3 && CHROME_LEADERS.has(first);
+}
+
 function firstMatch(root: ParentNode, selectors: string[]): Element | null {
   for (const sel of selectors) {
     const el = root.querySelector(sel);
@@ -275,7 +298,7 @@ function isMessageRow(el: Element): boolean {
 function looksLikeName(t: string): boolean {
   const v = t.trim();
   if (!v || v.length > 40) return false;
-  if (CHROME_WORDS.has(v.toLowerCase())) return false;
+  if (isChromeLabel(v)) return false;
   if (/^\d{1,2}:\d{2}/.test(v)) return false;          // a timestamp
   if (!/[A-Za-z]/.test(v)) return false;                // punctuation / emoji only
   return true;
@@ -467,7 +490,7 @@ export function createGmeetChat(opts: GmeetChatOptions): GmeetChat {
     if (!sender) {
       const body = text;
       sender = frags.find((f) =>
-        f !== body && f.length <= 40 && !CHROME_WORDS.has(f.trim().toLowerCase())
+        f !== body && f.length <= 40 && !isChromeLabel(f)
         && !/^\d{1,2}:\d{2}/.test(f) && /[A-Za-z]/.test(f)) || '';
     }
     // Meet appends a timestamp to the sender row ("Ada 10:42").

@@ -20,6 +20,7 @@ import {
   ensureGmeetChatOpen,
   isGmeetChatOpen,
   consumeSentEcho,
+  isChromeLabel,
   wasSentByUs,
   scrapeGmeetParticipantEmails,
   type GmeetChatMessage,
@@ -378,4 +379,21 @@ process.exit(failed === 0 ? 0 : 1);
   rememberSent("hello there");
   check("a truncated render still matches once", consumeSentEcho("hello ther") === true);
   check("…and only once", consumeSentEcho("hello ther") === false);
+}
+
+// ── UI chrome is not a person ─────────────────────────────────────────────────────────────
+// Google keeps lengthening these labels: the pin action was "Pin" and is now "Pin message", which
+// an exact-match set missed. Live, that made a message's author "Pin message" — and the owner gate
+// then refused a message the owner had just typed, because "Pin message" is not their name.
+{
+  for (const label of ["Pin message", "pin message", "Copy text", "Save to Keep", "Keep",
+                       "Jump to bottom", "Download file", "Mark as read", "Reply in thread"]) {
+    check(`chrome: ${JSON.stringify(label)}`, isChromeLabel(label) === true);
+  }
+  for (const name of ["Seif Ibrahim", "Ada", "Marcin Kowalski", "Pinar Yilmaz", "Savannah Reed",
+                      "Addison Clarke"]) {
+    check(`a person: ${JSON.stringify(name)}`, isChromeLabel(name) === false);
+  }
+  check("a long sentence starting with a verb is not a button",
+    isChromeLabel("Open the pipeline and tell me what it does") === false);
 }

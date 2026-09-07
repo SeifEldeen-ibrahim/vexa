@@ -327,3 +327,39 @@ def test_both_scopes_still_act_and_differ_only_by_history():
     t, w = meet_chat_tools("transcript"), meet_chat_tools("workspace")
     assert "product-actions" in t and "product-actions" in w
     assert set(w) - set(t) == {"Read", "Glob", "Grep"}
+
+
+# ── a read tool must not fall through to the write path ───────────────────────────────────
+
+def test_calling_a_DESCRIBE_tool_does_not_kill_the_server():
+    """Found in a live meeting. The describe branch sat AFTER the generic path, which indexes TOOLS
+    by name — and a describe tool is not in TOOLS. The KeyError killed the process mid-call, so all
+    the model ever saw was "MCP error -32000: Connection closed", and it told the room the
+    integration was flapping: a perfect description of the symptom, pointing nowhere near the cause."""
+    import os
+    env = dict(os.environ, VEXA_SKILL_TOOLS="partic")
+    out = _rpc({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {"name": "partic_describe_repo", "arguments": {}}}, env=env)
+    assert out, "the server produced no reply at all — it died"
+    assert "result" in out[0], out[0]
+
+
+def test_a_describe_for_a_product_that_is_OFF_is_refused_not_fatal():
+    import os
+    env = dict(os.environ, VEXA_SKILL_TOOLS="partic")
+    out = _rpc({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {"name": "biami_describe_repo", "arguments": {}}}, env=env)
+    got = json.loads(out[0]["result"]["content"][0]["text"])
+    assert got["status"] == "unavailable"
+
+
+def test_one_bad_call_does_not_end_the_SESSION():
+    """The server serves a whole turn. A fault handling one call has to come back as an error frame,
+    or every later call in that turn dies with it — and the model reads a dead pipe as a broken
+    integration rather than as one bad request."""
+    out = _rpc(
+        {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "nope"}},
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
+    )
+    assert len(out) == 2, "the server stopped answering after the bad call"
+    assert out[0].get("error") and "result" in out[1]

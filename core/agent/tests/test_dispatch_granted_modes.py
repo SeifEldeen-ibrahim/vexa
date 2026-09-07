@@ -13,6 +13,10 @@ stamps the private baseline writable unconditionally. The grant was decorative.
 """
 from __future__ import annotations
 
+from pathlib import Path
+
+import shutil
+
 from control_plane.dispatch import _apply_granted_modes
 
 
@@ -209,3 +213,55 @@ def test_a_dispatch_with_no_hints_is_returned_UNCHANGED():
            "workspaces": [{"id": "6", "mode": "ro"}], "trigger": "message",
            "start": {"entrypoint": {"inline": "hi"}}, "context": {"kind": "none"}}
     assert _without_chat_session(inv) is inv
+
+
+# ── a workspace that is gone must not take the dispatch with it ───────────────────────────
+
+def test_a_mount_whose_directory_is_MISSING_is_dropped(tmp_path):
+    """Seen live. A workspace directory removed outside the app kept its entry in the active set, so
+    every dispatch emitted a mount for a path that no longer existed — `docker start` answered 404
+    and EVERY turn for that subject failed, including ones with nothing to do with it. The assistant
+    went silent in a meeting and the reason was four layers away, in a runtime log.
+
+    One unreachable workspace should cost that workspace, not the assistant."""
+    from control_plane.dispatch import _reachable
+
+    here = tmp_path / "here"
+    here.mkdir()
+    mounts = [
+        {"slug": "seed", "path": str(here), "role": "private", "write": True, "primary": True},
+        {"slug": "gone", "path": str(tmp_path / "gone"), "role": "private", "write": True},
+    ]
+    assert [m["slug"] for m in _reachable(mounts)] == ["seed"]
+
+
+def test_the_tiers_the_STACK_creates_are_never_dropped(tmp_path):
+    """The private baseline, `_system` and `_global` are created on demand by the stack that mounts
+    them, so "not there yet" is their normal state before a first turn. Dropping one would break the
+    dispatch this is meant to protect — and did, until the rule was narrowed to attached extras."""
+    from control_plane.dispatch import _reachable
+
+    missing = str(tmp_path / "not-yet")
+    stack = [
+        {"slug": "_global", "path": missing, "role": "global", "write": False},
+        {"slug": "seed", "path": missing, "role": "private", "write": True, "primary": True},
+        {"slug": "_system", "path": missing, "role": "system", "write": True},
+    ]
+    assert len(_reachable(stack)) == 3
+
+
+def test_an_EMPTY_directory_still_mounts(tmp_path):
+    """"I cannot see inside it" is a different fault from "it is not there" — an empty workspace is
+    a real workspace, and dropping it would hide a different problem."""
+    from control_plane.dispatch import _reachable
+
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    assert len(_reachable([{"slug": "e", "path": str(empty), "role": "private", "write": True}])) == 1
+
+
+def test_a_mount_with_no_path_is_left_alone(tmp_path):
+    """Malformed input is somebody else's failure to report, not this seam's to swallow."""
+    from control_plane.dispatch import _reachable
+
+    assert len(_reachable([{"slug": "x", "role": "private", "write": True}])) == 1

@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from pathlib import Path
 import threading
 import time
 from typing import Optional
@@ -206,6 +207,39 @@ def _worker_cwd(root: str, subject: str, mounts: list[dict]) -> str:
     return normal["path"] if normal else f"{root}/{subject}"
 
 
+def _reachable(mounts: list[dict]) -> list[dict]:
+    """Drop mounts whose directory is gone, LOUDLY.
+
+    A path that does not exist takes the whole dispatch down rather than just itself: the backend
+    cannot bind it, `docker start` answers 404, and EVERY turn for that subject fails — including
+    the ones that had nothing to do with the missing workspace. Seen for real, from a directory
+    removed outside the app while its entry stayed in the active set; the assistant went silent in
+    a live meeting and the reason was four layers away, in a runtime log.
+
+    One unreachable workspace should cost that workspace, not the assistant. Only genuine absence
+    counts — an empty or unreadable directory still mounts, because "I cannot see inside it" is a
+    different fault from "it is not there", and hiding the first would hide a real problem.
+
+    Scoped to ATTACHED extras. The private baseline, `_system` and `_global` are created on demand by
+    the stack that mounts them, so "not there yet" is their normal state before a first turn and
+    dropping one would break the dispatch it was meant to protect. An attached workspace is different:
+    it exists because a clone put it there, so its absence is a fact about the world, not a step that
+    has not happened yet.
+
+    Applied HERE and not in `build_mount_set`, which is a pure composer: what a mount SET should be
+    is a different question from which of its members this machine can currently bind."""
+    out: list[dict] = []
+    for m in mounts:
+        path = str(m.get("path") or "")
+        created_on_demand = bool(m.get("primary")) or str(m.get("role")) in ("system", "global")
+        if path and not created_on_demand and not Path(path).exists():
+            logger.warning("mount %r (%s) no longer exists — dropping it from this dispatch",
+                           m.get("slug"), path)
+            continue
+        out.append(m)
+    return out
+
+
 def _apply_granted_modes(mounts: list[dict], granted: list[dict],
                          subject: "str | None" = None) -> list[dict]:
     """Downgrade each mount to read-only where the dispatch granted ``mode: "ro"``.
@@ -301,6 +335,7 @@ def build_unit_env(settings: Settings, invocation: dict, *, unit_id: str, token:
     # A grant can only ever REMOVE write here, never add it: a workspace the stack built read-only
     # (the platform `_global` tier) stays read-only whatever the invocation asks for.
     mounts = _apply_granted_modes(mounts, invocation.get("workspaces") or [], subject)
+    mounts = _reachable(mounts)
     env = {
         "VEXA_OWNER": subject,                                    # quota + cred-brokerage axis = the person
         "VEXA_LAUNCHER": identity["launcher"],

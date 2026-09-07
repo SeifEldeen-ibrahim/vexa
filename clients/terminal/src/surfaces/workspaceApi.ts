@@ -354,3 +354,39 @@ export async function readWorkspaceGitDiff(opts: { sha: string; slug?: string; p
   if (opts.path) qs.set("path", opts.path);
   return getJson<GitDiff>(`/api/workspace/git/show?${qs.toString()}`);
 }
+
+/** One of the caller's GitHub repos, as the skill picker shows them. `can_push` is GitHub's own
+ *  `permissions.push`: a token that can READ a repo but not write it produces a pin that looks
+ *  healthy and then fails at push time — in a meeting, after somebody said yes out loud. */
+export interface GitRepoOption {
+  name: string; full_name: string; url: string;
+  private: boolean; default_branch: string; can_push: boolean;
+}
+
+/** A repo-backed skill and what it is currently pinned to (null = nothing yet). */
+export interface SkillRepo {
+  id: string; label: string; pin_hint: string;
+  pinned: { slug: string; repo: string; ref: string } | null;
+}
+
+export interface SkillRepoState {
+  skills: SkillRepo[];
+  repos: GitRepoOption[];
+  /** Why `repos` is empty, when it is — "no GitHub token saved", or a token-redacted GitHub error. */
+  note: string;
+  token_set: boolean;
+}
+
+/** What each repo-backed skill is pinned to, and what the caller could pin it to. */
+export async function getSkillRepos(): Promise<SkillRepoState> {
+  return getJson(`/api/skills/repos`);
+}
+
+/** Pin a skill to one of the caller's repos — or unpin it with an empty `repo`. Pinning CLONES, so
+ *  it is a Settings action and not something a meeting does. */
+export async function setSkillRepo(skill: string, repo: string, ref = "main"): Promise<unknown> {
+  return getJson(`/api/skills/repos`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ skill, repo, ref }),
+  });
+}

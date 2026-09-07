@@ -1,7 +1,8 @@
 "use client";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { CanvasActionsProvider, useActions, OPEN_ENTITY_EVENT } from "./actions";
 import { MeetingHealthBanner } from "./MeetingHealthBanner";
+import { MeetingSkills } from "./MeetingSkills";
 import { LiveTranscriptEngine, type EngineActions, type EngineEntity, type EngineSignal } from "./LiveTranscriptEngine";
 import { useMeetingNotes } from "./notes";
 import { deriveProcessingView } from "./processingView";
@@ -109,6 +110,25 @@ function MeetingCanvasBody({ meetingId }: { meetingId?: string }) {
   const [chatWorkspace, setChatWorkspace] = useState(false);
   const [chatAnyone, setChatAnyone] = useState(false);
   const [chatAccessBusy, setChatAccessBusy] = useState(false);
+
+  // HYDRATE from the server. Without this both switches render from `useState(false)` on every
+  // mount while the server may hold "anyone" and "workspace" — so a reloaded tab showed the
+  // OPPOSITE of the truth, and the next click sent the opposite of what the user meant. Tolerable
+  // with two switches; not once a switch decides whether a commit lands in someone's repo.
+  useEffect(() => {
+    if (!meetingId) return;
+    let live = true;
+    const q = `native_id=${encodeURIComponent(nativeId ?? meetingId)}&meeting_id=${encodeURIComponent(meetingId)}`;
+    void fetch(`/api/meeting/chat-access?${q}`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (!live || !d) return;
+        setChatWorkspace(d.scope === "workspace");
+        setChatAnyone(Boolean(d.anyone));
+      })
+      .catch(() => { /* leave the closed defaults — never render "open" on a failed read */ });
+    return () => { live = false; };
+  }, [meetingId, nativeId]);
   // One writer for both grants. The endpoint only touches the field it is given, so flipping one
   // never silently clears the other.
   const setChatAccess = (patch: { workspace?: boolean; anyone?: boolean }) => {
@@ -197,6 +217,11 @@ function MeetingCanvasBody({ meetingId }: { meetingId?: string }) {
               <span style={{ width: 7, height: 7, borderRadius: "50%", background: chatWorkspace ? "var(--on-accent)" : "var(--t3)", flex: "none" }} />
               {chatWorkspace ? "@vexa: workspace" : "@vexa: transcript only"}
             </button>
+            {/* What this meeting is ABOUT — a third axis, orthogonal to the two grants beside it.
+                `anyone` decides who may ask; `workspace` decides how much history is in reach;
+                this decides which products @vexa has ever heard of. All three compose: a
+                transcript-only meeting with a product on can still propose and still build. */}
+            <MeetingSkills meetingId={meetingId} nativeId={nativeId} />
           </>
         )}
       </div>

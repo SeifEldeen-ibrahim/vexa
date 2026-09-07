@@ -7,7 +7,7 @@
 import { useEffect, useState, type CSSProperties, type ReactNode } from "react";
 import { registerTab } from "../contributions";
 import { Icon } from "../ui-kit";
-import { GitHubTokenCard, TokensPanel } from "./tokens";
+import { GitHubTokenCard, SkillReposCard, TokensPanel } from "./tokens";
 import { presentError } from "./apiClient";
 import { CalendarConnectionsPanel } from "./calendarConnections";
 import { getModelPrefs, setModelPrefs, getTranscriptionPrefs, setTranscriptionPrefs, getGlobalSetting, setGlobalSetting, testModels, testTranscription, type ConfigTestResult } from "./settingsApi";
@@ -220,7 +220,9 @@ function SettingsView() {
     calendar: <CalendarConnectionsPanel />,
     models: <ModelsSection />,
     tokens: <TokensPanel />,
-    github: <GitHubTokenCard />,
+    // The token and the repos it reaches, in one section and in that order: a repo cannot be
+    // chosen until a token is saved, and the card below says so rather than rendering an empty list.
+    github: <><GitHubTokenCard /><SkillReposCard /></>,
     account: <AccountSection />,
   };
   return (

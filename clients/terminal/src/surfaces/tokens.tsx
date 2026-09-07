@@ -10,7 +10,8 @@ import { useCallback, useEffect, useState } from "react";
 import { Icon } from "../ui-kit";
 import { copyText } from "../ui-kit/ContextMenu";
 import { listTokens, createToken, revokeToken, TOKEN_SCOPES, type TokenInfo, type TokenScope, type MintedToken } from "./tokensApi";
-import { getGitToken, setGitToken, type SavedGitToken } from "./workspaceApi";
+import { getGitToken, getSkillRepos, setGitToken, setSkillRepo,
+  type SavedGitToken, type SkillRepoState } from "./workspaceApi";
 import { presentError } from "./apiClient";
 
 const EXPIRIES: Array<{ label: string; seconds?: number }> = [
@@ -163,6 +164,8 @@ export function GitHubTokenCard() {
       <div style={{ fontSize: 11, color: "var(--t3)", lineHeight: 1.45, marginBottom: 9 }}>
         Saved once and reused for push · pull · publish · attach across all your repos. Stored server-side —
         never shown again. Use a fine-grained, minimally-scoped PAT you can revoke on GitHub anytime.
+        For a product repo below it needs <strong>Contents: Read and write</strong> — a read-only token
+        pins cleanly and then fails at push time, in the meeting, after someone has said yes.
       </div>
       {error && <div role="alert" style={{ fontSize: 11.5, color: "var(--danger)", marginBottom: 8 }}>⚠ {error}</div>}
       {state?.set && !showForm && (
@@ -183,6 +186,73 @@ export function GitHubTokenCard() {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+/** Which of your OWN repos backs each product skill.
+ *
+ *  A repo-backed product (Partic, BIAMI) is built by writing a document into a repo you already own
+ *  and pushing it — the product reads from there, so authoring is a commit and nothing is executed
+ *  by Vexa. Pinning CLONES the repo into your workspace store, which is why it lives here and not in
+ *  a meeting: a clone is a network op, and a meeting is a bad place to discover a bad token. */
+export function SkillReposCard() {
+  const [state, setState] = useState<SkillRepoState | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const field = { fontSize: 12, padding: "5px 8px", borderRadius: 6, border: "1px solid var(--line)", background: "var(--panel2)", color: "var(--t1)" } as const;
+
+  const refresh = useCallback(() => {
+    void getSkillRepos().then((s) => { setState(s); setError(null); })
+      .catch((e: unknown) => setError(presentError(e).headline));
+  }, []);
+  useEffect(() => refresh(), [refresh]);
+
+  const choose = (skill: string, url: string) => {
+    setBusy(skill);
+    setError(null);
+    void setSkillRepo(skill, url).then(refresh)
+      .catch((e: unknown) => setError(presentError(e).headline))
+      .finally(() => setBusy(null));
+  };
+
+  if (!state?.skills?.length) return null;
+
+  return (
+    <div style={{ margin: "4px 4px 14px", padding: 10, borderRadius: 8, border: "1px solid var(--line)" }}>
+      <div style={{ fontSize: 12.5, color: "var(--t1)", marginBottom: 3 }}>Product repos</div>
+      <div style={{ fontSize: 11, color: "var(--t3)", lineHeight: 1.45, marginBottom: 9 }}>
+        Where @vexa writes when a meeting asks it to build something. Each product reads from a repo
+        you own — pinning one clones it here; nothing is ever run, only written and pushed.
+        Turn a product on per meeting from that meeting&rsquo;s @vexa control.
+      </div>
+      {error && <div role="alert" style={{ fontSize: 11.5, color: "var(--danger)", marginBottom: 8 }}>⚠ {error}</div>}
+      {!state.token_set && (
+        <div style={{ fontSize: 11.5, color: "var(--t3)", marginBottom: 8 }}>
+          Save a GitHub token above to choose a repo.
+        </div>
+      )}
+      {state.token_set && state.note && (
+        <div role="alert" style={{ fontSize: 11.5, color: "var(--danger)", marginBottom: 8 }}>⚠ {state.note}</div>
+      )}
+      {state.skills.map((sk) => (
+        <div key={sk.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 0" }}>
+          <span style={{ width: 96, flex: "none", fontSize: 12.5, color: "var(--t1)" }}>{sk.label}</span>
+          <select
+            value={sk.pinned?.repo ?? ""}
+            disabled={Boolean(busy) || !state.token_set}
+            onChange={(e) => choose(sk.id, e.target.value)}
+            style={{ ...field, flex: 1, minWidth: 0, opacity: busy === sk.id ? 0.55 : 1 }}
+          >
+            <option value="">{sk.pinned ? "— unpin —" : `Not set — ${sk.pin_hint}`}</option>
+            {state.repos.map((r) => (
+              <option key={r.full_name} value={r.url} disabled={!r.can_push}>
+                {r.full_name}{r.can_push ? "" : "  (read-only for this token)"}
+              </option>
+            ))}
+          </select>
+        </div>
+      ))}
     </div>
   );
 }

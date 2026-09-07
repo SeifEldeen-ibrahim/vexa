@@ -148,3 +148,40 @@ def test_a_suggestion_card_REACHES_the_stream():
     payload = json.loads(fields["payload"])
     assert payload["native_id"] == "svf-ddio-udq" and payload["platform"] == "google_meet"
     assert payload["title"] == "Partic pipeline" and payload["body"] == "Shall I create a Partic pipeline?"
+
+
+def test_the_copilots_card_turn_can_actually_BE_CALLED():
+    """A closure built in the container entrypoint and invoked from another module is only checked
+    when a real meeting produces a real beat — and it fails there, mid-meeting, four layers from
+    anything visible. Twice now: `_skill_shaped(work, cfg, enabled)` against a one-argument
+    definition, and before that a name resolved after the line that reads it.
+
+    Capturing the kwargs proves wiring; CALLING one proves it works. This drives the card turn the
+    way `serve_meeting` does, so a signature that has drifted is a red here instead of a copilot
+    that exits(1) the first time somebody speaks."""
+    import tempfile
+
+    import pytest as _pytest
+
+    import worker.meeting as meeting
+
+    seen: dict = {}
+
+    def fake_card_turn(work, segs, **kw):
+        seen.update(kw)
+        seen["called"] = True
+        return iter(())
+
+    mp = _pytest.MonkeyPatch()
+    try:
+        # Patched BEFORE main() runs: the entrypoint imports this name function-locally, so the
+        # lambda closes over that binding and a later patch would never be seen.
+        mp.setattr(meeting, "meeting_card_turn", fake_card_turn)
+        got = _run_meeting_worker(mp, pathlib.Path(tempfile.mkdtemp()))
+        list(got["kwargs"]["card_turn"]([{"segment_id": "s1", "speaker": "Ada", "text": "hi"}]))
+    finally:
+        mp.undo()
+
+    assert seen.get("called"), "the card turn closure could not be called at all"
+    for key in ("card_kinds", "steering", "polish_rules", "tag_rules"):
+        assert key in seen, f"the card turn did not pass {key}"

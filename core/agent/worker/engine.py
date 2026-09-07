@@ -573,7 +573,7 @@ def main() -> None:  # pragma: no cover — the container entrypoint (wired in t
             # it reads the toggle the same way the chat assistant reads its grants: per turn, from
             # the control plane's key. Any fault ⇒ no skills, which is quieter, never louder.
             card_turn=lambda segs: meeting_card_turn(
-                work, segs, model=cfg.model, **_skill_shaped(work, cfg, _skills_now()),
+                work, segs, model=cfg.model, **_skill_shaped(_skills_now()),
             ),
             idle_ms=idle_ms, beat_segments=cfg.cadence_segments,
             doc_turn=doc_turn, enabled=cfg.enabled,

@@ -80,3 +80,59 @@ describe("buildProcessedNotes — 1:1 fidelity", () => {
     expect(tail.text.toLowerCase()).toContain("live tail");
   });
 });
+
+/**
+ * A note id is ONE line, however many times it arrives.
+ *
+ * The copilot re-emits a note under the same id as it refines it — up to three passes per line —
+ * so the arriving list holds several copies of one utterance. A real meeting delivered 58 notes
+ * carrying 16 distinct ids, and the page showed the transcript two to four times over. The durable
+ * store was clean the whole time (16 rows, 16 segments from the API); the duplication was here.
+ */
+describe("buildProcessedNotes — a re-emitted note is still one line", () => {
+  const note = (id: string, text: string) => ({ id, text, speaker: "Seif", chapter: "" });
+
+  it("collapses repeated copies of an UNMATCHED note", () => {
+    // Unmatched: no segment carries these ids — the exact path that walked the raw list.
+    const notes = buildProcessedNotes(
+      [note("a", "Partic moves data"), note("a", "Partic moves the data"), note("a", "Partic moves the data from customers")],
+      [],
+      [],
+    );
+    expect(notes).toHaveLength(1);
+  });
+
+  it("keeps the LAST refinement, not the first draft", () => {
+    const notes = buildProcessedNotes(
+      [note("a", "Partic moves data"), note("a", "Partic moves the data from customers to leads")],
+      [],
+      [],
+    );
+    expect(notes[0].text).toContain("customers to leads");
+  });
+
+  it("still renders DISTINCT notes — the fix must not swallow the transcript", () => {
+    const notes = buildProcessedNotes(
+      [note("a", "first line"), note("a", "first line refined"), note("b", "second line"), note("c", "third line")],
+      [],
+      [],
+    );
+    expect(notes).toHaveLength(3);
+    expect(notes.map((n) => n.text.toLowerCase())).toEqual(["first line refined", "second line", "third line"]);
+  });
+
+  it("a note that DID cover a segment is not rendered a second time", () => {
+    const segments: TranscriptSegment[] = [
+      { id: "a", text: "raw a", speaker: "Seif", start: 0, end: 1, completed: true } as TranscriptSegment,
+    ];
+    const notes = buildProcessedNotes([note("a", "clean a"), note("a", "clean a again")], segments, []);
+    expect(notes).toHaveLength(1);
+    expect(notes[0].text.toLowerCase()).toBe("clean a again");
+  });
+
+  it("notes with no id at all are left alone — nothing to key on", () => {
+    const anon = (text: string) => ({ text, speaker: "Seif", chapter: "" });
+    const notes = buildProcessedNotes([anon("one"), anon("two")] as never, [], []);
+    expect(notes).toHaveLength(2);
+  });
+});

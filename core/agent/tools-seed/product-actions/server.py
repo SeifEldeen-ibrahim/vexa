@@ -30,6 +30,7 @@ import urllib.request
 #: print. The control plane holds it and does the git work.
 ACT_URL = (os.environ.get("VEXA_SKILL_ACT_URL") or "").strip()
 DESCRIBE_URL = ACT_URL.replace("/act", "/describe") if ACT_URL else ""
+ENABLED_URL = ACT_URL.replace("/act", "/enabled") if ACT_URL else ""
 ACT_GRANT = (os.environ.get("VEXA_SKILL_GRANT") or "").strip()
 
 #: Which products this turn may act on. FAIL CLOSED: absent means NONE, never "all".
@@ -41,7 +42,31 @@ ACT_GRANT = (os.environ.get("VEXA_SKILL_GRANT") or "").strip()
 #: filter" rather than as "nothing".
 #:
 #: A turn cannot use these without a grant anyway, so refusing when none is named costs nothing.
-ENABLED = [s.strip() for s in (os.environ.get("VEXA_SKILL_TOOLS") or "").split(",") if s.strip()]
+def _enabled_now() -> list:
+    """Which products this meeting currently allows.
+
+    ASKED, not read from the environment. A worker serves a whole meeting and its env is frozen at
+    container creation — a create for a running workload is a TOUCH that discards the spec — so an
+    env-read menu reflects whatever was enabled when the first message arrived. Enabling a product
+    mid-meeting then changed nothing until the worker was reaped, which is exactly what happened.
+
+    This process is started fresh for each turn, so asking here is asking now. Any failure is NONE:
+    a menu we cannot confirm must not name products the owner may not have granted."""
+    if not ENABLED_URL or not ACT_GRANT:
+        # No control plane to ask — the local answer. Production always stamps both, so this is the
+        # offline/dev path; dispatch no longer sets this variable at all, which means production
+        # falls through to an empty list rather than to "everything".
+        return [s.strip() for s in (os.environ.get("VEXA_SKILL_TOOLS") or "").split(",") if s.strip()]
+    body = json.dumps({"grant": ACT_GRANT}).encode()
+    req = urllib.request.Request(ENABLED_URL, data=body, method="POST",
+                                 headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            payload = json.loads(resp.read().decode() or "{}")
+    except Exception:  # noqa: BLE001
+        return []
+    got = payload.get("enabled")
+    return [str(x) for x in got] if isinstance(got, list) else []
 
 #: tool name → the skill it READS for. A repo-backed product's import gate rejects anything
 #: non-canonical, and its contract and connector list are the only statement of what canonical
@@ -170,12 +195,13 @@ def _describe(skill: str) -> dict:
         return {"status": "failed", "message": "I couldn't read that product's repo just now."}
 
 
-def _tool_list() -> list:
+def _tool_list(enabled: "list | None" = None) -> list:
     """The tools this turn may call — narrowed to the products the meeting enabled.
 
     Narrowed HERE, not in the allow-list: a `tool.v1` grant attaches a whole MCP server, so the
     allow-list cannot express "this server, but only two of its five tools". Listing only the
     enabled ones is what makes the per-product switch real at the tool boundary."""
+    ENABLED = _enabled_now() if enabled is None else enabled
     out = []
     for name, skill in DESCRIBE_SKILL.items():
         if skill not in ENABLED:
@@ -194,7 +220,7 @@ def _tool_list() -> list:
             d_skill = DESCRIBE_SKILL[name]
             result = ({"status": "unavailable",
                        "message": "That product isn't turned on for this meeting."}
-                      if d_skill not in ENABLED else _describe(d_skill))
+                      if d_skill not in _enabled_now() else _describe(d_skill))
             return {"jsonrpc": "2.0", "id": mid, "result": {
                 "content": [{"type": "text", "text": json.dumps(result)}],
                 "isError": result.get("status") in ("failed", "invalid"),
@@ -252,7 +278,7 @@ def _handle(msg: dict) -> "dict | None":
             return {"jsonrpc": "2.0", "id": mid,
                     "error": {"code": -32601, "message": f"unknown tool {name!r}"}}
         skill = TOOL_SKILL.get(name, "")
-        if skill not in ENABLED:
+        if skill not in _enabled_now():
             result = {"status": "unavailable",
                       "message": f"{TOOLS[name][1]} isn't turned on for this meeting."}
         elif skill in REPO_BACKED:

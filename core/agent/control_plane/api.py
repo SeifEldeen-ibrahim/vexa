@@ -18,6 +18,7 @@ honestly. Built lazily (PEP 562) so ``uvicorn control_plane.api:app`` wires the 
 from __future__ import annotations
 
 import os
+import shutil
 
 import hashlib
 import hmac
@@ -48,6 +49,7 @@ from control_plane import workspace_routines as workspace_routines_mod
 from shared.agent_config import default_meeting_model, load_meeting_config
 from shared.seeding import resolve_seed_dir, seed_workspace, validate_seed
 from control_plane.workspace_attach import (
+    _git_clone as clone_repo,
     workspace_dir_for,
     CloneError,
     activate_workspace,
@@ -512,6 +514,12 @@ class SkillAct(BaseModel):
     document: str
     #: What the meeting called it — becomes the file name, never a path.
     name: str = ""
+
+
+class SkillEnabled(BaseModel):
+    """The in-worker tool asking which products its meeting currently allows."""
+    model_config = {"extra": "forbid"}
+    grant: str
 
 
 class SkillDescribe(BaseModel):
@@ -2000,13 +2008,20 @@ def create_app(
     def _skill_grant_key(unit_id: str) -> str:
         return f"skillgrant:{unit_id}"
 
-    def _mint_skill_grant(unit_id: str, subject: str, skills: list) -> str:
-        """Authorise ONE turn to act on the subject's behalf for these skills.
+    def _mint_skill_grant(unit_id: str, subject: str, meeting_key: str) -> str:
+        """Authorise this meeting's worker to act on the subject's behalf.
 
-        The tool runs in the worker and the credential does not, so something must carry the
-        subject across — and it must not be the request body, which the model composes. A secret
-        minted here, resolved here, and scoped to (subject, skills, TTL) means a compromised worker
-        can do exactly what the turn it belongs to was already allowed to do, and nothing else."""
+        The tool runs in the worker and the credential does not, so something must carry the subject
+        across — and it must not be the request body, which the model composes.
+
+        It names the MEETING, not the products. Which products are enabled is read live, at the
+        moment a tool is called: a worker is reused for every message in a meeting and its env is
+        frozen at creation (a create for a running workload is a TOUCH that discards the spec), so a
+        grant that listed products would be answering with whatever was enabled the first time
+        somebody spoke. Enabling Partic mid-meeting then did nothing at all, which is what happened.
+
+        A compromised worker can therefore do what its meeting currently allows, and nothing else —
+        including nothing at all, the moment the owner turns a product off."""
         import secrets as _secrets
 
         import redis as _redis
@@ -2014,8 +2029,12 @@ def create_app(
         secret = _secrets.token_urlsafe(24)
         r = _redis.from_url(redis_url, decode_responses=True)
         r.setex(_skill_grant_key(secret), SKILL_ACT_TTL_SEC,
-                json.dumps({"unit": unit_id, "subject": subject, "skills": list(skills)}))
+                json.dumps({"unit": unit_id, "subject": subject, "meeting": str(meeting_key)}))
         return secret
+
+    def _skills_of_grant(grant: dict) -> list:
+        """The products this grant's meeting has enabled RIGHT NOW."""
+        return _meet_skills_for(str((grant or {}).get("meeting") or ""))
 
     def _resolve_skill_grant(secret: str) -> "dict | None":
         import redis as _redis
@@ -2090,18 +2109,12 @@ def create_app(
         `pull_origin` refuses while the local clone is AHEAD, so pulling only after a rejected push
         deadlocks and leaves the clone permanently wedged (the Terminal's git panel breaks with it).
         Pulling first, while the clone is still clean, is the only order that recovers."""
-        pins = skill_repos.read_pins(wsr.root, subject)
-        pin = pins.get(skill.id)
-        if not pin:
+        if not skill_repos.read_pins(wsr.root, subject).get(skill.id):
             return skill_actions.ActionResult(
                 "not-linked",
                 f"I can draft that, but this meeting isn't connected to a {skill.label} repo yet — "
                 f"it can be pinned in Vexa settings.")
-        try:
-            repo = workspace_dir_for(wsr.root, subject, pin["slug"])
-        except Exception:  # noqa: BLE001
-            logger.exception("skill-act: cannot resolve %s for %s", pin["slug"], subject)
-            repo = None
+        repo = skill_repos.repo_for(wsr.root, subject, skill.id)
         if repo is None or not Path(repo).is_dir():
             return skill_actions.ActionResult(
                 "not-linked",
@@ -2183,6 +2196,37 @@ def create_app(
                 f"was changed — ask me again and I'll retry.", detail=str(exc)[:200])
         return skill_actions.ActionResult("written", _skill_written_message(skill), detail=relpath)
 
+    @app.post("/internal/skills/enabled")
+    def skills_enabled(body: SkillEnabled):
+        """Which products this grant's meeting has enabled, right now.
+
+        The tool server asks at startup rather than reading its container env, because that env is
+        frozen at container creation and a worker serves a whole meeting. Reading it meant the tool
+        menu reflected whatever was enabled when the first message arrived — so turning a product on
+        mid-meeting changed nothing until the worker was reaped."""
+        grant = _resolve_skill_grant(body.grant)
+        if grant is None:
+            raise HTTPException(status_code=403, detail="expired or unknown turn grant")
+        return {"enabled": _skills_of_grant(grant)}
+
+    @app.post("/internal/skills/knowledge")
+    def skills_knowledge(body: SkillEnabled):
+        """The copilot's product knowledge for THIS meeting — only what is enabled, right now.
+
+        Served from the deployment's own files, never from the user's workspace. It used to live at
+        `agents/skills/*.md` inside the workspace, where the copilot could merge just the enabled
+        ones into its prompt — and where a workspace-scoped assistant with a Read tool could open ALL
+        of them regardless. The gate was on the prompt and on the tools while the source text sat in
+        a directory anyone could list, so a meeting with only Partic on could still be told what
+        BIAMI is, in this file's own words.
+
+        Isolation has to be about REACH, not about what a prompt was asked to include."""
+        grant = _resolve_skill_grant(body.grant)
+        if grant is None:
+            raise HTTPException(status_code=403, detail="expired or unknown turn grant")
+        enabled = _skills_of_grant(grant)
+        return {"enabled": enabled, "steering": skills_registry.read_knowledge(enabled)}
+
     @app.post("/internal/skills/describe")
     def skills_describe(body: SkillDescribe):
         """What the model needs to AUTHOR for this product, read from the owner's own pinned repo.
@@ -2202,18 +2246,13 @@ def create_app(
             raise HTTPException(status_code=403, detail="expired or unknown turn grant")
         subject = str(grant.get("subject") or "")
         skill = skills_registry.get(body.skill)
-        if skill is None or skill.id not in skills_registry.known(grant.get("skills") or []):
+        if skill is None or skill.id not in _skills_of_grant(grant):
             return {"status": "not-linked",
                     "message": f"{body.skill} is not turned on for this meeting."}
-        pins = skill_repos.read_pins(wsr.root, subject)
-        pin = pins.get(skill.id)
-        if not pin:
+        if not skill_repos.read_pins(wsr.root, subject).get(skill.id):
             return {"status": "not-linked",
                     "message": f"This meeting isn't connected to a {skill.label} repo yet."}
-        try:
-            repo = Path(workspace_dir_for(wsr.root, subject, pin["slug"]))
-        except Exception:  # noqa: BLE001
-            repo = None
+        repo = skill_repos.repo_for(wsr.root, subject, skill.id)
         if repo is None or not repo.is_dir():
             return {"status": "not-linked",
                     "message": f"The {skill.label} repo isn't reachable any more."}
@@ -2234,9 +2273,9 @@ def create_app(
             raise HTTPException(status_code=403, detail="expired or unknown turn grant")
         subject = str(grant.get("subject") or "")
         skill = skills_registry.get(body.skill)
-        if skill is None or skill.id not in skills_registry.known(grant.get("skills") or []):
-            # The turn may only act on a product the OWNER enabled for that meeting. The tool list
-            # already reflects this, but a tool list is a prompt-visible thing and this is not.
+        if skill is None or skill.id not in _skills_of_grant(grant):
+            # The turn may only act on a product the OWNER has enabled — read fresh, so turning one
+            # OFF takes effect on the next call rather than at the end of the meeting.
             return {"status": "not-linked",
                     "message": f"{body.skill} is not turned on for this meeting."}
         result = _skill_act(subject, skill, body)
@@ -2284,18 +2323,32 @@ def create_app(
         if not (body.repo or "").strip():
             return {"skills": skill_repos.unpin(wsr.root, subject, skill.id)}
         token = git_creds.read_github_token(wsr.root, subject)
-        try:
-            result = activate_workspace(wsr.root, subject, body.repo.strip(), body.ref or "main",
-                                        token=token or None)
-        except ValueError:
+        url, ref = body.repo.strip(), (body.ref or "main")
+        slug = skill_repos.slug_for_repo(url)
+        dest = skill_repos.repo_dir(wsr.root, subject, slug)
+        if dest is None:
             raise HTTPException(status_code=400, detail="invalid subject or repo")
-        except CloneError as exc:
-            # Token-redacted upstream (P15). This is the honest place for a bad token to surface —
-            # in Settings, where the person can fix it, and not mid-meeting.
+        # A PLAIN clone, keeping its own .git and origin. Deliberately not `activate_workspace`:
+        # that folds a repo into the workspace model — wrapping a non-workspace-shaped repo in a
+        # template, nesting it under kg/ and DROPPING its .git — which leaves nothing to pull from
+        # or push to. Both of the first two repos anyone pinned were non-compliant, so that path
+        # could never have worked.
+        try:
+            if (dest / ".git").is_dir():
+                pull_origin(dest, token=token)
+            else:
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.rmtree(dest, ignore_errors=True)
+                clone_repo(url, ref, dest, token or None)
+        except (CloneError, RemoteSyncError) as exc:
+            # Token-redacted upstream (P15). Settings is the honest place for a bad token to
+            # surface — where the person can fix it, and not mid-meeting.
             raise HTTPException(status_code=502, detail=f"could not clone that repo: {exc}")
-        pins = skill_repos.pin(wsr.root, subject, skill.id, slug=result.slug,
-                               repo=body.repo.strip(), ref=body.ref or "main")
-        return {"skills": pins, "slug": result.slug, "cloned": result.cloned}
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("skill-repo: clone failed for %s/%s", subject, skill.id)
+            raise HTTPException(status_code=502, detail=f"could not clone that repo: {exc}")
+        pins = skill_repos.pin(wsr.root, subject, skill.id, slug=slug, repo=url, ref=ref)
+        return {"skills": pins, "slug": slug, "cloned": True}
 
     @app.get("/api/workspace/git-remote-status")
     def ws_git_remote_status(request: Request, slug: Optional[str] = None):
@@ -2904,7 +2957,7 @@ def create_app(
         inv = units.make_dispatch(
             subject=subject, trigger="message",
             start=units.entrypoint(inline=grounded), context=ctx,
-            tools=meet_chat_tools(scope, skills_registry.known(skills or [])),
+            tools=meet_chat_tools(scope),
             workspaces=[{"id": subject, "mode": "ro"}],
         )
         unit_id = units.dispatch_id(inv)
@@ -2913,10 +2966,12 @@ def create_app(
         # for this subject, on these products" across — and it must not be the request body, which
         # the model composes. Scoped to the products the OWNER enabled for this meeting, so a turn
         # can never write to a repo the meeting was not about.
-        enabled = skills_registry.known(skills or [])
-        if enabled:
-            inv.setdefault("context", {})["skill_grant"] = _mint_skill_grant(unit_id, subject, enabled)
-            inv["context"]["skill_tools"] = ",".join(enabled)
+        # The grant names this MEETING; which products it allows is read live at call time, so a
+        # toggle takes effect on the next message rather than on the next container.
+        meeting_key = str(focus.get("meeting_id") or "")
+        if meeting_key:
+            inv.setdefault("context", {})["skill_grant"] = _mint_skill_grant(
+                unit_id, subject, meeting_key)
         # No model credential ⇒ the worker can only fail with its own "Not logged in" text, which
         # means nothing to someone sitting in a meeting. Say so in words they can act on instead of
         # going silent — silence in a meeting reads as a broken bot.

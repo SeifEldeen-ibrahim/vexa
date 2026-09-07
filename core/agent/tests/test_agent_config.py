@@ -160,30 +160,20 @@ def test_blank_rules_fall_back_to_defaults(tmp_path):
 _SEED = Path(__file__).resolve().parents[1] / "workspace-seeds" / "default"
 
 
-def test_no_skills_means_no_product_knowledge_in_the_prompt():
-    """Every meeting's default. The copilot has never heard of these products, so it cannot propose
-    one — an absence, not an instruction to stay quiet."""
-    steering = load_meeting_config(_SEED).steering
-    for product in ("Partic", "BIAMI", "Matrix", "ContentMorph", "10x Factory"):
-        assert product not in steering, product
+def test_the_workspace_config_carries_NO_product_knowledge_at_all():
+    """Not even for an enabled product. The prose lives with the deployment and is served by the
+    control plane — a file inside a workspace is readable by any turn that mounts it, and a
+    workspace-scoped assistant has a Read tool. That is how a meeting with only Partic on was able
+    to answer a question about BIAMI, in the file's own words."""
+    for enabled in ([], ["partic"], ["partic", "biami"]):
+        steering = load_meeting_config(_SEED, enabled).steering
+        for product in ("Partic", "BIAMI", "ContentMorph", "10x Factory"):
+            assert product not in steering, (enabled, product)
 
 
-def test_an_enabled_skill_brings_its_knowledge_and_nobody_elses():
-    steering = load_meeting_config(_SEED, ["partic"]).steering
-    assert "Partic" in steering
-    assert "ContentMorph" not in steering and "10x Factory" not in steering
-
-
-def test_two_skills_bring_both():
-    steering = load_meeting_config(_SEED, ["partic", "biami"]).steering
-    assert "Partic" in steering and "BIAMI" in steering
-
-
-def test_the_meetings_OWN_steering_is_read_first():
-    """A skill file is appended AFTER the workspace's own steering, so an include can never quietly
-    override what the user wrote for this meeting."""
-    steering = load_meeting_config(_SEED, ["partic"]).steering
-    assert steering.index("Highlight the people") < steering.index("Partic")
+def test_the_meetings_OWN_steering_still_governs():
+    """What the user wrote for this meeting is untouched by any of it."""
+    assert "Highlight the people" in load_meeting_config(_SEED, ["partic"]).steering
 
 
 def test_the_copilots_ORIGINAL_job_is_untouched_by_having_no_skills():

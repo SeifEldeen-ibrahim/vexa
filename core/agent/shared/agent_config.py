@@ -187,10 +187,12 @@ def load_meeting_config(work: Path, skill_ids=None) -> MeetingConfig:
     fallback to the code defaults. Absent file ⇒ all defaults. Tolerant of bad YAML / no frontmatter
     (body, if any, is still used as steering).
 
-    ``skill_ids`` names the products enabled for THIS meeting; their knowledge files are merged into
-    the steering. Omitted or empty ⇒ no product knowledge at all, which is every meeting's default
-    and does not affect the copilot's ordinary work — cleaning the transcript, tagging entities and
-    writing the meeting doc are governed by the frontmatter and happen regardless."""
+    ``skill_ids`` names the products enabled for THIS meeting. It decides whether `suggestion` is a
+    card kind this meeting may emit; the product PROSE is fetched separately, from the deployment,
+    so that it is never sitting in a directory a turn could read for itself. Omitted or empty ⇒ no
+    products, which is every meeting's default and does not affect the copilot's ordinary work —
+    cleaning the transcript, tagging entities and writing the meeting doc are governed by the
+    frontmatter and happen regardless."""
     path = Path(work) / MEETING_CONFIG_PATH
     if not path.exists():
         return MeetingConfig()
@@ -203,7 +205,11 @@ def load_meeting_config(work: Path, skill_ids=None) -> MeetingConfig:
     # Companion steering: appended AFTER the body, so the meeting-specific steering a user wrote is
     # read first and an include cannot quietly override it. A missing or unreadable include is simply
     # skipped — steering is prose, and half of it is better than failing a meeting.
-    for rel in (*MEETING_STEERING_INCLUDES, *skills.steering_includes(skill_ids)):
+    # PRODUCT knowledge is NOT merged here. It lives with the deployment and is served by the
+    # control plane, because a file inside a workspace is readable by any turn that mounts it — and
+    # a workspace-scoped assistant has a Read tool, so keeping it here leaked every product to a
+    # meeting that had enabled one. `skill_ids` still decides the card kinds below.
+    for rel in MEETING_STEERING_INCLUDES:
         inc = Path(work) / rel
         try:
             if inc.is_file():

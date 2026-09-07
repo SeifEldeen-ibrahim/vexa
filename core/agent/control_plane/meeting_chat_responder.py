@@ -164,18 +164,24 @@ MEET_CHAT_WEB_TOOLS = ["WebSearch", "WebFetch"]
 MEET_CHAT_WORKSPACE_TOOLS = ["Read", "Glob", "Grep"] + MEET_CHAT_WEB_TOOLS
 
 
-def meet_chat_tools(scope: str, skill_ids) -> list:
+def meet_chat_tools(scope: str, skill_ids=None) -> list:
     """The tools an in-meeting turn is dispatched with.
 
-    The action toolbelt is added ONLY when the meeting has a product enabled. Attaching it
-    unconditionally put five tool descriptions in front of a model whose meeting had none of them
-    on — and a tool list is prompt-visible, so it read its own menu and told the room that Partic,
-    BIAMI, ContentMorph, Matrix and 10x Factory were "all wired up here". Knowledge the owner never
-    granted, leaking through the capability surface instead of the prompt.
+    The action toolbelt is ALWAYS attached, and what it offers is decided inside it, live. That is
+    not laziness about the gate — it is the only thing that can be correct here. A worker serves a
+    whole meeting and its environment is frozen at container creation, so a decision made here, once,
+    is a decision made with whatever was enabled when the first message arrived: turning a product on
+    mid-meeting would do nothing until the worker was reaped.
+
+    So the server asks the control plane which products its meeting currently allows, every time it
+    is started — which is once per turn — and lists nothing when it cannot confirm. A meeting with
+    nothing enabled therefore attaches a server that offers no tools, rather than no server; the
+    property that matters (a model is never shown a product its owner did not grant) holds either
+    way, and this one also holds a minute after the toggle.
 
     The two scopes still differ only by how much HISTORY is in reach, and both can act."""
     base = list(MEET_CHAT_WORKSPACE_TOOLS if scope == SCOPE_WORKSPACE else MEET_CHAT_WEB_TOOLS)
-    return base + (MEET_CHAT_ACTION_TOOLS if skill_ids else [])
+    return base + MEET_CHAT_ACTION_TOOLS
 
 
 def _norm(v: "str | None") -> str:
@@ -311,18 +317,37 @@ def addressed_question(text: str, *, bot_name: str, prefix: str, always: bool = 
     ``@``, and — only when ``always`` is set — every line. Returns the message with the address
     stripped, so the agent sees the question rather than the salutation.
 
+    The address may sit ANYWHERE in the line, not only at the front. People write "welcome @vexa how
+    are you?" and "so @vexa, what did we decide?" — leading-only matching ignored both, silently, and
+    a bot that ignores you when you have plainly addressed it reads as broken rather than as strict.
+    The address is cut out and the rest is stitched back together, so the model sees the sentence the
+    person wrote rather than a salutation it has to parse around.
+
     A bare address with no question ("@vexa") returns None: there is nothing to answer, and replying
     "yes?" into a meeting is noise."""
     body = (text or "").strip()
     if not body:
         return None
-    for token in filter(None, [prefix, f"@{bot_name}".strip(), bot_name.strip()]):
-        t = token.strip()
-        if not t:
+    lower = body.lower()
+    # Longest first: "@vexa" must win over "vexa", or the bare name would match inside the prefix
+    # and leave a stray "@" at the head of the question.
+    tokens = sorted({t.strip() for t in (prefix, f"@{bot_name}".strip(), bot_name.strip()) if t.strip()},
+                    key=len, reverse=True)
+    for t in tokens:
+        at = lower.find(t.lower())
+        if at < 0:
             continue
-        if body.lower().startswith(t.lower()):
-            rest = body[len(t):].lstrip(" ,:;-–—")
-            return rest or None
+        # Only on a word boundary: "vexatious" is not an address, and neither is a name inside
+        # another word. The prefix carries its own boundary in the "@".
+        before_ok = at == 0 or not (body[at - 1].isalnum() or body[at - 1] == "@")
+        end = at + len(t)
+        after_ok = end >= len(body) or not body[end].isalnum()
+        if not (before_ok and after_ok):
+            continue
+        head = body[:at].rstrip(" ,:;-–—")
+        rest = body[end:].lstrip(" ,:;-–—")
+        joined = f"{head} {rest}".strip() if head and rest else (head or rest)
+        return joined or None
     return body if always else None
 
 

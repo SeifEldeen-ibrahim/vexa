@@ -12,10 +12,19 @@ WHAT IS HELD HERE IS NOT A SECRET — a slug, a repo URL, a ref. The credential 
 repos is the single per-user token in ``git_credentials``. Keeping them apart means a pin can be
 read and shown in the UI without the token ever being near that path.
 
-CROSS-USER ISOLATION: every read and write is keyed by ``subject`` and lands in that subject's own
-file. A pin names a workspace SLUG, which resolves inside that subject's own workspace store — two
-users pinning the same repo URL get two independent clones under their own roots and never see each
-other's.
+A product repo is NOT a Vexa workspace, and the difference is the whole reason this clones for
+itself instead of calling ``activate_workspace``. That function folds a repo INTO the workspace
+model: a repo that is not workspace-shaped gets wrapped in a fresh template, nested under ``kg/``,
+and has **its own .git dropped**. Which is right for a workspace and fatal here — the wrapper has no
+remote and the nested copy is no longer a repo, so there is nothing to pull from and nothing to push
+to. Observed on both of the first two repos anyone pinned.
+
+It also keeps the clone OUT of every workspace, which is the isolation that matters: a repo inside a
+workspace is readable by any turn that mounts it, and a workspace-scoped assistant has a Read tool.
+The control plane reads these on the meeting's behalf and hands over only what is enabled.
+
+CROSS-USER ISOLATION: every read and write is keyed by ``subject`` and lands under that subject's own
+directory. Two users pinning the same repo URL get two independent clones and never see each other's.
 """
 from __future__ import annotations
 
@@ -30,6 +39,9 @@ from shared import skills
 log = logging.getLogger(__name__)
 
 _SECRETS_DIRNAME = ".secrets"
+#: Where product repos are cloned — dot-prefixed, so every workspace scan skips it and it can never
+#: be mistaken for a subject or mounted as one.
+_REPOS_DIRNAME = ".skillrepos"
 _SUBJECT_RE = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")
 #: A workspace slug as workspace_attach mints them — kept strict because it becomes a path segment.
 #: It must START alphanumeric: dots are legal INSIDE a slug, and a character class that allows them
@@ -131,3 +143,36 @@ def _write(path: Path, pins: dict) -> None:
         path.parent.chmod(0o700)
     except OSError:
         log.debug("could not chmod skill-repo pins", exc_info=True)
+
+
+def repo_dir(root: str | Path, subject: str, slug: str) -> Optional[Path]:
+    """Where this subject's clone of a product repo lives. None for an unsafe subject or slug."""
+    if not subject or not _SUBJECT_RE.match(subject):
+        return None
+    if not slug or not _SLUG_RE.match(slug):
+        return None
+    return Path(root) / _REPOS_DIRNAME / subject / slug
+
+
+def repo_for(root: str | Path, subject: str, skill_id: str) -> Optional[Path]:
+    """The clone backing this skill for this subject, or None when nothing is pinned or present."""
+    pin = read_pins(root, subject).get((skill_id or "").strip().lower())
+    if not pin:
+        return None
+    d = repo_dir(root, subject, pin["slug"])
+    return d if d and (d / ".git").is_dir() else None
+
+
+def slug_for_repo(repo_url: str) -> str:
+    """A stable directory name for a repo URL: its own name plus a short digest of the full URL.
+
+    The name alone would collide across owners — two `biamiDev` repos from different orgs are not
+    the same repo — and the digest alone would be unreadable in a path someone has to debug."""
+    import hashlib
+
+    tail = (repo_url or "").rstrip("/").rsplit("/", 1)[-1]
+    if tail.endswith(".git"):
+        tail = tail[:-4]
+    base = re.sub(r"[^A-Za-z0-9]+", "-", tail).strip("-").lower() or "repo"
+    digest = hashlib.sha256((repo_url or "").encode()).hexdigest()[:8]
+    return f"{base}-{digest}"

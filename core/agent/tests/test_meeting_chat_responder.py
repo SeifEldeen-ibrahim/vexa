@@ -1108,3 +1108,55 @@ def test_with_no_skill_lookup_wired_nothing_is_granted():
     _offer(_responder(rec), "@vexa hello")
     _settle(rec)
     assert rec.turns[0][6] == []
+
+
+# ── the address may sit anywhere in the sentence ──────────────────────────────────────────
+
+def test_a_MID_SENTENCE_mention_addresses_the_bot():
+    """People write "welcome @vexa how are you?". Leading-only matching ignored that silently, and a
+    bot that ignores you when you have plainly addressed it reads as broken, not as strict."""
+    assert addressed_question("welcome @vexa how are you ?", bot_name="Vexa", prefix="@vexa") \
+        == "welcome how are you ?"
+
+
+def test_the_sentence_is_stitched_back_together():
+    """The model should see what the person wrote, not a salutation it has to parse around."""
+    assert addressed_question("so @vexa, what did we decide?", bot_name="Vexa", prefix="@vexa") \
+        == "so what did we decide?"
+
+
+def test_a_TRAILING_mention_still_addresses_it():
+    assert addressed_question("count to ten @vexa", bot_name="Vexa", prefix="@vexa") == "count to ten"
+
+
+def test_the_bare_name_works_mid_sentence_too():
+    assert addressed_question("hello Vexa can you help", bot_name="Vexa", prefix="@vexa") \
+        == "hello can you help"
+
+
+def test_a_name_INSIDE_another_word_is_not_an_address():
+    """The cost of matching anywhere. "vexatious" must not summon the bot."""
+    for text in ("that was vexatious of him", "convexation", "vexatiously slow"):
+        assert addressed_question(text, bot_name="Vexa", prefix="@vexa") is None, text
+
+
+def test_an_unaddressed_line_is_still_ignored():
+    assert addressed_question("no mention here", bot_name="Vexa", prefix="@vexa") is None
+
+
+def test_a_bare_address_anywhere_is_still_nothing_to_answer():
+    """Replying "yes?" into a meeting is noise."""
+    for text in ("@vexa", "  @vexa  ", "Vexa"):
+        assert addressed_question(text, bot_name="Vexa", prefix="@vexa") is None, text
+
+
+def test_the_PREFIX_wins_over_the_bare_name():
+    """Longest-first, or the bare name matches inside "@vexa" and leaves a stray "@"."""
+    got = addressed_question("@vexa what is this", bot_name="Vexa", prefix="@vexa")
+    assert got == "what is this" and not got.startswith("@")
+
+
+def test_a_leading_address_still_works_exactly_as_before():
+    """The behaviour everyone already relies on."""
+    assert addressed_question("@vexa yes", bot_name="Vexa", prefix="@vexa") == "yes"
+    assert addressed_question("Vexa: summarise", bot_name="Vexa", prefix="@vexa") == "summarise"

@@ -471,6 +471,8 @@ def main() -> None:  # pragma: no cover — the container entrypoint (wired in t
         native = os.environ.get("VEXA_MEETING_ID") or row_id
         session_uid = os.environ.get("VEXA_MEETING_SESSION_UID") or native
         platform = os.environ.get("VEXA_MEETING_PLATFORM") or "google_meet"
+        _skill_grant = os.environ.get("VEXA_SKILL_GRANT") or ""
+        _skill_url = (os.environ.get("VEXA_SKILL_ACT_URL") or "").replace("/act", "/knowledge")
 
         # ── which products this meeting is about, read FRESH each beat ──────────────────────────
         # Not stamped into the env at dispatch: a create for a workload already running is a TOUCH
@@ -492,6 +494,29 @@ def main() -> None:  # pragma: no cover — the container entrypoint (wired in t
                 log.warning("could not read the enabled skills; treating as none", exc_info=True)
                 return []
 
+        def _skill_knowledge(enabled: list) -> str:
+            """The product prose for this meeting, from the CONTROL PLANE.
+
+            Not from the workspace. These files used to live at `agents/skills/*.md` inside it, where
+            the copilot merged only the enabled ones — and where a workspace-scoped assistant with a
+            Read tool could open all five regardless, so a meeting with only Partic on could be told
+            what BIAMI is. The gate was on the prompt while the text sat in a listable directory.
+
+            Any failure is NO product knowledge: quieter, never louder."""
+            if not enabled or not _skill_url or not _skill_grant:
+                return ""
+            import urllib.request
+
+            body = json.dumps({"grant": _skill_grant}).encode()
+            req = urllib.request.Request(_skill_url, data=body, method="POST",
+                                         headers={"Content-Type": "application/json"})
+            try:
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    return str((json.loads(resp.read().decode() or "{}") or {}).get("steering") or "")
+            except Exception:  # noqa: BLE001
+                log.warning("could not fetch product knowledge; continuing without it", exc_info=True)
+                return ""
+
         def _skill_shaped(enabled: list) -> dict:
             """The parts of the copilot's prompt that depend on which products are enabled.
 
@@ -500,7 +525,9 @@ def main() -> None:  # pragma: no cover — the container entrypoint (wired in t
             key = tuple(enabled)
             if key not in _skill_cache:
                 c = load_meeting_config(work, enabled)
-                _skill_cache[key] = {"card_kinds": c.card_kinds, "steering": c.steering,
+                extra = _skill_knowledge(enabled)
+                steering = f"{c.steering.rstrip()}\n\n{extra}" if extra else c.steering
+                _skill_cache[key] = {"card_kinds": c.card_kinds, "steering": steering,
                                      "polish_rules": c.polish_rules, "tag_rules": c.tag_rules}
                 log.info("meeting skills now: %s", ",".join(enabled) or "(none)")
             return _skill_cache[key]

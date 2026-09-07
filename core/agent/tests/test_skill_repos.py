@@ -144,3 +144,68 @@ def test_the_pin_store_holds_NO_credential(tmp_path):
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))
+
+
+# ── a product repo is NOT a Vexa workspace ────────────────────────────────────────────────
+
+def test_the_clone_lives_outside_every_workspace(tmp_path):
+    """Two reasons, and both were found the hard way.
+
+    ISOLATION: a repo inside a workspace is readable by any turn that mounts it, and a
+    workspace-scoped assistant has a Read tool — so a meeting could open a product repo it had not
+    enabled. The clone lives in a dot-directory no workspace scan walks and no dispatch mounts.
+
+    IT HAS TO STAY A REPO: `activate_workspace` folds a repo INTO the workspace model — a repo that
+    is not workspace-shaped gets wrapped in a template, nested under `kg/`, and has its own `.git`
+    DROPPED. The wrapper then has no remote and the nested copy is no longer a repo, so there is
+    nothing to pull from and nothing to push to. Both of the first two repos anyone pinned were
+    non-compliant, so that path could never have worked for either."""
+    d = sr.repo_dir(tmp_path, "6", "vibe-pipe-abc12345")
+    assert ".skillrepos" in str(d)
+    assert "/workspaces/6" not in str(d) and "/.attached/" not in str(d)
+    assert d.name.startswith("vibe-pipe")
+
+
+def test_a_repo_is_only_resolved_when_it_is_actually_a_clone(tmp_path):
+    """A pin whose directory is missing or is not a git repo resolves to nothing, so the meeting is
+    told it is not linked rather than something being written into a stray directory."""
+    sr.pin(tmp_path, "6", "partic", slug="vibe-pipe-abc12345", repo="https://x/y.git")
+    assert sr.repo_for(tmp_path, "6", "partic") is None          # nothing cloned yet
+
+    d = sr.repo_dir(tmp_path, "6", "vibe-pipe-abc12345")
+    d.mkdir(parents=True)
+    assert sr.repo_for(tmp_path, "6", "partic") is None          # a directory is not a repo
+    (d / ".git").mkdir()
+    assert sr.repo_for(tmp_path, "6", "partic") == d
+
+
+def test_two_subjects_cloning_the_same_url_get_separate_directories(tmp_path):
+    url = "https://github.com/x/vibe-pipe.git"
+    slug = sr.slug_for_repo(url)
+    a, b = sr.repo_dir(tmp_path, "6", slug), sr.repo_dir(tmp_path, "7", slug)
+    assert a != b and "/6/" in str(a) and "/7/" in str(b)
+
+
+def test_the_slug_distinguishes_same_named_repos_from_different_owners(tmp_path):
+    """`biamiDev` under two orgs is not the same repo, and a name-only slug would collide them into
+    one clone — one user's pin silently pointing at another's checkout."""
+    assert sr.slug_for_repo("https://github.com/a/biamiDev.git") \
+        != sr.slug_for_repo("https://github.com/b/biamiDev.git")
+
+
+def test_the_slug_is_stable_for_the_same_url(tmp_path):
+    """Re-pinning must find the existing clone rather than making a second one."""
+    url = "https://github.com/a/biamiDev.git"
+    assert sr.slug_for_repo(url) == sr.slug_for_repo(url)
+
+
+def test_the_slug_is_path_safe_whatever_the_url(tmp_path):
+    for url in ("https://github.com/a/weird..name.git", "git@github.com:a/b.git", "", "https://x/"):
+        assert sr._SLUG_RE.match(sr.slug_for_repo(url)), url
+
+
+def test_a_traversing_subject_or_slug_resolves_to_NOTHING(tmp_path):
+    for bad in ("../other", "a/b", ""):
+        assert sr.repo_dir(tmp_path, bad, "ok") is None
+        assert sr.repo_dir(tmp_path, "6", bad) is None
+    assert sr.repo_dir(tmp_path, "6", "..") is None

@@ -191,12 +191,22 @@ def test_an_unreachable_endpoint_REPORTS_failure_rather_than_raising(monkeypatch
     assert got["status"] == "failed" and "could not reach" in got["message"]
 
 
-def test_an_unreachable_CONTROL_PLANE_reports_failure_rather_than_raising():
+def test_an_unreachable_CONTROL_PLANE_refuses_rather_than_guessing():
+    """It cannot confirm what this meeting allows, so it does not act — and says so without
+    raising. Refusing is the right answer here rather than attempting the write: a turn that cannot
+    read its own permissions has no business exercising them."""
     import os
-    env = dict(os.environ, **ALL_ON, VEXA_SKILL_ACT_URL="http://127.0.0.1:9/never",
-               VEXA_SKILL_GRANT="g")
+    env = dict(os.environ, VEXA_SKILL_ACT_URL="http://127.0.0.1:9/never", VEXA_SKILL_GRANT="g")
     got = _act("partic_create_pipeline", "{}", env=env)
-    assert got["status"] == "failed" and "nothing was changed" in got["message"].lower()
+    assert got["status"] == "unavailable"
+
+
+def test_an_unreachable_control_plane_also_advertises_NOTHING():
+    """A menu we cannot confirm must not name products the owner may not have granted."""
+    import os
+    env = dict(os.environ, VEXA_SKILL_ACT_URL="http://127.0.0.1:9/never", VEXA_SKILL_GRANT="g")
+    out = _rpc({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}, env=env)
+    assert out[0]["result"]["tools"] == []
 
 
 def test_a_turn_only_sees_the_tools_its_meeting_ENABLED():
@@ -243,15 +253,15 @@ def test_both_scopes_can_act_on_an_agreed_proposal():
     act there would make the whole loop depend on a workspace grant nobody was asked for."""
     from control_plane.meeting_chat_responder import meet_chat_tools
 
-    assert "product-actions" in meet_chat_tools("transcript", ["partic"])
-    assert "product-actions" in meet_chat_tools("workspace", ["partic"])
+    assert "product-actions" in meet_chat_tools("transcript")
+    assert "product-actions" in meet_chat_tools("workspace")
 
 
 def test_neither_scope_can_CHANGE_anything_in_the_workspace():
     """The question comes from a room the owner does not control."""
     from control_plane.meeting_chat_responder import meet_chat_tools
 
-    for granted in (meet_chat_tools("transcript", ["partic"]), meet_chat_tools("workspace", ["partic"])):
+    for granted in (meet_chat_tools("transcript"), meet_chat_tools("workspace")):
         assert not ({"Write", "Edit", "Bash", "NotebookEdit"} & set(granted))
 
 
@@ -261,14 +271,14 @@ def test_every_granted_name_is_either_a_builtin_or_a_REAL_descriptor(tmp_path):
     name by convention; it must exist in tools-seed."""
     from control_plane.meeting_chat_responder import meet_chat_tools
     known = set(_registry().names())
-    for name in meet_chat_tools("workspace", ["partic"]):
+    for name in meet_chat_tools("workspace"):
         assert name in known or name.isalnum(), f"{name!r} resolves to nothing"
 
 
 def test_the_workspace_grant_resolves_end_to_end(tmp_path):
     from control_plane.meeting_chat_responder import meet_chat_tools
 
-    granted = meet_chat_tools("workspace", ["partic"])
+    granted = meet_chat_tools("workspace")
     allowed, mcp_config = attach_toolbelt(tmp_path / "belt", granted, _registry())
     assert "mcp__product-actions" in allowed and mcp_config
 
@@ -298,15 +308,15 @@ def test_no_skills_enabled_refuses_every_product_CALL_too():
         assert got["status"] == "unavailable", tool
 
 
-def test_the_toolbelt_is_not_even_ATTACHED_with_nothing_enabled():
-    """Belt and braces at the layer above: the dispatch does not grant `product-actions` at all, so
-    the server is never launched and there is no menu to read."""
+def test_the_toolbelt_is_attached_and_decides_LIVE():
+    """The belt is always attached and the server asks what its meeting allows, because a worker
+    serves a whole meeting and its env is frozen at container creation — deciding here, once, would
+    answer with whatever was enabled when the first message arrived, so enabling a product
+    mid-meeting did nothing until the worker was reaped."""
     from control_plane.meeting_chat_responder import meet_chat_tools
 
-    assert "product-actions" not in meet_chat_tools("transcript", [])
-    assert "product-actions" not in meet_chat_tools("workspace", [])
-    assert "product-actions" in meet_chat_tools("transcript", ["partic"])
-    assert "product-actions" in meet_chat_tools("workspace", ["partic"])
+    assert "product-actions" in meet_chat_tools("transcript")
+    assert "product-actions" in meet_chat_tools("workspace")
 
 
 def test_both_scopes_still_act_and_differ_only_by_history():
@@ -314,6 +324,6 @@ def test_both_scopes_still_act_and_differ_only_by_history():
     history is in reach, and BOTH can build."""
     from control_plane.meeting_chat_responder import meet_chat_tools
 
-    t, w = meet_chat_tools("transcript", ["partic"]), meet_chat_tools("workspace", ["partic"])
+    t, w = meet_chat_tools("transcript"), meet_chat_tools("workspace")
     assert "product-actions" in t and "product-actions" in w
     assert set(w) - set(t) == {"Read", "Glob", "Grep"}

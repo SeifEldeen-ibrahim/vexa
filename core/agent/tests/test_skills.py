@@ -15,7 +15,9 @@ import pytest
 
 from shared import skills
 
-SEED = pathlib.Path(__file__).resolve().parents[1] / "workspace-seeds" / "default"
+#: The knowledge lives with the DEPLOYMENT, not in any workspace seed — a file inside a workspace is
+#: readable by any turn that mounts it, and a workspace-scoped assistant has a Read tool.
+KNOWLEDGE = skills.knowledge_root()
 
 
 # ── the default is nothing ────────────────────────────────────────────────────────────────
@@ -86,20 +88,20 @@ def test_get_answers_none_for_an_unknown_id():
 def test_every_skill_ships_a_knowledge_file():
     """A registered skill whose file is missing enables silently and teaches the copilot nothing."""
     for sid in skills.all_ids():
-        path = SEED / skills.get(sid).knowledge_path
+        path = KNOWLEDGE / f"{sid}.md"
         assert path.is_file(), f"{sid}: {path} missing"
         assert path.read_text().strip(), f"{sid}: knowledge file is empty"
 
 
 def test_the_shared_rules_file_ships_too():
-    assert (SEED / skills.SHARED_PROPOSAL_RULES).is_file()
+    assert (KNOWLEDGE / "_propose.md").is_file()
 
 
 def test_each_knowledge_file_names_its_own_tool():
     """The file tells the copilot which tool follows agreement; a mismatch there sends the assistant
     after a tool that does not exist."""
     for sid in skills.all_ids():
-        text = (SEED / skills.get(sid).knowledge_path).read_text()
+        text = (KNOWLEDGE / f"{sid}.md").read_text()
         assert skills.get(sid).tool in text, f"{sid} knowledge does not name {skills.get(sid).tool}"
 
 
@@ -115,3 +117,55 @@ def test_a_repo_backed_skill_says_what_to_pin():
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))
+
+
+# ── the isolation that matters: knowledge is not in any workspace ─────────────────────────
+
+def test_the_knowledge_is_NOT_inside_any_workspace_seed():
+    """Reported live, and the reason this moved. With only Partic enabled, a workspace-scoped
+    assistant answered a question about BIAMI in this file's own words — because the files sat at
+    `agents/skills/*.md` inside the workspace, and a workspace-scoped turn has a Read tool. The gate
+    was on the prompt and the tools while the source text was in a listable directory.
+
+    Isolation is about REACH. Put the text back in a workspace and this goes red.
+
+    Scoped to `agents/skills/` — the path it used to live at. `workspace-seeds/*/skills/` is Claude
+    Code's OWN Agent Skills mechanism, a different concept that happens to share the word, and it
+    belongs in the workspace."""
+    seed = pathlib.Path(__file__).resolve().parents[1] / "workspace-seeds"
+    stray = [str(p.relative_to(seed)) for p in seed.rglob("agents/skills/*")]
+    assert stray == [], f"product knowledge is reachable from a workspace: {stray}"
+
+
+def test_the_knowledge_files_are_not_shipped_into_a_workspace_by_seeding():
+    """Belt and braces on the same rule from the other side: whatever the seed contains is copied
+    into every new workspace, so an `agents/skills` directory appearing there at any point puts the
+    text back within reach."""
+    seed = pathlib.Path(__file__).resolve().parents[1] / "workspace-seeds"
+    assert not list(seed.rglob("agents/skills"))
+
+
+def test_reading_one_skill_never_returns_another():
+    """The property the whole feature claims, at the only layer that can enforce it."""
+    partic = skills.read_knowledge(["partic"])
+    assert "Partic" in partic
+    for other in ("BIAMI", "ContentMorph", "10x Factory"):
+        assert other not in partic, other
+
+
+def test_nothing_enabled_reads_NOTHING():
+    assert skills.read_knowledge([]) == ""
+    assert skills.read_knowledge(None) == ""
+    assert skills.read_knowledge(["nope"]) == ""
+
+
+def test_the_shared_rules_lead_and_appear_once():
+    both = skills.read_knowledge(["partic", "biami"])
+    assert both.count("How to propose") == 1
+    assert both.index("How to propose") < both.index("Partic —")
+
+
+def test_an_unreadable_knowledge_dir_degrades_to_silence(monkeypatch, tmp_path):
+    """A deployment that lost its knowledge files makes a quieter copilot, never a broken meeting."""
+    monkeypatch.setenv(skills.KNOWLEDGE_DIR_ENV, str(tmp_path / "gone"))
+    assert skills.read_knowledge(["partic"]) == ""

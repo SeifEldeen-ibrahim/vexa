@@ -43,6 +43,10 @@ COPY core/agent/contracts ./contracts
 # The registry of per-person workspace templates the worker seeds new workspaces from (Phase 3) +
 # the tool registry. workspace-seeds/<name>/ — one validated seed per subdir (today: default, finos).
 COPY core/agent/workspace-seeds ./workspace-seeds
+# Product knowledge, kept OUT of every workspace seed on purpose: a file inside a workspace is
+# readable by any turn that mounts it, and a workspace-scoped assistant has a Read tool. The control
+# plane serves only what a meeting has enabled.
+COPY core/agent/skills-knowledge ./skills-knowledge
 COPY core/agent/tools-seed ./tools-seed
 
 # The sealed contracts loaded BY PATH at import (walk-up resolves repo_root == /app).

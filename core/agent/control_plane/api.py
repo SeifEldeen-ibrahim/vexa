@@ -42,6 +42,7 @@ from control_plane.meeting_chat_responder import (
 from control_plane import schedule_digest as schedule_digest_mod
 from control_plane import routines as routines_mod
 from control_plane.config_preflight import NOT_CONFIGURED, capability_state, missing_capability_keys
+from shared import skills as skills_registry
 from shared import units
 from control_plane import workspace_routines as workspace_routines_mod
 from shared.agent_config import default_meeting_model, load_meeting_config
@@ -69,6 +70,7 @@ from control_plane.workspace_git_sync import RemoteSyncError, pull_origin, push_
 from control_plane.workspace_purpose import read_purpose, write_purpose
 from control_plane import workspace_membership as membership_mod
 from control_plane import git_credentials as git_creds
+from control_plane import skill_repos
 from control_plane import system_mounts
 from control_plane.workspace_membership import MembershipError, MembershipIndex, InMemoryMembershipIndex
 from control_plane.dispatch import Dispatcher
@@ -493,6 +495,25 @@ class MeetingStart(BaseModel):
     native_id: str              # the platform meeting id (e.g. a Google Meet code abc-defg-hij)
     subject: Optional[str] = None  # DERIVED from X-User-Id (P20); ignored if sent.
     title: Optional[str] = None
+
+
+class MeetingSkills(BaseModel):
+    """Turn ONE product skill on or off for ONE meeting.
+
+    Skills are OFF for every new meeting, and with none on the copilot's prompt carries no product
+    knowledge at all — it cannot propose a pipeline because it has never heard of one. Enabling a
+    skill gives the copilot that product's vocabulary and gives the assistant the owner's OWN pinned
+    repo for it, read-only.
+
+    Deliberately one skill per call: the UI toggles them individually, and a whole-set write would
+    let a stale tab clear a skill somebody else's tab just enabled."""
+    model_config = {"extra": "forbid"}
+    native_id: str
+    platform: str = "google_meet"
+    meeting_id: Optional[str] = None
+    #: A registry id (`partic`, `biami`, …). Unknown ids are refused rather than stored.
+    skill: str
+    on: bool
 
 
 class MeetingChatAccess(BaseModel):
@@ -1229,6 +1250,42 @@ def create_app(
     def _meet_chat_proposed_key(row: str) -> str:
         return f"meetchat:meeting:{row}:proposed"
 
+    def _meet_meeting_key(subject: str, native_id: str, meeting_id: "str | None") -> tuple:
+        """``(row_id, key)`` for a per-meeting grant — the meetings-domain ROW id when it can be
+        resolved, else the native code as a last resort.
+
+        Every per-meeting grant keys this way for one reason: a native code collides across users
+        AND across one user's re-sends of the same link, so keying a grant by it would hand a
+        stranger's meeting the access this user granted."""
+        live_entry = next(
+            (m for m in live.list()
+             if m.get("native_id") == native_id or m.get("session_uid") == native_id),
+            None,
+        )
+        row_id = (
+            meeting_id
+            or (str(live_entry["numeric_meeting_id"])
+                if live_entry and live_entry.get("numeric_meeting_id") else None)
+        )
+        return row_id, (row_id or native_id)
+
+    def _meet_skills_key(row: str) -> str:
+        return f"meetskills:meeting:{row}"
+
+    def _meet_skills_for(meeting_key: str) -> list:
+        """The skills enabled for this meeting, in registry order. Any fault ⇒ NONE.
+
+        Failing closed here means a redis blip makes the copilot quieter, never louder — it cannot
+        start talking about products the owner did not enable."""
+        import redis as _redis
+
+        try:
+            r = _redis.from_url(redis_url, decode_responses=True)
+            return skills_registry.known(list(r.smembers(_meet_skills_key(str(meeting_key))) or []))
+        except Exception:  # noqa: BLE001
+            logger.exception("meet-skills: lookup failed for %s", meeting_key)
+            return []
+
     #: How long an unanswered proposal stays live. A suggestion is about what is being discussed
     #: NOW; agreeing to one half an hour later means agreeing to something nobody remembers saying.
     MEET_CHAT_PENDING_TTL_SEC = 15 * 60
@@ -1251,17 +1308,7 @@ def create_app(
         import redis as _redis
 
         subject = subject_of(request)
-        live_entry = next(
-            (m for m in live.list()
-             if m.get("native_id") == body.native_id or m.get("session_uid") == body.native_id),
-            None,
-        )
-        row_id = (
-            body.meeting_id
-            or (str(live_entry["numeric_meeting_id"])
-                if live_entry and live_entry.get("numeric_meeting_id") else None)
-        )
-        key = row_id or body.native_id
+        row_id, key = _meet_meeting_key(subject, body.native_id, body.meeting_id)
         # Owner check: only the meeting's owner may widen what its chat assistant can read.
         if row_id and _meeting_owner_lookup(subject, row_id) is None:
             raise HTTPException(status_code=404, detail="Meeting not found")
@@ -1285,6 +1332,81 @@ def create_app(
             logger.exception("meet-chat access write failed for %s", key)
             raise HTTPException(status_code=503, detail=f"could not record the grant: {e}")
         return {"native_id": body.native_id, "meeting_id": row_id, "scope": scope, "anyone": anyone}
+
+    @app.get("/api/meeting/chat-access")
+    def meeting_chat_access_get(request: Request, native_id: str, meeting_id: Optional[str] = None):
+        """What the in-meeting assistant may currently do here — the READ half of the grants.
+
+        Without this a reloaded tab renders both toggles from `useState(false)` while the server may
+        hold "anyone" and "workspace": the control shows the opposite of the truth, and the next
+        click sends the opposite of what the user believes they are asking for. Harmless-looking with
+        two switches; not harmless once a switch decides whether a commit lands in someone's repo."""
+        import redis as _redis
+
+        subject = subject_of(request)
+        row_id, key = _meet_meeting_key(subject, native_id, meeting_id)
+        try:
+            r = _redis.from_url(redis_url, decode_responses=True)
+            scope = SCOPE_WORKSPACE if r.get(_meet_chat_access_key(key)) == SCOPE_WORKSPACE else SCOPE_TRANSCRIPT
+            anyone = r.get(_meet_chat_anyone_key(key)) == "1"
+        except Exception:  # noqa: BLE001 — a read fault reads as the CLOSED state, never as granted
+            logger.exception("meet-chat access read failed for %s", key)
+            scope, anyone = SCOPE_TRANSCRIPT, False
+        return {"native_id": native_id, "meeting_id": row_id, "scope": scope, "anyone": anyone}
+
+    @app.get("/api/meeting/skills")
+    def meeting_skills_get(request: Request, native_id: str, meeting_id: Optional[str] = None):
+        """Which skills are on for this meeting, and which of them the caller cannot yet act on.
+
+        `missing_repo` is the difference between "enabled" and "usable": a repo-backed skill with
+        nothing pinned lets the copilot propose and then leaves the assistant with nowhere to write.
+        The UI needs to say so at the toggle rather than in the meeting."""
+        subject = subject_of(request)
+        row_id, key = _meet_meeting_key(subject, native_id, meeting_id)
+        enabled = _meet_skills_for(key)
+        return {
+            "native_id": native_id, "meeting_id": row_id,
+            "available": [{"id": sk.id, "label": sk.label, "repo_backed": sk.repo_backed,
+                           "pin_hint": sk.pin_hint}
+                          for sk in skills_registry.SKILLS],
+            "enabled": enabled,
+            "missing_repo": skill_repos.missing_pins(wsr.root, subject, enabled),
+        }
+
+    @app.post("/api/meeting/skills", status_code=202)
+    def meeting_skills_set(body: MeetingSkills, request: Request):
+        """Turn one skill on or off for one meeting (desired state only).
+
+        Keyed on the meetings-domain ROW id, like every other per-meeting grant: the native code
+        collides across users and across one user's re-sends, so keying by it would hand a stranger's
+        meeting the skill this user enabled."""
+        import redis as _redis
+
+        subject = subject_of(request)
+        if skills_registry.get(body.skill) is None:
+            raise HTTPException(status_code=400, detail=f"unknown skill {body.skill!r}")
+        row_id, key = _meet_meeting_key(subject, body.native_id, body.meeting_id)
+        # Only the meeting's owner may change what its copilot knows about.
+        if row_id and _meeting_owner_lookup(subject, row_id) is None:
+            raise HTTPException(status_code=404, detail="Meeting not found")
+        sid = skills_registry.get(body.skill).id
+        try:
+            r = _redis.from_url(redis_url, decode_responses=True)
+            if body.on:
+                r.sadd(_meet_skills_key(key), sid)
+                # The same rolling TTL the other grants carry: a meeting is over in hours, and a
+                # skill must not outlive it and silently apply to a re-send of the link next week.
+                r.expire(_meet_skills_key(key), MEET_CHAT_GRANT_TTL_SEC)
+            else:
+                r.srem(_meet_skills_key(key), sid)
+            enabled = skills_registry.known(list(r.smembers(_meet_skills_key(key)) or []))
+        except HTTPException:
+            raise
+        except Exception as e:  # noqa: BLE001 — a store fault must not read as "enabled"
+            logger.exception("meet-skills write failed for %s", key)
+            raise HTTPException(status_code=503, detail=f"could not record the skill: {e}")
+        return {"native_id": body.native_id, "meeting_id": row_id, "enabled": enabled,
+                "missing_repo": skill_repos.missing_pins(wsr.root, subject, enabled)}
 
     @app.post("/api/chat")
     def chat(body: ChatBody, request: Request):
@@ -2677,6 +2799,7 @@ def create_app(
     app.state.meet_chat_post = _meet_chat_post
     app.state.meet_chat_remember = _meet_chat_remember
     app.state.meet_chat_already_proposed = _meet_chat_already_proposed
+    app.state.meet_skills_for = _meet_skills_for
 
     return app
 
@@ -2760,6 +2883,9 @@ def _build_production_app() -> FastAPI:
                 owner_for=lambda k: transcription_watcher.MEETING_OWNERS.get(str(k)),
                 remember=getattr(app.state, "meet_chat_remember", None),
                 already_proposed=getattr(app.state, "meet_chat_already_proposed", None),
+                # The enforcement half of "a meeting with no skills cannot propose": the prompt
+                # carries no product knowledge, and this drops anything that appears regardless.
+                skills_for=getattr(app.state, "meet_skills_for", None),
             )
     return app
 

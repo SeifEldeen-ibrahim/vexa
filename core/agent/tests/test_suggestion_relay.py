@@ -162,3 +162,47 @@ def test_a_failing_duplicate_check_still_posts():
     post = _Poster()
     _deliver_suggestion(_payload(), post, lambda key: "6", None, boom)
     assert len(post.posts) == 1
+
+
+# ── the meeting must be about this product ────────────────────────────────────────────────
+
+def test_a_proposal_for_a_meeting_with_NO_SKILLS_is_dropped():
+    """A copilot with no product knowledge should never produce a proposal — but "should never" is
+    a property of a prompt, and a prompt is a hope. Nothing downstream checked, so a model that
+    invented one anyway got it posted into the room, and the approval then reached a tool for a
+    product the owner never enabled. Here it is a fact instead."""
+    post = _Poster()
+    _deliver_suggestion(_payload(), post, lambda key: "6", None, None, lambda key: [])
+    assert post.posts == []
+
+
+def test_a_proposal_for_an_ENABLED_meeting_still_goes():
+    post = _Poster()
+    _deliver_suggestion(_payload(), post, lambda key: "6", None, None, lambda key: ["partic"])
+    assert len(post.posts) == 1
+
+
+def test_the_skill_lookup_is_asked_about_THIS_meeting():
+    seen: list = []
+    _deliver_suggestion(_payload(meeting_id="42"), _Poster(), lambda key: "6", None, None,
+                        lambda key: seen.append(key) or ["partic"])
+    assert seen == ["42"]
+
+
+def test_a_FAILING_skill_lookup_drops_the_proposal():
+    """Fails closed, unlike the duplicate check. A repeated question is an annoyance; a proposal for
+    a product this meeting never enabled is the feature doing something nobody asked for."""
+    def boom(_key):
+        raise RuntimeError("redis gone")
+
+    post = _Poster()
+    _deliver_suggestion(_payload(), post, lambda key: "6", None, None, boom)
+    assert post.posts == []
+
+
+def test_with_no_skill_lookup_wired_the_relay_still_delivers():
+    """A deployment that has not wired the gate keeps working — the gate is an addition, not a
+    precondition, so an older composition root does not silently go mute."""
+    post = _Poster()
+    _deliver_suggestion(_payload(), post, lambda key: "6")
+    assert len(post.posts) == 1

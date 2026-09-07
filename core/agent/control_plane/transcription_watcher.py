@@ -219,7 +219,7 @@ def _resume_cursor(r, key: str) -> str:
 
 
 def start_suggestion_relay(redis_url: str, *, post_reply, owner_for, remember=None,
-                           already_proposed=None) -> threading.Thread:
+                           already_proposed=None, skills_for=None) -> threading.Thread:
     """Deliver the copilot's suggestions into the meeting they came from.
 
     The copilot has no tools and no network — deliberately, since it consumes an untrusted
@@ -239,14 +239,16 @@ def start_suggestion_relay(redis_url: str, *, post_reply, owner_for, remember=No
     before. A copilot beat has no memory of the beat before it, so the same need IS offered twice —
     observed live, in two different phrasings a minute apart."""
     t = threading.Thread(
-        target=_run_suggestions, args=(redis_url, post_reply, owner_for, remember, already_proposed),
+        target=_run_suggestions,
+        args=(redis_url, post_reply, owner_for, remember, already_proposed, skills_for),
         daemon=True, name="tx-suggest",
     )
     t.start()
     return t
 
 
-def _run_suggestions(redis_url: str, post_reply, owner_for, remember=None, already_proposed=None) -> None:
+def _run_suggestions(redis_url: str, post_reply, owner_for, remember=None, already_proposed=None,
+                     skills_for=None) -> None:
     import redis as redislib
 
     r = redislib.from_url(redis_url, decode_responses=True, socket_keepalive=True, health_check_interval=10)
@@ -273,12 +275,13 @@ def _run_suggestions(redis_url: str, post_reply, owner_for, remember=None, alrea
                 try:
                     r.xack(SUGGESTIONS, SUGGESTION_GROUP, msg_id)
                     _deliver_suggestion(json.loads(fields.get("payload") or "{}"), post_reply,
-                                        owner_for, remember, already_proposed)
+                                        owner_for, remember, already_proposed, skills_for)
                 except Exception:  # noqa: BLE001
                     logger.exception("bad suggestion frame; skipping")
 
 
-def _deliver_suggestion(p: dict, post_reply, owner_for, remember=None, already_proposed=None) -> None:
+def _deliver_suggestion(p: dict, post_reply, owner_for, remember=None, already_proposed=None,
+                        skills_for=None) -> None:
     key = str(p.get("meeting_id") or "")
     native = str(p.get("native_id") or key)
     platform = p.get("platform") or "google_meet"
@@ -296,6 +299,22 @@ def _deliver_suggestion(p: dict, post_reply, owner_for, remember=None, already_p
     if not owner:
         logger.warning("meet-suggest: no owner known for meeting %s — dropping %r", key, title or body)
         return
+    # THE MEETING MUST BE ABOUT THIS. A copilot with no product knowledge should never produce a
+    # proposal — but "should never" is a property of a prompt, and a prompt is a hope. Nothing
+    # downstream checked, so a model that invented one anyway got it posted into the room and an
+    # approval then reached a tool, for a product the owner never enabled. The gate belongs here,
+    # where it is a fact: no skills enabled ⇒ nothing is delivered, whatever the model produced.
+    if skills_for is not None:
+        try:
+            enabled = skills_for(key)
+        except Exception:  # noqa: BLE001 — a lookup fault must read as "not enabled", never as open
+            logger.exception("meet-suggest: skill lookup failed for meeting %s", key)
+            enabled = []
+        if not enabled:
+            logger.warning("meet-suggest: DROPPED a proposal for meeting %s — no product skill is "
+                           "enabled there (%r)", key, (title or body)[:70])
+            return
+
     # ASKED ONCE. Each copilot beat proposes from a fresh transcript window with no memory of the
     # beat before it, so a need that is still being discussed gets offered again in different words
     # — observed live, twice a minute apart for one pipeline. Asking a room the same question twice

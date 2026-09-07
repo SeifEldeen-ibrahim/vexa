@@ -43,7 +43,8 @@ check("real Spanish speech still kept (no over-filter)",
 // customers, to table two, which is" / "leads." — and the filter dropped "leads." as a short single
 // word, so the sentence was published truncated and the answer was gone. The list already carries
 // 31 single-word artifacts ("Bye.", "Yes.", "Uh-huh."), which is the check that belongs here; a
-// blanket length rule cannot tell "leads." from "yeah." and guesses wrong on the content word.
+// blanket length rule cannot tell a content word like "leads." apart from filler like "yeah", and
+// it guesses wrong on the one that carries the meaning.
 check('a one-word ANSWER survives ("leads.")', isHallucination("leads.") === false);
 check('…and its neighbours', isHallucination("Customers.") === false && isHallucination("Snowflake.") === false);
 check('a one-word PRODUCT survives ("Partic.")', isHallucination("Partic.") === false);

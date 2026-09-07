@@ -471,6 +471,39 @@ def main() -> None:  # pragma: no cover — the container entrypoint (wired in t
         native = os.environ.get("VEXA_MEETING_ID") or row_id
         session_uid = os.environ.get("VEXA_MEETING_SESSION_UID") or native
         platform = os.environ.get("VEXA_MEETING_PLATFORM") or "google_meet"
+
+        # ── which products this meeting is about, read FRESH each beat ──────────────────────────
+        # Not stamped into the env at dispatch: a create for a workload already running is a TOUCH
+        # that returns the live status and DISCARDS the spec, and the copilot is re-armed every 30s
+        # — so a skill toggled during a meeting would never reach the container, and the switch
+        # would only ever have worked if flipped before the copilot spawned. That is not what a live
+        # toggle means. The copilot already holds a redis client (it consumes the transcript through
+        # one), so it reads the key the control plane writes, the same way the chat assistant reads
+        # its own grants: per turn.
+        _skill_cache: dict = {}
+
+        def _skills_now() -> list:
+            """The skills enabled for this meeting right now. Never raises — a redis blip must not
+            stop transcript processing, which is the copilot's real job and is unrelated to this."""
+            try:
+                return skills_registry.known(
+                    list(client.smembers(f"meetskills:meeting:{row_id}") or []))
+            except Exception:  # noqa: BLE001
+                log.warning("could not read the enabled skills; treating as none", exc_info=True)
+                return []
+
+        def _skill_shaped(enabled: list) -> dict:
+            """The parts of the copilot's prompt that depend on which products are enabled.
+
+            Re-resolved when the set changes, cached otherwise: the files are small, but a beat is
+            not the place to re-read them for nothing."""
+            key = tuple(enabled)
+            if key not in _skill_cache:
+                c = load_meeting_config(work, enabled)
+                _skill_cache[key] = {"card_kinds": c.card_kinds, "steering": c.steering,
+                                     "polish_rules": c.polish_rules, "tag_rules": c.tag_rules}
+                log.info("meeting skills now: %s", ",".join(enabled) or "(none)")
+            return _skill_cache[key]
         import datetime as _dt
         date = _dt.date.today().isoformat()
         title = f"Meeting {native}"
@@ -501,9 +534,19 @@ def main() -> None:  # pragma: no cover — the container entrypoint (wired in t
             )
         serve_meeting(
             client, transcript_stream=transcript_stream, out_topic=out_topic,
+            # The products enabled for this meeting, read FRESH each beat.
+            #
+            # Not stamped into the env at dispatch: a create for a workload already running is a
+            # TOUCH that returns the live status and discards the spec, so a skill toggled during a
+            # meeting would never reach the container — and the copilot is re-armed every 30s, so
+            # every later stamp is thrown away. The toggle would only have worked if flipped before
+            # the copilot spawned, which is not what a live switch means.
+            #
+            # The copilot already holds a redis client (it consumes the transcript through one), so
+            # it reads the toggle the same way the chat assistant reads its grants: per turn, from
+            # the control plane's key. Any fault ⇒ no skills, which is quieter, never louder.
             card_turn=lambda segs: meeting_card_turn(
-                work, segs, model=cfg.model, card_kinds=cfg.card_kinds, steering=cfg.steering,
-                polish_rules=cfg.polish_rules, tag_rules=cfg.tag_rules,
+                work, segs, model=cfg.model, **_skill_shaped(work, cfg, _skills_now()),
             ),
             idle_ms=idle_ms, beat_segments=cfg.cadence_segments,
             doc_turn=doc_turn, enabled=cfg.enabled,

@@ -19,6 +19,8 @@ from pathlib import Path
 
 import yaml
 
+from shared import skills
+
 log = logging.getLogger(__name__)
 
 # PROVIDER-AGNOSTIC model governance: a model is a FREE STRING the llm module's provider adapter
@@ -79,11 +81,20 @@ _FRONTMATTER = re.compile(r"^\s*---\s*\n(.*?)\n---\s*\n?(.*)$", re.DOTALL)
 # Where the per-agent config lives in the workspace (visible, git-governed).
 MEETING_CONFIG_PATH = "agents/meeting.md"
 
-#: Companion steering files appended to ``agents/meeting.md``'s body, in this order. They exist so a
-#: long, slow-changing knowledge base (what the products ARE, what phrases signal them) can be edited
-#: on its own without touching the copilot's polish/tag rules — and so an operator can delete one file
-#: to switch the suggestions off without unpicking prose from the config that governs cleanup.
-MEETING_STEERING_INCLUDES = ("agents/products.md",)
+#: Companion steering files appended to ``agents/meeting.md``'s body. They exist so a long,
+#: slow-changing knowledge base (what a product IS, what phrases signal it) can be edited on its own
+#: without touching the copilot's polish/tag rules.
+#:
+#: WHICH ones are merged is a per-MEETING decision now, not a constant: the owner enables skills for
+#: a meeting and only those products' files are read. With none enabled the copilot has never heard
+#: of any of them and cannot propose one — a stronger guarantee than instructing a model to stay
+#: quiet, and the reason the default is nothing rather than everything.
+#:
+#: The paths come from ``shared.skills``, which resolves them from a REGISTRY. A skill id never
+#: becomes part of a path directly: an id arrives from an API and travels through an env var, and
+#: interpolating one into ``Path(work) / rel`` would read arbitrary files into the copilot's prompt
+#: and from there into cards the whole room sees.
+MEETING_STEERING_INCLUDES: tuple = ()
 
 
 def _split_frontmatter(text: str) -> tuple[dict, str]:
@@ -153,10 +164,33 @@ def _as_card_kinds(val: object) -> list[str]:
     return list(DEFAULT_CARD_KINDS)
 
 
-def load_meeting_config(work: Path) -> MeetingConfig:
+#: The card kind that is a PROPOSAL rather than a tag. It exists only to ask for one of the enabled
+#: products, so with none enabled it is not a kind this meeting can emit.
+SUGGESTION_CARD_KIND = "suggestion"
+
+
+def _narrow_card_kinds(kinds: list, skill_ids) -> list:
+    """Drop ``suggestion`` when no skill is enabled.
+
+    Belt-and-braces, deliberately: with no skill enabled the copilot has no product knowledge, so it
+    has nothing to propose and should not emit one anyway. Removing the kind means a model that
+    invents a proposal from thin air still cannot deliver it — the parser only accepts declared
+    kinds. The workspace keeps `suggestion` in its frontmatter either way, so turning a skill on
+    needs no config edit."""
+    if skills.known(skill_ids):
+        return kinds
+    return [k for k in kinds if k != SUGGESTION_CARD_KIND]
+
+
+def load_meeting_config(work: Path, skill_ids=None) -> MeetingConfig:
     """Read ``<work>/agents/meeting.md`` and return the resolved ``MeetingConfig`` with PER-KEY
     fallback to the code defaults. Absent file ⇒ all defaults. Tolerant of bad YAML / no frontmatter
-    (body, if any, is still used as steering)."""
+    (body, if any, is still used as steering).
+
+    ``skill_ids`` names the products enabled for THIS meeting; their knowledge files are merged into
+    the steering. Omitted or empty ⇒ no product knowledge at all, which is every meeting's default
+    and does not affect the copilot's ordinary work — cleaning the transcript, tagging entities and
+    writing the meeting doc are governed by the frontmatter and happen regardless."""
     path = Path(work) / MEETING_CONFIG_PATH
     if not path.exists():
         return MeetingConfig()
@@ -169,7 +203,7 @@ def load_meeting_config(work: Path) -> MeetingConfig:
     # Companion steering: appended AFTER the body, so the meeting-specific steering a user wrote is
     # read first and an include cannot quietly override it. A missing or unreadable include is simply
     # skipped — steering is prose, and half of it is better than failing a meeting.
-    for rel in MEETING_STEERING_INCLUDES:
+    for rel in (*MEETING_STEERING_INCLUDES, *skills.steering_includes(skill_ids)):
         inc = Path(work) / rel
         try:
             if inc.is_file():
@@ -183,7 +217,7 @@ def load_meeting_config(work: Path) -> MeetingConfig:
         enabled=_as_bool(fm.get("enabled"), True),
         model=_as_model(fm.get("model")),
         cadence_segments=_as_cadence(fm.get("cadence_segments")),
-        card_kinds=_as_card_kinds(fm.get("card_kinds")),
+        card_kinds=_narrow_card_kinds(_as_card_kinds(fm.get("card_kinds")), skill_ids),
         write_meeting_doc=_as_bool(fm.get("write_meeting_doc"), True),
         steering=body,
         polish_rules=_as_rules(fm.get("polish_rules"), DEFAULT_POLISH_RULES),

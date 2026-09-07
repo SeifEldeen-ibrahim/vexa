@@ -150,3 +150,77 @@ def test_polish_and_tag_rules_governed_by_workspace(tmp_path):
 def test_blank_rules_fall_back_to_defaults(tmp_path):
     _write(tmp_path, "---\npolish_rules: '   '\n---\n")
     assert load_meeting_config(tmp_path).polish_rules == DEFAULT_POLISH_RULES
+
+
+# ── which product knowledge reaches the copilot's prompt ──────────────────────────────────
+#
+# The include loop had ZERO test coverage while it was a constant, which is exactly why turning it
+# into a function of per-meeting state needed a guard on both sides first.
+
+_SEED = Path(__file__).resolve().parents[1] / "workspace-seeds" / "default"
+
+
+def test_no_skills_means_no_product_knowledge_in_the_prompt():
+    """Every meeting's default. The copilot has never heard of these products, so it cannot propose
+    one — an absence, not an instruction to stay quiet."""
+    steering = load_meeting_config(_SEED).steering
+    for product in ("Partic", "BIAMI", "Matrix", "ContentMorph", "10x Factory"):
+        assert product not in steering, product
+
+
+def test_an_enabled_skill_brings_its_knowledge_and_nobody_elses():
+    steering = load_meeting_config(_SEED, ["partic"]).steering
+    assert "Partic" in steering
+    assert "ContentMorph" not in steering and "10x Factory" not in steering
+
+
+def test_two_skills_bring_both():
+    steering = load_meeting_config(_SEED, ["partic", "biami"]).steering
+    assert "Partic" in steering and "BIAMI" in steering
+
+
+def test_the_meetings_OWN_steering_is_read_first():
+    """A skill file is appended AFTER the workspace's own steering, so an include can never quietly
+    override what the user wrote for this meeting."""
+    steering = load_meeting_config(_SEED, ["partic"]).steering
+    assert steering.index("Highlight the people") < steering.index("Partic")
+
+
+def test_the_copilots_ORIGINAL_job_is_untouched_by_having_no_skills():
+    """Cleaning the transcript, tagging entities and writing the meeting doc are governed by the
+    frontmatter and must happen whether or not any product is enabled."""
+    cfg = load_meeting_config(_SEED)
+    assert cfg.enabled is True
+    assert cfg.write_meeting_doc is True
+    assert cfg.polish_rules.strip() and cfg.tag_rules.strip()
+    assert cfg.card_kinds[:3] == ["person", "company", "product"]
+    assert cfg.cadence_segments > 0
+
+
+def test_the_suggestion_KIND_is_unavailable_with_no_skill_enabled():
+    """Belt-and-braces beneath the knowledge absence: the parser only accepts declared kinds, so a
+    model that invents a proposal from nothing still cannot deliver one."""
+    assert "suggestion" not in load_meeting_config(_SEED).card_kinds
+    assert "suggestion" in load_meeting_config(_SEED, ["partic"]).card_kinds
+
+
+def test_an_unknown_skill_id_reads_NOTHING(tmp_path):
+    """Ids arrive from an API and are stored in redis. One must never become part of a path — an
+    include is read into a prompt whose output the whole room sees."""
+    base = load_meeting_config(_SEED).steering
+    for hostile in (["../../../etc/passwd"], ["../agents/meeting"], ["nope"], [""]):
+        assert load_meeting_config(_SEED, hostile).steering == base, hostile
+
+
+def test_a_missing_knowledge_file_does_not_fail_the_meeting(tmp_path):
+    """Steering is prose. Half of it is better than a meeting that stops processing."""
+    ws = tmp_path / "ws"
+    (ws / "agents").mkdir(parents=True)
+    (ws / "agents" / "meeting.md").write_text("---\nenabled: true\n---\nwatch things")
+    cfg = load_meeting_config(ws, ["partic"])       # no agents/skills/ at all
+    assert cfg.enabled is True and "watch things" in cfg.steering
+
+
+def test_the_skills_parameter_is_optional():
+    """`/api/models` calls this with no meeting context at all."""
+    assert load_meeting_config(_SEED).model == load_meeting_config(_SEED, None).model

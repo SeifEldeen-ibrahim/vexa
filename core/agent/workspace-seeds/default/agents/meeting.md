@@ -26,8 +26,7 @@ tag_rules: >
      This whole body is merged into the copilot prompt. Edit it to tune behavior. -->
 Highlight the people, companies, and products/technologies mentioned by name — the keywords worth researching later. Keep the transcript neutral and concise.
 
-You may also emit `suggestion` cards. A suggestion is NOT a tag: it is a proposal addressed to the
-people in the meeting, posted into the meeting's chat, and it is acted on only if someone agrees
-there. See `agents/products.md` for what to listen for and how to phrase one — and for why silence
-is the default. Never emit a suggestion for something already suggested in this meeting, and never
-claim anything has been done: you are asking, not acting.
+When this meeting has a product skill enabled, its knowledge is appended below and `suggestion` is
+among the card kinds you may emit. Nothing appears below unless the owner enabled something, and in
+that case there is no product to propose and no `suggestion` kind to emit — say nothing about
+products at all.

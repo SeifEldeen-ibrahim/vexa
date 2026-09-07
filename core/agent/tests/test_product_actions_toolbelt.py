@@ -118,8 +118,24 @@ def _call(tool: str, description: str, env=None) -> dict:
 def test_the_server_advertises_the_five_products():
     out = _rpc({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
     names = {t["name"] for t in out[0]["result"]["tools"]}
-    assert names == {"partic_create_pipeline", "biami_create_process", "matrix_create_task",
-                     "contentmorph_transform", "tenx_request"}
+    assert {"partic_create_pipeline", "biami_create_process", "matrix_create_task",
+            "contentmorph_transform", "tenx_request"} <= names
+
+
+def test_a_repo_backed_product_can_be_READ_as_well_as_written():
+    """The assistant has to know what it is writing against. A product's import gate rejects
+    anything non-canonical and its contract is the only statement of what canonical means — without
+    a way to look, the model invents connector names and every document is silently refused."""
+    out = _rpc({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+    names = {t["name"] for t in out[0]["result"]["tools"]}
+    assert {"partic_describe_repo", "biami_describe_repo"} <= names
+
+
+def test_a_product_with_no_repo_has_nothing_to_describe():
+    """Matrix/ContentMorph/10x have no repo contract yet, so there is nothing to read."""
+    out = _rpc({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+    names = {t["name"] for t in out[0]["result"]["tools"]}
+    assert not {n for n in names if n.startswith(("matrix_desc", "contentmorph_desc", "tenx_desc"))}
 
 
 def test_every_advertised_tool_takes_exactly_what_it_needs():
@@ -127,6 +143,9 @@ def test_every_advertised_tool_takes_exactly_what_it_needs():
     described. The argument shape says which kind a tool is."""
     out = _rpc({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
     for t in out[0]["result"]["tools"]:
+        if t["name"].endswith("_describe_repo"):
+            assert t["inputSchema"].get("properties") == {}, t["name"]   # reads, takes nothing
+            continue
         want = ["document"] if t["name"] in ("partic_create_pipeline", "biami_create_process") \
             else ["description"]
         assert t["inputSchema"]["required"] == want, t["name"]
@@ -179,7 +198,8 @@ def test_a_turn_only_sees_the_tools_its_meeting_ENABLED():
     import os
     env = dict(os.environ, VEXA_SKILL_TOOLS="partic")
     out = _rpc({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}, env=env)
-    assert [t["name"] for t in out[0]["result"]["tools"]] == ["partic_create_pipeline"]
+    assert sorted(t["name"] for t in out[0]["result"]["tools"]) == \
+        ["partic_create_pipeline", "partic_describe_repo"]
 
 
 def test_calling_a_tool_the_meeting_did_not_enable_is_refused():

@@ -514,6 +514,13 @@ class SkillAct(BaseModel):
     name: str = ""
 
 
+class SkillDescribe(BaseModel):
+    """The in-worker tool asking what it is authoring against."""
+    model_config = {"extra": "forbid"}
+    grant: str
+    skill: str
+
+
 class SkillRepoPin(BaseModel):
     """Pin one of the caller's own GitHub repos to a repo-backed skill.
 
@@ -2175,6 +2182,44 @@ def create_app(
                 f"Your {skill.label} repo moved on while I was writing, so I didn't push. Nothing "
                 f"was changed — ask me again and I'll retry.", detail=str(exc)[:200])
         return skill_actions.ActionResult("written", _skill_written_message(skill), detail=relpath)
+
+    @app.post("/internal/skills/describe")
+    def skills_describe(body: SkillDescribe):
+        """What the model needs to AUTHOR for this product, read from the owner's own pinned repo.
+
+        The repo is deliberately not mounted into the turn — the token stays here and a writable
+        mount would put unrelated Vexa commits into the user's repo forever — but the assistant
+        still has to know what it is writing against. A product's import gate rejects anything
+        non-canonical, and its contract and connector list are the only statement of what canonical
+        means; without them the model invents connector names and every document is a rejection
+        nobody in the meeting ever sees.
+
+        Available in BOTH grounding scopes, because this is the product's own documentation and has
+        nothing to do with how much MEETING history is in reach. It carries no credential: a Partic
+        connector file holds schema, not secrets."""
+        grant = _resolve_skill_grant(body.grant)
+        if grant is None:
+            raise HTTPException(status_code=403, detail="expired or unknown turn grant")
+        subject = str(grant.get("subject") or "")
+        skill = skills_registry.get(body.skill)
+        if skill is None or skill.id not in skills_registry.known(grant.get("skills") or []):
+            return {"status": "not-linked",
+                    "message": f"{body.skill} is not turned on for this meeting."}
+        pins = skill_repos.read_pins(wsr.root, subject)
+        pin = pins.get(skill.id)
+        if not pin:
+            return {"status": "not-linked",
+                    "message": f"This meeting isn't connected to a {skill.label} repo yet."}
+        try:
+            repo = Path(workspace_dir_for(wsr.root, subject, pin["slug"]))
+        except Exception:  # noqa: BLE001
+            repo = None
+        if repo is None or not repo.is_dir():
+            return {"status": "not-linked",
+                    "message": f"The {skill.label} repo isn't reachable any more."}
+        described = (skill_actions.partic_describe(repo) if skill.id == "partic"
+                     else skill_actions.biami_describe(repo))
+        return {"status": "ok", **described}
 
     @app.post("/internal/skills/act")
     def skills_act(body: SkillAct):

@@ -29,11 +29,20 @@ import urllib.request
 #: and to this server, and an ordinary chat turn has Bash — a token here is a token the model can
 #: print. The control plane holds it and does the git work.
 ACT_URL = (os.environ.get("VEXA_SKILL_ACT_URL") or "").strip()
+DESCRIBE_URL = ACT_URL.replace("/act", "/describe") if ACT_URL else ""
 ACT_GRANT = (os.environ.get("VEXA_SKILL_GRANT") or "").strip()
 
 #: Which products this turn may act on. The control plane checks this again — a tool list is a
 #: prompt-visible thing — but filtering here keeps a tool the meeting never enabled off the menu.
 ENABLED = [s.strip() for s in (os.environ.get("VEXA_SKILL_TOOLS") or "").split(",") if s.strip()]
+
+#: tool name → the skill it READS for. A repo-backed product's import gate rejects anything
+#: non-canonical, and its contract and connector list are the only statement of what canonical
+#: means — so the model has to be able to look, not just write.
+DESCRIBE_SKILL = {
+    "partic_describe_repo": "partic",
+    "biami_describe_repo": "biami",
+}
 
 #: tool name → the skill it acts for. Repo-backed skills write a document; the rest report.
 TOOL_SKILL = {
@@ -139,6 +148,21 @@ def _act(skill: str, document: str, name: str) -> dict:
     return payload
 
 
+def _describe(skill: str) -> dict:
+    """Ask the control plane what this product's repo looks like."""
+    if not DESCRIBE_URL or not ACT_GRANT:
+        return {"status": "unavailable",
+                "message": "I can't read that product's repo from this meeting."}
+    body = json.dumps({"grant": ACT_GRANT, "skill": skill}).encode()
+    req = urllib.request.Request(DESCRIBE_URL, data=body, method="POST",
+                                 headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return json.loads(resp.read().decode() or "{}")
+    except Exception:  # noqa: BLE001 — never raise inside a turn
+        return {"status": "failed", "message": "I couldn't read that product's repo just now."}
+
+
 def _tool_list() -> list:
     """The tools this turn may call — narrowed to the products the meeting enabled.
 
@@ -146,7 +170,28 @@ def _tool_list() -> list:
     allow-list cannot express "this server, but only two of its five tools". Listing only the
     enabled ones is what makes the per-product switch real at the tool boundary."""
     out = []
+    for name, skill in DESCRIBE_SKILL.items():
+        if ENABLED and skill not in ENABLED:
+            continue
+        label = next(l for t, (_e, l, _a) in TOOLS.items() if TOOL_SKILL.get(t) == skill)
+        out.append({
+            "name": name,
+            "description": f"Read the owner's {label} repo: its authoring contract, its real "
+                           f"connectors or script vocabulary, and what already exists. Call this "
+                           f"BEFORE writing one — the import gate rejects anything that does not "
+                           f"already match, and invented names are the usual reason.",
+            "inputSchema": {"type": "object", "properties": {}},
+        })
     for name, (_env, label, arg_help) in TOOLS.items():
+        if name in DESCRIBE_SKILL:
+            d_skill = DESCRIBE_SKILL[name]
+            result = ({"status": "unavailable",
+                       "message": "That product isn't turned on for this meeting."}
+                      if ENABLED and d_skill not in ENABLED else _describe(d_skill))
+            return {"jsonrpc": "2.0", "id": mid, "result": {
+                "content": [{"type": "text", "text": json.dumps(result)}],
+                "isError": result.get("status") in ("failed", "invalid"),
+            }}
         skill = TOOL_SKILL.get(name, "")
         if ENABLED and skill not in ENABLED:
             continue
@@ -196,7 +241,7 @@ def _handle(msg: dict) -> "dict | None":
         params = msg.get("params") or {}
         name = params.get("name")
         args = params.get("arguments") or {}
-        if name not in TOOLS:
+        if name not in TOOLS and name not in DESCRIBE_SKILL:
             return {"jsonrpc": "2.0", "id": mid,
                     "error": {"code": -32601, "message": f"unknown tool {name!r}"}}
         skill = TOOL_SKILL.get(name, "")

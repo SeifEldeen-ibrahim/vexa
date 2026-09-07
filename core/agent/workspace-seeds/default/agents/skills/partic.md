@@ -23,3 +23,9 @@ today, or an integration they wish existed.
 > "Shall I create a Partic pipeline that syncs Stripe charges into Postgres on every event?"
 
 **Tool (after they agree):** `partic_create_pipeline`
+
+**Before writing, read:** `partic_describe_repo` — the owner's own repo: its authoring contract, the connectors
+or verbs that really exist there, and what has already been built. The import gate rejects anything
+that does not already match, and an invented name is the usual reason, so this is not optional
+context — it is what makes the difference between a document that imports and one that is silently
+refused where nobody in the meeting can see it.

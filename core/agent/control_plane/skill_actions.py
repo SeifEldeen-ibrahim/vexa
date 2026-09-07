@@ -224,3 +224,90 @@ def commit_all(repo: Path, message: str, *, author: "tuple | None" = None) -> st
         args += ["--author", f"{author[0]} <{author[1]}>"]
     _git(repo, *args)
     return _git(repo, "rev-parse", "HEAD")
+
+
+#: How much of a product's own documentation to hand the model. The authoring contract is the thing
+#: it must follow exactly, so it is not summarised; the cap only stops a pathological file.
+DESCRIBE_CONTRACT_CHARS = 24_000
+
+
+def partic_describe(repo: Path) -> dict:
+    """What the model needs to author a Partic pipeline: the project's contract and its connectors.
+
+    The contract is READ, not paraphrased. Partic's import gate rejects anything non-canonical and
+    the contract is the only statement of what canonical means — a summary of it would produce
+    documents that look right and import as errors nobody in the meeting ever sees.
+
+    The connectors are the other half, and the reason a model cannot do this from memory: refs are
+    invented names bound to REAL connectors in THIS project, so without the list it guesses, and a
+    guessed connector is a rejection. Names, types and field names only — a connector file carries
+    no credentials, which is what makes this safe to put in a prompt at all."""
+    contract = ""
+    for name in ("AUTHORING_CONTRACT.md", "authoring_contract.md"):
+        f = Path(repo) / name
+        if f.is_file():
+            try:
+                contract = f.read_text(encoding="utf-8")[:DESCRIBE_CONTRACT_CHARS]
+            except OSError:
+                contract = ""
+            break
+    connectors = []
+    d = Path(repo) / "connectors"
+    if d.is_dir():
+        for f in sorted(d.glob("*.json")):
+            try:
+                data = json.loads(f.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if not isinstance(data, dict):
+                continue
+            schema = ((data.get("config") or {}).get("schema") or {})
+            resources = []
+            for r in (schema.get("resources") or [])[:10]:
+                if isinstance(r, dict) and r.get("name"):
+                    fields = [str(x.get("name")) for x in (r.get("fields") or [])
+                              if isinstance(x, dict) and x.get("name")]
+                    resources.append({"name": str(r["name"]), "fields": fields[:40]})
+            connectors.append({
+                "name": str(data.get("name") or ""),
+                "connector_type_id": str(data.get("connector_type_id") or ""),
+                "status": str(data.get("status") or ""),
+                "resources": resources,
+            })
+    existing = sorted(p.name for p in (Path(repo) / PARTIC_DIR).glob("*.json")) \
+        if (Path(repo) / PARTIC_DIR).is_dir() else []
+    return {"authoring_contract": contract, "connectors": connectors,
+            "existing_pipelines": existing[:50]}
+
+
+def biami_describe(repo: Path) -> dict:
+    """What the model needs to author a BIAMI process: the verbs it may use, and what exists.
+
+    ``script`` is a CLOSED vocabulary — the engine resolves each cell against its own table — so a
+    name the model invents is not a slightly-wrong process, it is an import that registers nothing.
+    Read from the checkout's own database rather than a list kept here, because that table is what
+    the importer will actually check against."""
+    import sqlite3
+
+    scripts: list = []
+    db = Path(repo) / "db" / "pro_cess.db"
+    if db.is_file():
+        try:
+            con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+            try:
+                scripts = [str(r[0]) for r in con.execute(
+                    "select filename from script order by filename").fetchall() if r and r[0]]
+            finally:
+                con.close()
+        except Exception:  # noqa: BLE001
+            log.warning("could not read BIAMI's script vocabulary", exc_info=True)
+    example = ""
+    sample = Path(repo) / BIAMI_IMPORT_STAGING
+    if sample.is_file():
+        try:
+            example = "\n".join(sample.read_text(encoding="utf-8").splitlines()[:6])
+        except OSError:
+            example = ""
+    return {"scripts": scripts, "existing_processes": sorted(biami_imported_names(Path(repo)))[:80],
+            "example_tsv": example,
+            "columns": ["Stage", "Business Task Name", "Technical Task Name", "Script", "Parameter 1"]}

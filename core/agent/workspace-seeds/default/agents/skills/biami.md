@@ -25,3 +25,9 @@ to touch.
 (`Stage | Business Task Name | Technical Task Name | Script | Parameter 1`, tab-separated, one row
 per stage, stage 0 naming the process). Vexa runs BIAMI's own importer over it, so the process is
 registered in the database — never RUN. Importing and running are different BIAMI commands.
+
+**Before writing, read:** `biami_describe_repo` — the owner's own repo: its authoring contract, the connectors
+or verbs that really exist there, and what has already been built. The import gate rejects anything
+that does not already match, and an invented name is the usual reason, so this is not optional
+context — it is what makes the difference between a document that imports and one that is silently
+refused where nobody in the meeting can see it.

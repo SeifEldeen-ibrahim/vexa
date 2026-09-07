@@ -234,3 +234,47 @@ def publish_workspace(
              subject, remote_url, branch, created)  # metadata only — never the token (P15)
     return PublishResult(repo_url=_display_url(remote_url), pushed_ref=branch,
                          head_sha=head_sha, created=created)
+
+
+def list_github_repos(token: str, *, limit: int = 100) -> list:
+    """The caller's repos, newest-touched first, as ``[{name, full_name, url, private, can_push}]``.
+
+    For the Settings picker: a user pins one of their own repos to a product skill, and typing a URL
+    by hand is where a wrong pin comes from. `can_push` comes from GitHub's own `permissions.push`,
+    because a token that can READ a repo and not write it produces a pin that looks healthy and then
+    fails at push time — in front of a meeting, after somebody said yes out loud.
+
+    Same shape as ``_github_create_repo``: stdlib urllib, no new dep, and every failure raises
+    ``PublishError`` with the token redacted (P15)."""
+    url = (f"{GITHUB_API}/user/repos?per_page={min(int(limit), 100)}"
+           "&sort=pushed&direction=desc&affiliation=owner,collaborator,organization_member")
+    req = urllib.request.Request(url, headers={
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "vexa-agent",
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:
+            data = json.loads(r.read() or b"[]")
+    except urllib.error.HTTPError as exc:
+        detail = ""
+        try:
+            detail = str((json.loads(exc.read() or b"{}") or {}).get("message") or "")
+        except (ValueError, OSError):
+            pass
+        raise PublishError(_redacted(f"GitHub refused the repo list ({exc.code}): {detail}", token)) from None
+    except Exception as exc:  # noqa: BLE001
+        raise PublishError(_redacted(f"could not reach GitHub: {exc}", token)) from None
+    out = []
+    for r in data if isinstance(data, list) else []:
+        if not isinstance(r, dict) or not r.get("full_name"):
+            continue
+        out.append({
+            "name": str(r.get("name") or ""),
+            "full_name": str(r["full_name"]),
+            "url": str(r.get("clone_url") or ""),
+            "private": bool(r.get("private")),
+            "default_branch": str(r.get("default_branch") or "main"),
+            "can_push": bool((r.get("permissions") or {}).get("push")),
+        })
+    return out

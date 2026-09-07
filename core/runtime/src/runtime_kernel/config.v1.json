@@ -192,6 +192,13 @@
    "targets": ["compose", "helm", "lite"]
   },
   {
+   "key": "BOT_GMEET_ACCEPT_GEMINI_CONSENT",
+   "class": "defaulted",
+   "default": "(unset — the bot does not consent for you)",
+   "description": "answer Google Meet's Gemini note-taking consent prompt on the bot's behalf; forwarded to spawned bots. Off by default because consent is the account holder's decision — set it only where the bot account belongs to the operator, since the prompt renders inside the bot's own browser and no meeting participant can reach it",
+   "targets": ["compose", "helm", "lite"]
+  },
+  {
    "key": "BOT_STT_VOCABULARY",
    "class": "defaulted",
    "default": "(unset — no vocabulary bias)",

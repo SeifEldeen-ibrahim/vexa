@@ -252,6 +252,10 @@ runtime:
   # Whisper prompt with every audio window, so speech-to-text stops inventing spellings for words it
   # has never heard. Empty = no vocabulary bias.
   sttVocabulary: ""
+  # Answer Google Meet's Gemini note-taking consent prompt on the bot's behalf ("true"). Off by
+  # default: consent belongs to the account holder. Set it only where the bot account is yours —
+  # the prompt renders inside the bot's own browser, unreachable by anyone in the meeting.
+  acceptGeminiConsent: ""
   resources:
     requests: { cpu: 50m, memory: 256Mi }
     limits:   { cpu: 500m, memory: 768Mi }

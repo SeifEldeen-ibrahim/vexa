@@ -65,7 +65,7 @@ from control_plane.workspace_attach import (
     swap_workspace,
     workspace_dir_for,
 )
-from control_plane.workspace_publish import PublishError, RepoExistsError, publish_workspace, published_remote_url
+from control_plane.workspace_publish import list_github_repos, PublishError, RepoExistsError, publish_workspace, published_remote_url
 from control_plane.workspace_git_sync import RemoteSyncError, pull_origin, push_origin, remote_status
 from control_plane.workspace_purpose import read_purpose, write_purpose
 from control_plane import workspace_membership as membership_mod
@@ -495,6 +495,18 @@ class MeetingStart(BaseModel):
     native_id: str              # the platform meeting id (e.g. a Google Meet code abc-defg-hij)
     subject: Optional[str] = None  # DERIVED from X-User-Id (P20); ignored if sent.
     title: Optional[str] = None
+
+
+class SkillRepoPin(BaseModel):
+    """Pin one of the caller's own GitHub repos to a repo-backed skill.
+
+    Pinning CLONES the repo into the caller's workspace store, so it is done once in Settings and
+    not per meeting: a clone is a network op and a meeting is not the place for it."""
+    model_config = {"extra": "forbid"}
+    skill: str
+    #: The https clone URL, from the picker. Empty ⇒ unpin.
+    repo: str = ""
+    ref: str = "main"
 
 
 class MeetingSkills(BaseModel):
@@ -1955,6 +1967,61 @@ def create_app(
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
         return {"set": stored, "masked": git_creds.masked_github_token(wsr.root, subject)}
+
+    @app.get("/api/skills/repos")
+    def skills_repos_get(request: Request):
+        """What each repo-backed skill is pinned to, and what the caller could pin it to.
+
+        The repo list needs the caller's stored token and one GitHub call, so it is fetched only
+        when asked for — `repos` is empty (with a reason) rather than an error when no token is
+        saved, because "you have not linked GitHub" is a state the UI renders, not a failure."""
+        subject = subject_of(request)
+        pins = skill_repos.read_pins(wsr.root, subject)
+        token = git_creds.read_github_token(wsr.root, subject)
+        repos: list = []
+        note = ""
+        if not token:
+            note = "no GitHub token saved"
+        else:
+            try:
+                repos = list_github_repos(token)
+            except PublishError as exc:
+                note = str(exc)          # already token-redacted (P15)
+        return {
+            "skills": [{"id": sk.id, "label": sk.label, "pin_hint": sk.pin_hint,
+                        "pinned": pins.get(sk.id)}
+                       for sk in skills_registry.SKILLS if sk.repo_backed],
+            "repos": repos, "note": note, "token_set": bool(token),
+        }
+
+    @app.post("/api/skills/repos")
+    def skills_repos_set(body: SkillRepoPin, request: Request):
+        """Pin (or, with an empty repo, unpin) one repo-backed skill.
+
+        Clones through the SAME `activate_workspace` every attached workspace uses, so the repo
+        lands in this caller's own store under their own subject and two users pinning the same URL
+        get two independent clones. The pin then holds only the SLUG — `repo`/`ref` already live in
+        the attach state, and a second writer of those would drift the moment a workspace is
+        renamed or deleted."""
+        subject = subject_of(request)
+        skill = skills_registry.get(body.skill)
+        if skill is None or not skill.repo_backed:
+            raise HTTPException(status_code=400, detail=f"not a repo-backed skill: {body.skill!r}")
+        if not (body.repo or "").strip():
+            return {"skills": skill_repos.unpin(wsr.root, subject, skill.id)}
+        token = git_creds.read_github_token(wsr.root, subject)
+        try:
+            result = activate_workspace(wsr.root, subject, body.repo.strip(), body.ref or "main",
+                                        token=token or None)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="invalid subject or repo")
+        except CloneError as exc:
+            # Token-redacted upstream (P15). This is the honest place for a bad token to surface —
+            # in Settings, where the person can fix it, and not mid-meeting.
+            raise HTTPException(status_code=502, detail=f"could not clone that repo: {exc}")
+        pins = skill_repos.pin(wsr.root, subject, skill.id, slug=result.slug,
+                               repo=body.repo.strip(), ref=body.ref or "main")
+        return {"skills": pins, "slug": result.slug, "cloned": result.cloned}
 
     @app.get("/api/workspace/git-remote-status")
     def ws_git_remote_status(request: Request, slug: Optional[str] = None):

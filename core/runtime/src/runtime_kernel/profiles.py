@@ -146,6 +146,11 @@ def default_registry() -> ProfileRegistry:
             # its prompt, and a name it has never heard is the one error no downstream repair can
             # undo — a live meeting produced "Baratik" and "Barathek Bible" for one spoken product.
             "BOT_STT_VOCABULARY",
+            # Answer Google's Gemini note-taking consent prompt on the bot's behalf. Upstream does
+            # not, deliberately — consent is the account holder's decision — but the prompt appears
+            # inside the BOT's browser where no participant can reach it, so a deployment whose bot
+            # account is its own must be able to say yes once. Off unless set.
+            "BOT_GMEET_ACCEPT_GEMINI_CONSENT",
         )
         if os.environ.get(key, "").strip()
     }

@@ -76,6 +76,8 @@ spec:
               value: {{ .Values.runtime.speakerStream.idleTimeoutSec | default "" | quote }}
             - name: BOT_STT_VOCABULARY
               value: {{ .Values.runtime.sttVocabulary | default "" | quote }}
+            - name: BOT_GMEET_ACCEPT_GEMINI_CONSENT
+              value: {{ .Values.runtime.acceptGeminiConsent | default "" | quote }}
             - name: INTERNAL_API_SECRET
               valueFrom:
                 secretKeyRef:

@@ -93,7 +93,8 @@ def unpin(root: str | Path, subject: str, skill_id: str) -> dict:
     if p is None:
         raise ValueError("invalid subject")
     pins = read_pins(root, subject)
-    pins.pop((skill_id or "").strip().lower(), None)
+    if pins.pop((skill_id or "").strip().lower(), None) is None:
+        return pins          # nothing pinned — do not create a store to record an absence
     _write(p, pins)
     return pins
 

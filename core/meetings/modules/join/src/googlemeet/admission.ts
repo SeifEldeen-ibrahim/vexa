@@ -6,6 +6,7 @@ import {
   googleInitialAdmissionIndicators,
   googleWaitingRoomIndicators,
   googleRejectionIndicators,
+  googleConsentAcceptButtons,
   googleConsentPromptIndicators
 } from "./selectors";
 
@@ -217,10 +218,15 @@ export async function checkForGoogleAdmissionIndicators(page: Page): Promise<boo
   // consent gate. Meeting controls can be visible behind it, but the bot is not
   // truly participating until a human accepts/declines — reporting admitted here
   // yields "status active, 0 transcriptions" (Vexa-ai/vexa#429). Suppress admission.
-  const consentPending = await hasConsentPrompt(page);
-  if (consentPending) {
-    log(`⚠️ Gemini consent prompt visible — suppressing admission (consent pending; bot not truly in the call)`);
-    return false;
+  if (await hasConsentPrompt(page)) {
+    // Answer it here too, not only in the polling branch: this check runs on EVERY admission probe,
+    // so left unanswered it is the line that repeats every couple of seconds for the whole window
+    // while the bot sits in a call it was already admitted to. Clicking here lets the very same
+    // probe continue to the real admission test instead of returning a false negative.
+    if (!(consentAutoAcceptEnabled() && await acceptConsentPrompt(page))) {
+      log(`⚠️ Gemini consent prompt visible — suppressing admission (consent pending; bot not truly in the call)`);
+      return false;
+    }
   }
 
   // Wake the UI before probing. Google Meet auto-hides the in-call toolbar
@@ -310,6 +316,40 @@ export async function checkForWaitingRoomIndicators(page: Page): Promise<boolean
 // (Vexa-ai/vexa#429). Mirrors checkForWaitingRoomIndicators: a pre-admission
 // state that suppresses the "admitted" signal. Consent must be a human decision,
 // so callers escalate to needs_human_help rather than auto-clicking it.
+/** Whether this deployment answers Google's Gemini consent prompt on the bot's behalf.
+ *
+ *  OFF by default, and that default is upstream's deliberate position (Vexa-ai/vexa#429): consent is
+ *  the account holder's decision, so a bot must not click it for them. But the prompt is shown to
+ *  the BOT's own account, inside the bot's own browser — nobody in the meeting can reach it — so on
+ *  a deployment whose bot account belongs to the operator, refusing to answer leaves the bot parked
+ *  in the lobby for the full fifteen-minute window with only a log line to say why. Observed live.
+ *
+ *  So it is an operator switch, not a code change: the person who owns the bot account decides once,
+ *  for their own account, and every other deployment keeps upstream's behaviour untouched.
+ */
+export function consentAutoAcceptEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return String(env.BOT_GMEET_ACCEPT_GEMINI_CONSENT ?? "").trim().toLowerCase() === "true";
+}
+
+/** Click the consent dialog's accept button. Returns true when one was clicked.
+ *
+ *  Best-effort and never throws: a consent gate that cannot be answered must fall through to the
+ *  existing escalation, not fail the join with a different error. */
+export async function acceptConsentPrompt(page: Page): Promise<boolean> {
+  for (const selector of googleConsentAcceptButtons) {
+    try {
+      const button = page.locator(selector).first();
+      if (!(await button.isVisible())) continue;
+      await button.click({ timeout: 2000 });
+      log(`✅ Gemini consent accepted on this deployment's behalf (${selector})`);
+      return true;
+    } catch {
+      continue;
+    }
+  }
+  return false;
+}
+
 export async function hasConsentPrompt(page: Page): Promise<boolean> {
   for (const selector of googleConsentPromptIndicators) {
     try {
@@ -387,8 +427,15 @@ export async function waitForGoogleMeetingAdmission(
     // proceeds once consent is granted (mirrors the reCAPTCHA "stay for human
     // solve" handling).
     if (await hasConsentPrompt(page)) {
-      log("🧑‍⚖️ Gemini consent prompt detected — bot is behind a consent gate (not admitted). Escalating to needs_human_help; not auto-consenting.");
-      await triggerEscalation(botConfig, "consent_required");
+      // Answer it ourselves when the operator has said to (see consentAutoAcceptEnabled). If that
+      // fails — or the switch is off — fall through to the escalation exactly as before, so the
+      // upstream behaviour is what happens whenever we do not successfully consent.
+      if (consentAutoAcceptEnabled() && await acceptConsentPrompt(page)) {
+        log("🧑‍⚖️ Gemini consent prompt answered — resuming admission polling.");
+      } else {
+        log("🧑‍⚖️ Gemini consent prompt detected — bot is behind a consent gate (not admitted). Escalating to needs_human_help; not auto-consenting.");
+        await triggerEscalation(botConfig, "consent_required");
+      }
     }
 
     log("Bot not yet admitted - checking for Google Meet waiting room indicators...");

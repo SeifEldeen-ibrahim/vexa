@@ -153,6 +153,12 @@ services:
       # the one error nothing downstream can undo: a live meeting produced "Baratik", "Paratic"
       # and "Barathek Bible" for one spoken product, and "Claview" for Klaviyo. Empty = off.
       - BOT_STT_VOCABULARY=${BOT_STT_VOCABULARY:-}
+      # Answer Google's Gemini "take notes" consent prompt on the bot's behalf. OFF by default:
+      # consent belongs to the account holder, and upstream will not click it for them. Set true
+      # only on a deployment whose bot account you own — the prompt renders inside the bot's own
+      # browser, so nobody in the meeting can accept it and the bot otherwise waits out its full
+      # admission window in the lobby.
+      - BOT_GMEET_ACCEPT_GEMINI_CONSENT=${BOT_GMEET_ACCEPT_GEMINI_CONSENT:-}
       - VEXA_AGENT_SRC_MOUNT=${VEXA_AGENT_SRC_MOUNT:-}
       - REDIS_URL=redis://redis:6379/0
       # The Runtime brokers model credentials into spawned agents. Subscription credentials may be

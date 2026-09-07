@@ -109,6 +109,35 @@ AMBIGUOUS_NAME_REPLY = (
     "or the owner can allow anyone to ask from the meeting's panel in Vexa."
 )
 
+#: Words that carry no proposal-identity. Two offers to build the same thing rarely share a
+#: phrasing, but they always share the nouns.
+_PROPOSAL_NOISE = frozenset((
+    "shall", "i", "you", "your", "the", "a", "an", "and", "or", "of", "to", "in", "into", "from",
+    "for", "on", "at", "by", "with", "that", "this", "it", "is", "are", "be", "do", "want", "would",
+    "like", "me", "we", "us", "so", "can", "could", "should", "create", "make", "build", "set", "up",
+))
+
+
+def proposal_fingerprint(text: str) -> frozenset:
+    """The content words of a proposal, as a set.
+
+    A copilot beat has no memory of the beat before it — each one sees a transcript window and
+    proposes afresh — so the same need gets offered twice in different words: "moves the data from
+    your customers table into your leads table" and "syncs your customers table into the leads
+    table". Titles differ, wording differs, and the nouns do not. That is what is compared."""
+    words = re.findall(r"[a-z0-9]+", (text or "").lower())
+    return frozenset(w for w in words if w not in _PROPOSAL_NOISE and len(w) > 2)
+
+
+def is_same_proposal(a: str, b: str, *, overlap: float = 0.6) -> bool:
+    """Are these two proposals asking for the same thing? Compared against the SMALLER of the two,
+    so a terse restatement of a long proposal still counts as a repeat."""
+    fa, fb = proposal_fingerprint(a), proposal_fingerprint(b)
+    if not fa or not fb:
+        return False
+    return len(fa & fb) / min(len(fa), len(fb)) >= overlap
+
+
 #: Grounding scopes. `transcript` is the default and the safe one — see GROUNDING SCOPE above.
 SCOPE_TRANSCRIPT = "transcript"
 SCOPE_WORKSPACE = "workspace"
@@ -313,6 +342,7 @@ class MeetingChatResponder:
         meet_identity: Optional[Callable[[str, str, str], dict]] = None,
         owner_names: "list | None" = None,
         pending_suggestion: Optional[Callable[[str], "str | None"]] = None,
+        suggestion_answered: Optional[Callable[[str], None]] = None,
         max_workers: int = 2,
         min_interval_s: float = 5.0,
         log: Optional[Callable[[str], None]] = None,
@@ -329,6 +359,7 @@ class MeetingChatResponder:
         self._meet_identity = meet_identity
         self._owner_names = owner_names or []
         self._pending_suggestion = pending_suggestion
+        self._suggestion_answered = suggestion_answered
         self._min_interval_s = min_interval_s
         self._log = log or (lambda m: logger.info("%s", m))
         # Bounded on purpose: a Meet bot is already most of this box's CPU, and every turn is a
@@ -437,8 +468,13 @@ class MeetingChatResponder:
                     return "rate-limited"
                 self._inflight.add(meeting_key)
                 self._last_at[meeting_key] = now
+            # A guest is here because the OWNER opened the room. The turn has to be told that:
+            # it runs as the owner, in the owner's thread, and left to infer who it serves it
+            # concludes "the owner" and politely refuses the very person the gate just admitted.
+            asker_is_owner = identity_verified or not anyone or self._sender_is_owner(
+                subject, sender, sender_email)
             self._pool.submit(self._answer, meeting_key, platform, native, subject, sender, question,
-                              sender_email, sender_name_unique, identity_verified)
+                              sender_email, sender_name_unique, identity_verified, asker_is_owner)
             return "accepted"
         except Exception:  # noqa: BLE001 — the watcher thread must survive anything that happens here
             logger.exception("meet-chat: offer failed for %s", meeting_key)
@@ -448,7 +484,7 @@ class MeetingChatResponder:
     def _answer(self, meeting_key: str, platform: str, native: str, subject: str, sender: str,
                 question: str, sender_email: "str | None" = None,
                 sender_name_unique: "bool | None" = None,
-                identity_verified: bool = False) -> None:
+                identity_verified: bool = False, asker_is_owner: bool = True) -> None:
         try:
             # The SAME thread identity the Terminal's Assistant tab shows.
             session = meeting_session_id(platform, meeting_key)
@@ -500,12 +536,33 @@ class MeetingChatResponder:
                 "to refuse the owner. If something looks genuinely sensitive for a room, say so "
                 "briefly and answer what you can."
             )
+            # WHO THIS PERSON IS TO YOU. The turn runs as the owner, in the owner's thread, reading
+            # the owner's workspace — so with nothing said, the model concludes it serves the owner
+            # and answers anyone else with a polite refusal. That is the assistant overriding a
+            # decision the owner already made in the UI: the gate above is what decides who may ask,
+            # and by the time a question reaches here it has been decided.
+            standing = "" if asker_is_owner else (
+                f"{who} is not the meeting owner. The owner has opened this assistant to everyone "
+                "in this meeting, so this is a person you serve — answer their question directly "
+                "and do not tell them you only take instructions from the owner. Their access is "
+                "narrower, not lesser: you answer them from this meeting and the web, never from "
+                "the owner's stored records.\n\n"
+            )
             prompt = (
                 f"{who} asked in the meeting chat: {question}\n\n"
+                f"{standing}"
                 f"{self._pending_clause(meeting_key)}"
                 f"{scoped} Be brief — a few sentences at most, plain text, no markdown formatting. "
                 "If you do not have the answer, say so plainly."
             )
+            # Whatever they said — yes, no, or something else entirely — the proposal has now been
+            # put in front of someone and answered. Closed BEFORE the turn, so a slow or failed
+            # turn cannot leave it open to be re-asked on the next message.
+            if self._pending_suggestion is not None and self._suggestion_answered is not None:
+                try:
+                    self._suggestion_answered(meeting_key)
+                except Exception:  # noqa: BLE001
+                    logger.exception("meet-chat: could not close the proposal for %s", meeting_key)
             reply = self._run_turn(subject, session, focus, prompt, question, scope)
             body = strip_markdown(reply or "")
             if not body:

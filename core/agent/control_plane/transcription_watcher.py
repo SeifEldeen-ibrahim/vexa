@@ -218,7 +218,8 @@ def _resume_cursor(r, key: str) -> str:
     return str(cursor) if cursor else "0-0"
 
 
-def start_suggestion_relay(redis_url: str, *, post_reply, owner_for, remember=None) -> threading.Thread:
+def start_suggestion_relay(redis_url: str, *, post_reply, owner_for, remember=None,
+                           already_proposed=None) -> threading.Thread:
     """Deliver the copilot's suggestions into the meeting they came from.
 
     The copilot has no tools and no network — deliberately, since it consumes an untrusted
@@ -232,16 +233,20 @@ def start_suggestion_relay(redis_url: str, *, post_reply, owner_for, remember=No
     ``remember(meeting_key, text)`` records what was just proposed, so that when someone answers
     "@vexa yes" the assistant knows what it is agreeing to. The proposal is posted into the meeting
     by THIS thread and not by an agent turn, so without this the assistant would have no record of
-    ever having offered anything."""
+    ever having offered anything.
+
+    ``already_proposed(meeting_key, text)`` says whether this meeting has heard this proposal
+    before. A copilot beat has no memory of the beat before it, so the same need IS offered twice —
+    observed live, in two different phrasings a minute apart."""
     t = threading.Thread(
-        target=_run_suggestions, args=(redis_url, post_reply, owner_for, remember),
+        target=_run_suggestions, args=(redis_url, post_reply, owner_for, remember, already_proposed),
         daemon=True, name="tx-suggest",
     )
     t.start()
     return t
 
 
-def _run_suggestions(redis_url: str, post_reply, owner_for, remember=None) -> None:
+def _run_suggestions(redis_url: str, post_reply, owner_for, remember=None, already_proposed=None) -> None:
     import redis as redislib
 
     r = redislib.from_url(redis_url, decode_responses=True, socket_keepalive=True, health_check_interval=10)
@@ -268,12 +273,12 @@ def _run_suggestions(redis_url: str, post_reply, owner_for, remember=None) -> No
                 try:
                     r.xack(SUGGESTIONS, SUGGESTION_GROUP, msg_id)
                     _deliver_suggestion(json.loads(fields.get("payload") or "{}"), post_reply,
-                                        owner_for, remember)
+                                        owner_for, remember, already_proposed)
                 except Exception:  # noqa: BLE001
                     logger.exception("bad suggestion frame; skipping")
 
 
-def _deliver_suggestion(p: dict, post_reply, owner_for, remember=None) -> None:
+def _deliver_suggestion(p: dict, post_reply, owner_for, remember=None, already_proposed=None) -> None:
     key = str(p.get("meeting_id") or "")
     native = str(p.get("native_id") or key)
     platform = p.get("platform") or "google_meet"
@@ -291,6 +296,19 @@ def _deliver_suggestion(p: dict, post_reply, owner_for, remember=None) -> None:
     if not owner:
         logger.warning("meet-suggest: no owner known for meeting %s — dropping %r", key, title or body)
         return
+    # ASKED ONCE. Each copilot beat proposes from a fresh transcript window with no memory of the
+    # beat before it, so a need that is still being discussed gets offered again in different words
+    # — observed live, twice a minute apart for one pipeline. Asking a room the same question twice
+    # is worse than not asking: the second one reads as the bot having missed the answer to the
+    # first. A lookup fault means "not seen before" — a duplicate is cheaper than silence.
+    if already_proposed is not None:
+        try:
+            if already_proposed(key, body or title):
+                logger.info("meet-suggest: already asked this in meeting %s — not asking twice (%r)",
+                            key, (body or title)[:70])
+                return
+        except Exception:  # noqa: BLE001
+            logger.exception("meet-suggest: duplicate check failed for %s — posting anyway", key)
     # The proposal is posted as a QUESTION, and says how to accept it. Someone reading a meeting chat
     # mid-conversation needs to know instantly that nothing has happened yet and what would.
     text = body or title

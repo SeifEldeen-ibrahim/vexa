@@ -127,3 +127,38 @@ def test_a_failing_recorder_does_not_raise():
     post = _Poster()
     _deliver_suggestion(_payload(), post, lambda key: "6", boom)
     assert len(post.posts) == 1        # the proposal still reached the meeting
+
+
+# ── asked once ────────────────────────────────────────────────────────────────────────────
+
+def test_a_proposal_this_meeting_ALREADY_HEARD_is_not_asked_again():
+    """Each copilot beat proposes from a fresh transcript window with no memory of the beat before
+    it, so a need still being discussed is offered again in different words. Observed live, twice a
+    minute apart: "moves the data from your customers table into your leads table" and then "syncs
+    your customers table into the leads table"."""
+    post = _Poster()
+    _deliver_suggestion(_payload(), post, lambda key: "6", None, lambda key, text: True)
+    assert post.posts == []
+
+
+def test_a_NEW_proposal_still_gets_through():
+    post = _Poster()
+    _deliver_suggestion(_payload(), post, lambda key: "6", None, lambda key, text: False)
+    assert len(post.posts) == 1
+
+
+def test_the_duplicate_check_sees_the_PROPOSAL_and_its_meeting():
+    seen: list = []
+    _deliver_suggestion(_payload(), _Poster(), lambda key: "6", None,
+                        lambda key, text: seen.append((key, text)) or False)
+    assert seen == [("42", "Shall I create a Partic pipeline for the Stripe sync")]
+
+
+def test_a_failing_duplicate_check_still_posts():
+    """A repeated question is an annoyance; a proposal never made is the feature not working."""
+    def boom(_key, _text):
+        raise RuntimeError("redis gone")
+
+    post = _Poster()
+    _deliver_suggestion(_payload(), post, lambda key: "6", None, boom)
+    assert len(post.posts) == 1

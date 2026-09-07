@@ -37,7 +37,7 @@ from control_plane import meeting_steering
 from control_plane.meet_identity import MeetIdentityResolver
 from control_plane.meeting_chat_responder import (
     MeetingChatResponder, MEET_CHAT_WEB_TOOLS, MEET_CHAT_WORKSPACE_TOOLS,
-    SCOPE_TRANSCRIPT, SCOPE_WORKSPACE,
+    SCOPE_TRANSCRIPT, SCOPE_WORKSPACE, is_same_proposal,
 )
 from control_plane import schedule_digest as schedule_digest_mod
 from control_plane import routines as routines_mod
@@ -1226,9 +1226,16 @@ def create_app(
     def _meet_chat_pending_key(row: str) -> str:
         return f"meetchat:meeting:{row}:pending"
 
+    def _meet_chat_proposed_key(row: str) -> str:
+        return f"meetchat:meeting:{row}:proposed"
+
     #: How long an unanswered proposal stays live. A suggestion is about what is being discussed
     #: NOW; agreeing to one half an hour later means agreeing to something nobody remembers saying.
     MEET_CHAT_PENDING_TTL_SEC = 15 * 60
+
+    #: How long the record of "we already asked this" lasts. It spans the MEETING, not the moment:
+    #: a topic returned to twenty minutes later should not be proposed again as if it were new.
+    MEET_CHAT_PROPOSED_TTL_SEC = 6 * 3600
 
     #: How long a workspace grant survives without being refreshed. A meeting is over in hours; the
     #: grant must not outlive it and silently apply to a re-send of the same link next week.
@@ -2602,6 +2609,40 @@ def create_app(
             logger.exception("meet-chat: pending-proposal lookup failed for %s", meeting_key)
             return None
 
+    def _meet_chat_answered(meeting_key: str) -> None:
+        """Close the open proposal: the assistant has now put it in front of someone who replied.
+
+        Without this the proposal stays open for its whole TTL, and EVERY later question in the
+        meeting — "what time is it in Cairo?" — arrives with "you recently offered … and nobody has
+        answered yet" attached. One answer per question asked."""
+        import redis as _redis
+
+        try:
+            _redis.from_url(redis_url, decode_responses=True).delete(_meet_chat_pending_key(str(meeting_key)))
+        except Exception:  # noqa: BLE001
+            logger.exception("meet-chat: could not close the pending proposal for %s", meeting_key)
+
+    def _meet_chat_already_proposed(meeting_key: str, text: str) -> bool:
+        """Has this meeting already been asked this? Records it when it has not.
+
+        Check and record are ONE call because they are one decision: a proposal that is about to be
+        posted is a proposal that has been made. Splitting them leaves a window where two beats both
+        read 'no' and both post — which is exactly the failure being fixed."""
+        import redis as _redis
+
+        key = _meet_chat_proposed_key(str(meeting_key))
+        try:
+            r = _redis.from_url(redis_url, decode_responses=True)
+            for prior in (r.lrange(key, 0, 50) or []):
+                if is_same_proposal(prior, text):
+                    return True
+            r.rpush(key, text)
+            r.expire(key, MEET_CHAT_PROPOSED_TTL_SEC)
+            return False
+        except Exception:  # noqa: BLE001
+            logger.exception("meet-chat: duplicate-proposal check failed for %s", meeting_key)
+            return False
+
     responder = None
     if _env_flag("VEXA_MEET_CHAT_ENABLED", default=False):
         responder = MeetingChatResponder(
@@ -2625,6 +2666,9 @@ def create_app(
             # What the copilot offered and nobody has answered. The relay posts proposals directly
             # into the room, so this is the assistant's only record of having offered anything.
             pending_suggestion=_meet_chat_pending,
+            # …and closing it once someone has answered, so the next question is not still being
+            # asked about a proposal that was already settled.
+            suggestion_answered=_meet_chat_answered,
             min_interval_s=float(os.environ.get("VEXA_MEET_CHAT_MIN_INTERVAL_S", "5")),
         )
         app.state.meet_chat_responder = responder
@@ -2632,6 +2676,7 @@ def create_app(
     # published here rather than reached for — the same handshake as the responder above.
     app.state.meet_chat_post = _meet_chat_post
     app.state.meet_chat_remember = _meet_chat_remember
+    app.state.meet_chat_already_proposed = _meet_chat_already_proposed
 
     return app
 
@@ -2714,6 +2759,7 @@ def _build_production_app() -> FastAPI:
                 post_reply=_poster,
                 owner_for=lambda k: transcription_watcher.MEETING_OWNERS.get(str(k)),
                 remember=getattr(app.state, "meet_chat_remember", None),
+                already_proposed=getattr(app.state, "meet_chat_already_proposed", None),
             )
     return app
 

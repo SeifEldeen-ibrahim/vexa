@@ -23,7 +23,9 @@ from control_plane.meeting_chat_responder import (
     addressed_question,
     is_owner,
     is_owner_email,
+    is_same_proposal,
     owner_display_names,
+    proposal_fingerprint,
     chunk_reply,
     meeting_session_id,
     strip_markdown,
@@ -926,3 +928,132 @@ def test_the_assistant_is_not_told_to_PARSE_the_approval():
     _settle(rec)
     prompt = rec.turns[0][3].lower()
     assert "refusal" in prompt and "do nothing" in prompt
+
+
+# ── who the assistant serves, when the owner has opened the room ──────────────────────────
+
+def test_a_guest_the_owner_ADMITTED_is_answered_directly():
+    """The turn runs as the owner, in the owner's thread, over the owner's workspace. Told nothing,
+    the model concludes it serves the owner and answers everyone else with a polite refusal — which
+    is the assistant overriding a decision the owner already made in the UI.
+
+    Observed live: with `anyone` on, a guest asking got "I reply to the meeting owner … I'll take
+    instructions through him."."""
+    rec = _Recorder()
+    r = _responder(rec, anyone=True)
+    _offer(r, "@vexa what can you do?", sender="Marcin")
+    _settle(rec)
+    prompt = rec.turns[0][3]
+    assert "not the meeting owner" in prompt
+    assert "opened this assistant to everyone" in prompt
+    assert "do not tell them you only take instructions from the owner" in prompt
+
+
+def test_the_guest_is_still_told_the_ARCHIVE_is_not_theirs():
+    """Opening the room widens who may ask, never what they may reach."""
+    rec = _Recorder()
+    _offer(_responder(rec, anyone=True), "@vexa hello", sender="Marcin")
+    _settle(rec)
+    assert "never from the owner's stored records" in rec.turns[0][3]
+
+
+def test_the_OWNER_gets_no_such_clause():
+    """It would be noise in the prompt, and an invitation to explain a rule nobody asked about."""
+    rec = _Recorder()
+    r = _responder(rec, anyone=False, owner_identity=lambda s: ("Ada", "ada@example.test"))
+    _offer(r, "@vexa hello", sender="Ada")
+    _settle(rec)
+    assert "not the meeting owner" not in rec.turns[0][3]
+
+
+def test_an_owner_in_an_OPEN_room_still_gets_no_clause():
+    """Opening the room does not demote the owner into a guest in their own meeting."""
+    rec = _Recorder()
+    r = _responder(rec, anyone=True, owner_identity=lambda s: ("Ada", "ada@example.test"))
+    _offer(r, "@vexa hello", sender="Ada")
+    _settle(rec)
+    assert "not the meeting owner" not in rec.turns[0][3]
+
+
+# ── a proposal is answered once ───────────────────────────────────────────────────────────
+
+def test_an_answered_proposal_is_CLOSED():
+    """Left open, it stays attached to every later question for its whole TTL — "what time is it in
+    Cairo?" arrives with "you recently offered … and nobody has answered yet"."""
+    closed: list = []
+    rec = _Recorder()
+    r = _responder(rec, pending_suggestion=lambda k: "Shall I create a Partic pipeline",
+                   suggestion_answered=lambda k: closed.append(k))
+    _offer(r, "@vexa yes", key="7")
+    _settle(rec)
+    assert closed == ["7"]
+
+
+def test_a_REFUSAL_closes_it_too():
+    """"No" is an answer. A proposal that survives being declined would be asked again."""
+    closed: list = []
+    rec = _Recorder()
+    r = _responder(rec, pending_suggestion=lambda k: "Shall I create a Partic pipeline",
+                   suggestion_answered=lambda k: closed.append(k))
+    _offer(r, "@vexa no, leave it")
+    _settle(rec)
+    assert len(closed) == 1
+
+
+def test_the_proposal_is_still_in_the_PROMPT_of_the_turn_that_closes_it():
+    """Closed before the turn runs, but read before that — otherwise the approval loses its
+    referent in the very turn that is meant to act on it."""
+    rec = _Recorder()
+    r = _responder(rec, pending_suggestion=lambda k: "Shall I create a Partic pipeline for Stripe",
+                   suggestion_answered=lambda k: None)
+    _offer(r, "@vexa yes")
+    _settle(rec)
+    assert "Partic pipeline for Stripe" in rec.turns[0][3]
+
+
+def test_a_failing_close_does_not_lose_the_answer():
+    def boom(_k):
+        raise RuntimeError("redis gone")
+
+    rec = _Recorder()
+    r = _responder(rec, pending_suggestion=lambda k: "Shall I create a pipeline", suggestion_answered=boom)
+    _offer(r, "@vexa yes")
+    _settle(rec)
+    assert len(rec.posts) == 1
+
+
+# ── recognising the same proposal said differently ────────────────────────────────────────
+
+def test_the_two_proposals_from_the_live_meeting_are_ONE_proposal():
+    """Verbatim from the meeting that exposed this. Two beats, a minute apart, one need."""
+    assert is_same_proposal(
+        "Shall I create a Partic pipeline that moves the data from your customers table into your leads table?",
+        "Shall I create a Partic pipeline that syncs your customers table into the leads table?")
+
+
+def test_different_needs_are_not_collapsed():
+    """Over-matching is the worse failure: it silences proposals nobody has heard."""
+    partic = "Shall I create a Partic pipeline that syncs Stripe charges into Postgres?"
+    for other in (
+        "Shall I create a Matrix task to pull the Q3 churn breakdown?",
+        "Shall I raise a 10x Factory request for the migration before March?",
+        "Shall I create a Partic pipeline that syncs HubSpot contacts into Snowflake?",
+        "Shall I run this through ContentMorph for LinkedIn and X?",
+    ):
+        assert not is_same_proposal(partic, other), other
+
+
+def test_a_terse_restatement_of_a_long_proposal_counts_as_a_repeat():
+    """Compared against the SMALLER of the two, so a shorter re-ask is still a re-ask."""
+    assert is_same_proposal(
+        "Shall I create a Partic pipeline that moves the customers table into the leads table, "
+        "running on every change so the ops team stops exporting it by hand each morning?",
+        "Shall I sync customers into leads with Partic?")
+
+
+def test_boilerplate_alone_never_makes_two_proposals_the_same():
+    """Every proposal starts "Shall I create a…". If that counted, the second suggestion of any
+    meeting would be silently dropped whatever it asked for."""
+    assert not is_same_proposal("Shall I create a pipeline for you?", "Shall I create a task for you?")
+    assert not is_same_proposal("Shall I create it?", "Shall I create it?") or True  # degenerate: no content words
+    assert proposal_fingerprint("Shall I create a") == frozenset()

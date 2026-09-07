@@ -103,6 +103,12 @@ def _rpc(*messages, env=None) -> list:
     return [json.loads(line) for line in proc.stdout.splitlines() if line.strip()]
 
 
+def _act(tool: str, document: str, env=None) -> dict:
+    out = _rpc({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {"name": tool, "arguments": {"document": document, "name": "t"}}}, env=env)
+    return json.loads(out[0]["result"]["content"][0]["text"])
+
+
 def _call(tool: str, description: str, env=None) -> dict:
     out = _rpc({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
                 "params": {"name": tool, "arguments": {"description": description}}}, env=env)
@@ -116,29 +122,72 @@ def test_the_server_advertises_the_five_products():
                      "contentmorph_transform", "tenx_request"}
 
 
-def test_every_advertised_tool_takes_a_description():
+def test_every_advertised_tool_takes_exactly_what_it_needs():
+    """A repo-backed product is built from a COMPLETE document the model writes; the rest are
+    described. The argument shape says which kind a tool is."""
     out = _rpc({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
     for t in out[0]["result"]["tools"]:
-        assert t["inputSchema"]["required"] == ["description"]
+        want = ["document"] if t["name"] in ("partic_create_pipeline", "biami_create_process") \
+            else ["description"]
+        assert t["inputSchema"]["required"] == want, t["name"]
 
 
-def test_with_no_endpoint_it_answers_in_the_SHAPE_a_real_one_would():
-    """The stub is what makes the loop demonstrable before any of the five has an endpoint. It
-    answers `accepted` with the same fields, so pointing the tool at a real URL changes where the
-    work happens and nothing about what the assistant then says."""
-    got = _call("partic_create_pipeline", "sync Stripe charges into Postgres")
-    assert got["status"] == "accepted" and got["stub"] is True
-    assert "Partic pipeline" in got["message"]
-    assert got["request"] == "sync Stripe charges into Postgres"
+def test_a_repo_backed_tool_never_offers_a_free_text_shortcut():
+    """It must not accept a `description` as an alternative to the document. A product's import gate
+    rejects anything non-canonical, so half a document is a rejection nobody in the meeting sees."""
+    out = _rpc({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+    partic = next(t for t in out[0]["result"]["tools"] if t["name"] == "partic_create_pipeline")
+    assert "description" not in partic["inputSchema"]["properties"]
+
+
+def test_a_product_with_no_endpoint_says_UNAVAILABLE_never_accepted():
+    """This used to answer `accepted` with "is being executed" — which the assistant turns into
+    "it's happening" in front of a customer, for a thing that will never happen. A product this
+    deployment cannot reach must not read as success."""
+    got = _call("matrix_create_task", "pull the Q3 churn breakdown")
+    assert got["status"] == "unavailable"
+    assert "nothing was created" in got["message"].lower()
+    assert "executed" not in got["message"].lower()
+
+
+def test_a_repo_backed_tool_with_no_control_plane_reach_also_refuses_honestly():
+    """Same rule on the other path: no grant, no write, and it says so."""
+    got = _act("partic_create_pipeline", "{}")
+    assert got["status"] == "unavailable" and "nothing was created" in got["message"].lower()
 
 
 def test_an_unreachable_endpoint_REPORTS_failure_rather_than_raising(monkeypatch):
     """A tool that throws inside a turn reads to the model as a broken tool rather than a service
     that is down — and it will then tell the meeting something confident and wrong."""
     import os
-    env = dict(os.environ, PARTIC_ENDPOINT="http://127.0.0.1:9/never")
-    got = _call("partic_create_pipeline", "anything", env=env)
+    env = dict(os.environ, MATRIX_ENDPOINT="http://127.0.0.1:9/never")
+    got = _call("matrix_create_task", "anything", env=env)
     assert got["status"] == "failed" and "could not reach" in got["message"]
+
+
+def test_an_unreachable_CONTROL_PLANE_reports_failure_rather_than_raising():
+    import os
+    env = dict(os.environ, VEXA_SKILL_ACT_URL="http://127.0.0.1:9/never", VEXA_SKILL_GRANT="g")
+    got = _act("partic_create_pipeline", "{}", env=env)
+    assert got["status"] == "failed" and "nothing was changed" in got["message"].lower()
+
+
+def test_a_turn_only_sees_the_tools_its_meeting_ENABLED():
+    """The per-product switch has to be real at the tool boundary. A `tool.v1` grant attaches a
+    whole MCP server, so the allow-list cannot express "this server, but only two of its five
+    tools" — listing is where that narrowing can happen."""
+    import os
+    env = dict(os.environ, VEXA_SKILL_TOOLS="partic")
+    out = _rpc({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}, env=env)
+    assert [t["name"] for t in out[0]["result"]["tools"]] == ["partic_create_pipeline"]
+
+
+def test_calling_a_tool_the_meeting_did_not_enable_is_refused():
+    """Listing is not a control on its own — a model can name a tool it was never shown."""
+    import os
+    env = dict(os.environ, VEXA_SKILL_TOOLS="partic")
+    got = _call("matrix_create_task", "anything", env=env)
+    assert got["status"] == "unavailable" and "turned on for this meeting" in got["message"]
 
 
 def test_an_unknown_tool_is_an_error_not_a_silent_success():

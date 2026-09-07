@@ -1,0 +1,119 @@
+{
+  "format": "partic.pipeline/v1",
+  "metadata": {
+    "name": "Klaviyo + CSV union to CSV",
+    "description": "Unions Klaviyo profiles and the CSV source on email/first_name/last_name into one contact list, written to the CSV destination, with an added 'api' column populated from an API variable at run time."
+  },
+  "connector_bindings": [
+    {
+      "ref": "klaviyo_profiles",
+      "connector_type_id": "klaviyo",
+      "name_hint": "klavyio"
+    },
+    {
+      "ref": "csv_source",
+      "connector_type_id": "csv",
+      "name_hint": "csv source"
+    },
+    {
+      "ref": "csv_dest",
+      "connector_type_id": "csv",
+      "name_hint": "dest"
+    }
+  ],
+  "definition": {
+    "sources": [
+      {
+        "id": "src_klaviyo",
+        "connector_id": "klaviyo_profiles",
+        "output_schema_id": "schema_src_klaviyo",
+        "alias": "klaviyo",
+        "resource": "profiles",
+        "source_mode": "table",
+        "fields": [
+          "email",
+          "first_name",
+          "last_name"
+        ]
+      },
+      {
+        "id": "src_csv",
+        "connector_id": "csv_source",
+        "output_schema_id": "schema_src_csv",
+        "alias": "csv",
+        "resource": "rows",
+        "source_mode": "table",
+        "fields": [
+          "Email"
+        ]
+      }
+    ],
+    "mappings": [
+      {
+        "id": "map_contacts",
+        "input_schema_ids": [
+          "schema_src_klaviyo",
+          "schema_src_csv"
+        ],
+        "operations": [
+          {
+            "id": "op_union_contacts",
+            "type": "union",
+            "input_schema_ids": [
+              "schema_src_klaviyo",
+              "schema_src_csv"
+            ],
+            "fields": [
+              {
+                "target": "email",
+                "sources": [
+                  {"schema_id": "schema_src_klaviyo", "field": ".klaviyo.email"},
+                  {"schema_id": "schema_src_csv", "field": ".csv.Email"}
+                ]
+              },
+              {
+                "target": "first_name",
+                "sources": [
+                  {"schema_id": "schema_src_klaviyo", "field": ".klaviyo.first_name"}
+                ]
+              },
+              {
+                "target": "last_name",
+                "sources": [
+                  {"schema_id": "schema_src_klaviyo", "field": ".klaviyo.last_name"}
+                ]
+              }
+            ]
+          }
+        ],
+        "output_schemas": [
+          {
+            "id": "schema_map_contacts_out",
+            "alias": "contacts_out",
+            "fields": [
+              {"name": "email", "expression": ".klaviyo.email"},
+              {"name": "first_name", "expression": ".klaviyo.first_name"},
+              {"name": "last_name", "expression": ".klaviyo.last_name"},
+              {"name": "api", "expression": "$api.field", "expression_type": "api_variable"}
+            ]
+          }
+        ]
+      }
+    ],
+    "destinations": [
+      {
+        "id": "dest_contacts_csv",
+        "connector_id": "csv_dest",
+        "input_schema_id": "schema_map_contacts_out",
+        "resource": "rows"
+      }
+    ],
+    "layout": {},
+    "run_config": {
+      "sync_mode": "full_refresh",
+      "batch_size": 500,
+      "max_parallelism": 1,
+      "on_node_failure": "halt"
+    }
+  }
+}

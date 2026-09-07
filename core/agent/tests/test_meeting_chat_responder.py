@@ -46,8 +46,8 @@ class _Recorder:
         self.entered = threading.Event()
         self.release = threading.Event()
 
-    def run_turn(self, subject, session, focus, prompt, title="", scope="transcript"):
-        self.turns.append((subject, session, focus, prompt, title, scope))
+    def run_turn(self, subject, session, focus, prompt, title="", scope="transcript", skills=None):
+        self.turns.append((subject, session, focus, prompt, title, scope, list(skills or [])))
         self.entered.set()
         if self._delay:
             time.sleep(self._delay)
@@ -190,7 +190,7 @@ def test_the_turn_is_grounded_in_the_meeting_and_names_the_asker():
     r = _responder(rec)
     _offer(r, "@vexa what did we decide?", sender="Grace")
     _settle(rec)
-    _subject, _session, focus, prompt, _title, _scope = rec.turns[0]
+    _subject, _session, focus, prompt, _title, _scope, _skills = rec.turns[0]
     assert focus["kind"] == "meeting" and focus["meeting_id"] == "7"
     assert focus["native_id"] == "abc-defg-hij" and focus["status"] == "active"
     assert "Grace" in prompt and "what did we decide?" in prompt
@@ -1057,3 +1057,54 @@ def test_boilerplate_alone_never_makes_two_proposals_the_same():
     assert not is_same_proposal("Shall I create a pipeline for you?", "Shall I create a task for you?")
     assert not is_same_proposal("Shall I create it?", "Shall I create it?") or True  # degenerate: no content words
     assert proposal_fingerprint("Shall I create a") == frozenset()
+
+
+# ── who may make the assistant ACT on a product ───────────────────────────────────────────
+
+def test_the_owner_gets_the_meetings_enabled_products():
+    rec = _Recorder()
+    r = _responder(rec, anyone=False, owner_identity=lambda s: ("Ada", "ada@example.test"),
+                   skills_for=lambda key: ["partic"])
+    _offer(r, "@vexa yes", sender="Ada")
+    _settle(rec)
+    assert rec.turns[0][6] == ["partic"]
+
+
+def test_a_GUEST_is_answered_but_gets_no_product_tools():
+    """`anyone` decides who may ASK. Letting it also decide who may commit to the owner's GitHub
+    repo would turn a switch about conversation into a switch about their account — and the only
+    thing standing between a guest's "@vexa yes" and a commit would be a sentence in a tool
+    description, which is not an authorization gate."""
+    rec = _Recorder()
+    r = _responder(rec, anyone=True, owner_identity=lambda s: ("Ada", "ada@example.test"),
+                   skills_for=lambda key: ["partic"])
+    _offer(r, "@vexa yes please", sender="Marcin")
+    _settle(rec)
+    assert len(rec.turns) == 1                 # answered…
+    assert rec.turns[0][6] == []               # …with nothing it can act with
+
+
+def test_a_meeting_with_no_products_enabled_hands_over_none():
+    rec = _Recorder()
+    r = _responder(rec, skills_for=lambda key: [])
+    _offer(r, "@vexa hello")
+    _settle(rec)
+    assert rec.turns[0][6] == []
+
+
+def test_a_failing_skill_lookup_hands_over_none():
+    """A turn that cannot confirm what it may act on must not act."""
+    def boom(_key):
+        raise RuntimeError("redis gone")
+
+    rec = _Recorder()
+    _offer(_responder(rec, skills_for=boom), "@vexa hello")
+    _settle(rec)
+    assert rec.turns[0][6] == [] and len(rec.posts) == 1
+
+
+def test_with_no_skill_lookup_wired_nothing_is_granted():
+    rec = _Recorder()
+    _offer(_responder(rec), "@vexa hello")
+    _settle(rec)
+    assert rec.turns[0][6] == []

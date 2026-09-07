@@ -343,6 +343,7 @@ class MeetingChatResponder:
         owner_names: "list | None" = None,
         pending_suggestion: Optional[Callable[[str], "str | None"]] = None,
         suggestion_answered: Optional[Callable[[str], None]] = None,
+        skills_for: Optional[Callable[[str], list]] = None,
         max_workers: int = 2,
         min_interval_s: float = 5.0,
         log: Optional[Callable[[str], None]] = None,
@@ -360,6 +361,7 @@ class MeetingChatResponder:
         self._owner_names = owner_names or []
         self._pending_suggestion = pending_suggestion
         self._suggestion_answered = suggestion_answered
+        self._skills_for = skills_for
         self._min_interval_s = min_interval_s
         self._log = log or (lambda m: logger.info("%s", m))
         # Bounded on purpose: a Meet bot is already most of this box's CPU, and every turn is a
@@ -563,7 +565,12 @@ class MeetingChatResponder:
                     self._suggestion_answered(meeting_key)
                 except Exception:  # noqa: BLE001
                     logger.exception("meet-chat: could not close the proposal for %s", meeting_key)
-            reply = self._run_turn(subject, session, focus, prompt, question, scope)
+            # WHICH PRODUCTS THIS TURN MAY ACT ON. Only for someone the gate identified as the
+            # owner: `anyone` decides who may ASK, and letting it also decide who may commit to the
+            # owner's repo would make a switch about conversation into a switch about their GitHub
+            # account. A guest is answered; a guest does not get the tools.
+            skills = self._skills_now(meeting_key) if asker_is_owner else []
+            reply = self._run_turn(subject, session, focus, prompt, question, scope, skills)
             body = strip_markdown(reply or "")
             if not body:
                 self._log(f"meet-chat: empty reply for {platform}/{native} — posting nothing")
@@ -658,6 +665,17 @@ class MeetingChatResponder:
             "accepted names are %s. Set the account's name, or add the display name to "
             "VEXA_MEET_CHAT_OWNER_NAMES.", sender, sorted(accepted))
         return False
+
+    def _skills_now(self, meeting_key: str) -> list:
+        """The products enabled for this meeting. Any fault ⇒ none: a turn that cannot confirm what
+        it may act on must not act."""
+        if self._skills_for is None:
+            return []
+        try:
+            return list(self._skills_for(meeting_key) or [])
+        except Exception:  # noqa: BLE001
+            logger.exception("meet-chat: skill lookup failed for %s", meeting_key)
+            return []
 
     def _scope_for(self, meeting_key: str) -> str:
         """The meeting's granted grounding scope. FAILS CLOSED to ``transcript``."""

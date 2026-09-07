@@ -24,6 +24,27 @@ import sys
 import urllib.error
 import urllib.request
 
+#: Where the control plane accepts a write, and this turn's grant. Both are stamped by dispatch.
+#: The GitHub token is deliberately NOT here: the harness passes its whole environment to the CLI
+#: and to this server, and an ordinary chat turn has Bash — a token here is a token the model can
+#: print. The control plane holds it and does the git work.
+ACT_URL = (os.environ.get("VEXA_SKILL_ACT_URL") or "").strip()
+ACT_GRANT = (os.environ.get("VEXA_SKILL_GRANT") or "").strip()
+
+#: Which products this turn may act on. The control plane checks this again — a tool list is a
+#: prompt-visible thing — but filtering here keeps a tool the meeting never enabled off the menu.
+ENABLED = [s.strip() for s in (os.environ.get("VEXA_SKILL_TOOLS") or "").split(",") if s.strip()]
+
+#: tool name → the skill it acts for. Repo-backed skills write a document; the rest report.
+TOOL_SKILL = {
+    "partic_create_pipeline": "partic",
+    "biami_create_process": "biami",
+    "matrix_create_task": "matrix",
+    "contentmorph_transform": "contentmorph",
+    "tenx_request": "tenx",
+}
+REPO_BACKED = {"partic", "biami"}
+
 #: tool name → (env var holding its endpoint, human label, the argument it takes)
 TOOLS = {
     "partic_create_pipeline": (
@@ -58,10 +79,12 @@ def _call(tool: str, description: str) -> dict:
     env_var, label, _ = TOOLS[tool]
     url = (os.environ.get(env_var) or "").strip()
     if not url:
-        # No endpoint yet. Say so in the SAME shape a real one answers in, so the assistant's
-        # behaviour is identical the day a URL appears.
-        return {"status": "accepted", "service": label, "stub": True,
-                "message": f"{label} is being executed (stub — no {env_var} configured yet)",
+        # No endpoint, and no repo contract for this product yet. It must NOT read as success:
+        # `accepted` plus "is being executed" is what the assistant turns into "it's happening" in
+        # front of a customer, for a thing that will never happen.
+        return {"status": "unavailable", "service": label,
+                "message": f"{label} isn't connected to this deployment yet — I've noted what you "
+                           f"wanted, but nothing was created.",
                 "request": description}
     body = json.dumps({"description": description}).encode()
     req = urllib.request.Request(url, data=body, method="POST",
@@ -87,9 +110,64 @@ def _call(tool: str, description: str) -> dict:
                 "message": f"could not reach {label}: {e}"}
 
 
+def _act(skill: str, document: str, name: str) -> dict:
+    """Ask the control plane to write this document into the owner's pinned repo.
+
+    All of the work — the token, the clone, the validation, the commit, the push — is on the other
+    side of this call. What happens here is one POST and one fixed vocabulary of outcomes, because
+    git's own error text carries the remote URL and, on a failed auth, the credential; a message
+    from here is read aloud in a room the owner does not control."""
+    if not ACT_URL or not ACT_GRANT:
+        return {"status": "unavailable",
+                "message": "I can't write to a repo from this meeting — nothing was created."}
+    body = json.dumps({"grant": ACT_GRANT, "skill": skill, "document": document,
+                       "name": name}).encode()
+    req = urllib.request.Request(ACT_URL, data=body, method="POST",
+                                 headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            payload = json.loads(resp.read().decode() or "{}")
+    except urllib.error.HTTPError as e:
+        if e.code == 403:
+            return {"status": "unavailable",
+                    "message": "This turn is no longer allowed to write — nothing was created."}
+        return {"status": "failed",
+                "message": "I couldn't write that just now. Nothing was changed."}
+    except Exception:  # noqa: BLE001 — never raise: a throwing tool reads as broken to the model,
+        return {"status": "failed",          # and it then tells the meeting something confident
+                "message": "I couldn't reach the repo service. Nothing was changed."}
+    return payload
+
+
 def _tool_list() -> list:
+    """The tools this turn may call — narrowed to the products the meeting enabled.
+
+    Narrowed HERE, not in the allow-list: a `tool.v1` grant attaches a whole MCP server, so the
+    allow-list cannot express "this server, but only two of its five tools". Listing only the
+    enabled ones is what makes the per-product switch real at the tool boundary."""
     out = []
     for name, (_env, label, arg_help) in TOOLS.items():
+        skill = TOOL_SKILL.get(name, "")
+        if ENABLED and skill not in ENABLED:
+            continue
+        if skill in REPO_BACKED:
+            out.append({
+                "name": name,
+                "description": f"Write a {label} into the owner's repo and push it. Call this ONLY "
+                               f"after the meeting owner has agreed. You supply the COMPLETE "
+                               f"document; read the repo's authoring contract first if you have it.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "document": {"type": "string", "description":
+                                     "The complete document, in the product's own format."},
+                        "name": {"type": "string", "description":
+                                 "A short name for it, used as the file name."},
+                    },
+                    "required": ["document"],
+                },
+            })
+            continue
         out.append({
             "name": name,
             "description": f"Create a {label} from a description given in the meeting. "
@@ -121,10 +199,17 @@ def _handle(msg: dict) -> "dict | None":
         if name not in TOOLS:
             return {"jsonrpc": "2.0", "id": mid,
                     "error": {"code": -32601, "message": f"unknown tool {name!r}"}}
-        result = _call(name, str(args.get("description") or "").strip())
+        skill = TOOL_SKILL.get(name, "")
+        if ENABLED and skill not in ENABLED:
+            result = {"status": "unavailable",
+                      "message": f"{TOOLS[name][1]} isn't turned on for this meeting."}
+        elif skill in REPO_BACKED:
+            result = _act(skill, str(args.get("document") or ""), str(args.get("name") or ""))
+        else:
+            result = _call(name, str(args.get("description") or "").strip())
         return {"jsonrpc": "2.0", "id": mid, "result": {
             "content": [{"type": "text", "text": json.dumps(result)}],
-            "isError": result.get("status") == "failed",
+            "isError": result.get("status") in ("failed", "invalid"),
         }}
     if mid is None:
         return None                       # a notification; nothing to answer

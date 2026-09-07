@@ -205,6 +205,13 @@
       "targets": []
     },
     {
+      "key": "VEXA_SKILL_ACT_URL",
+      "class": "defaulted",
+      "default": "http://agent-api:8100/internal/skills/act",
+      "description": "where a worker's product tools reach back to write a document into the owner's pinned repo; the control plane does the git work because it holds the credential and the clone, and the worker carries only a per-turn grant",
+      "targets": []
+    },
+    {
       "key": "VEXA_ROUTINE_RECONCILE_INTERVAL_SEC",
       "class": "defaulted",
       "default": "60",

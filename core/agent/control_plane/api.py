@@ -48,6 +48,7 @@ from control_plane import workspace_routines as workspace_routines_mod
 from shared.agent_config import default_meeting_model, load_meeting_config
 from shared.seeding import resolve_seed_dir, seed_workspace, validate_seed
 from control_plane.workspace_attach import (
+    workspace_dir_for,
     CloneError,
     activate_workspace,
     active_workspaces,
@@ -70,7 +71,7 @@ from control_plane.workspace_git_sync import RemoteSyncError, pull_origin, push_
 from control_plane.workspace_purpose import read_purpose, write_purpose
 from control_plane import workspace_membership as membership_mod
 from control_plane import git_credentials as git_creds
-from control_plane import skill_repos
+from control_plane import partic_document, skill_actions, skill_repos
 from control_plane import system_mounts
 from control_plane.workspace_membership import MembershipError, MembershipIndex, InMemoryMembershipIndex
 from control_plane.dispatch import Dispatcher
@@ -495,6 +496,22 @@ class MeetingStart(BaseModel):
     native_id: str              # the platform meeting id (e.g. a Google Meet code abc-defg-hij)
     subject: Optional[str] = None  # DERIVED from X-User-Id (P20); ignored if sent.
     title: Optional[str] = None
+
+
+class SkillAct(BaseModel):
+    """The in-worker tool asking the control plane to write a document into the pinned repo.
+
+    There is no `subject` here on purpose: the turn's identity comes from `grant`, which the model
+    cannot compose. A body-supplied subject would be a cross-user write primitive reachable from
+    every worker container on the network."""
+    model_config = {"extra": "forbid"}
+    grant: str
+    skill: str
+    #: What to create, in the product's own format. Partic: a `partic.pipeline/v1` JSON object.
+    #: BIAMI: the TSV text of the process.
+    document: str
+    #: What the meeting called it — becomes the file name, never a path.
+    name: str = ""
 
 
 class SkillRepoPin(BaseModel):
@@ -1968,6 +1985,198 @@ def create_app(
             raise HTTPException(status_code=400, detail=str(exc))
         return {"set": stored, "masked": git_creds.masked_github_token(wsr.root, subject)}
 
+    #: How long a turn may act after it was dispatched. The grant is for THIS turn, not for the
+    #: container's whole life — a warm worker serves later messages and must not still be able to
+    #: write a repo on the strength of a turn that ended.
+    SKILL_ACT_TTL_SEC = 15 * 60
+
+    def _skill_grant_key(unit_id: str) -> str:
+        return f"skillgrant:{unit_id}"
+
+    def _mint_skill_grant(unit_id: str, subject: str, skills: list) -> str:
+        """Authorise ONE turn to act on the subject's behalf for these skills.
+
+        The tool runs in the worker and the credential does not, so something must carry the
+        subject across — and it must not be the request body, which the model composes. A secret
+        minted here, resolved here, and scoped to (subject, skills, TTL) means a compromised worker
+        can do exactly what the turn it belongs to was already allowed to do, and nothing else."""
+        import secrets as _secrets
+
+        import redis as _redis
+
+        secret = _secrets.token_urlsafe(24)
+        r = _redis.from_url(redis_url, decode_responses=True)
+        r.setex(_skill_grant_key(secret), SKILL_ACT_TTL_SEC,
+                json.dumps({"unit": unit_id, "subject": subject, "skills": list(skills)}))
+        return secret
+
+    def _resolve_skill_grant(secret: str) -> "dict | None":
+        import redis as _redis
+
+        if not secret:
+            return None
+        try:
+            raw = _redis.from_url(redis_url, decode_responses=True).get(_skill_grant_key(secret))
+        except Exception:  # noqa: BLE001
+            logger.exception("skill-act: grant lookup failed")
+            return None
+        try:
+            return json.loads(raw) if raw else None
+        except ValueError:
+            return None
+
+    def _skill_written_message(skill) -> str:
+        """What the room is told on success.
+
+        It says the document was WRITTEN, not that the thing exists — because it does not yet.
+        Partic imports out of band and rejects non-canonical documents where we will never see it,
+        and a BIAMI process does not exist until someone runs the import. Claiming "created" would
+        be a confident lie told to a customer in a live meeting."""
+        if skill.id == "biami":
+            return ("Done — I've written the process definition into your BIAMI repo. It becomes a "
+                    "real process once you run the import there.")
+        return (f"Done — I've written the pipeline into your {skill.label} repo. It'll appear in "
+                f"{skill.label} once it imports.")
+
+    class _Prepared:
+        def __init__(self, status, message="", detail="", detail_parts=None):
+            self.status, self.message, self.detail = status, message, detail
+            self.detail_parts = detail_parts
+
+    def _prepare_skill_document(skill, body, repo: Path) -> "_Prepared":
+        """Turn what the model wrote into (path, content, commit message) — or say why not."""
+        raw = (body.document or "").strip()
+        if not raw:
+            return _Prepared("invalid", f"I didn't get a {skill.label} document to write.")
+        if skill.id == "partic":
+            try:
+                document = json.loads(raw)
+            except ValueError as exc:
+                return _Prepared("invalid", "That pipeline document isn't valid JSON, so I didn't "
+                                            "write it.", detail=str(exc)[:200])
+            errors = partic_document.validate(document, partic_document.load_connectors(repo))
+            if errors:
+                # Said to the ROOM in one line; the specifics go to the model via the tool result,
+                # which is where a retry can use them.
+                return _Prepared("invalid",
+                                 "That pipeline wouldn't have imported, so I didn't write it — "
+                                 f"{errors[0]}", detail=" | ".join(errors[:5]))
+            base = skill_actions.partic_document_name(document)
+            relpath = skill_actions.unique_relpath(repo, skill_actions.PARTIC_DIR, base, ".json",
+                                                   token=body.grant)
+            content = json.dumps(document, indent=2, sort_keys=False) + "\n"
+            return _Prepared("ok", detail_parts=(relpath, content,
+                                                 f"Add Partic pipeline {base} (via Vexa)"))
+        # BIAMI: a TSV, written under its own name. NEVER temp/import.tsv — that is a staging slot
+        # whose content records what is already in the committed database, and overwriting it from a
+        # meeting both destroys that record and races the other meeting.
+        base = skill_actions.slugify(body.name or "", fallback="process")
+        relpath = skill_actions.unique_relpath(repo, skill_actions.BIAMI_DIR, base, ".tsv",
+                                               token=body.grant)
+        content = raw if raw.endswith("\n") else raw + "\n"
+        return _Prepared("ok", detail_parts=(relpath, content,
+                                             f"Add BIAMI process {base} (via Vexa)"))
+
+    def _skill_act(subject: str, skill, body) -> "skill_actions.ActionResult":
+        """Pull, validate, write, commit, push — in that order, for that reason.
+
+        `pull_origin` refuses while the local clone is AHEAD, so pulling only after a rejected push
+        deadlocks and leaves the clone permanently wedged (the Terminal's git panel breaks with it).
+        Pulling first, while the clone is still clean, is the only order that recovers."""
+        pins = skill_repos.read_pins(wsr.root, subject)
+        pin = pins.get(skill.id)
+        if not pin:
+            return skill_actions.ActionResult(
+                "not-linked",
+                f"I can draft that, but this meeting isn't connected to a {skill.label} repo yet — "
+                f"it can be pinned in Vexa settings.")
+        try:
+            repo = workspace_dir_for(wsr.root, subject, pin["slug"])
+        except Exception:  # noqa: BLE001
+            logger.exception("skill-act: cannot resolve %s for %s", pin["slug"], subject)
+            repo = None
+        if repo is None or not Path(repo).is_dir():
+            return skill_actions.ActionResult(
+                "not-linked",
+                f"The {skill.label} repo this meeting points at isn't reachable any more — "
+                f"it can be re-pinned in Vexa settings.")
+
+        token = git_creds.read_github_token(wsr.root, subject)
+        # 1. PULL FIRST, while the clone is clean. A divergence here is recoverable; the same
+        #    divergence discovered after a commit is not.
+        try:
+            pull_origin(Path(repo), token=token)
+        except RemoteSyncError as exc:
+            logger.warning("skill-act: pull refused for %s/%s — %s", subject, skill.id, exc)
+            return skill_actions.ActionResult(
+                "conflict",
+                f"Your {skill.label} repo has changes I haven't caught up with, so I didn't write "
+                f"anything. Nothing was changed.", detail=str(exc))
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("skill-act: pull failed for %s/%s", subject, skill.id)
+            return skill_actions.ActionResult(
+                "failed", f"I couldn't reach your {skill.label} repo, so I didn't create anything. "
+                          f"Nothing was changed.", detail=str(exc)[:200])
+
+        # 2. VALIDATE — for Partic, against the rules its own import gate states.
+        prepared = _prepare_skill_document(skill, body, Path(repo))
+        if prepared.status != "ok":
+            return skill_actions.ActionResult(prepared.status, prepared.message, prepared.detail)
+        relpath, content, commit_msg = prepared.detail_parts   # type: ignore[attr-defined]
+
+        # 3. WRITE + COMMIT, authored by the owner.
+        name, email = _meet_chat_owner_identity(subject) if _meet_chat_owner_identity else (None, None)
+        try:
+            sha = skill_actions.write_document(
+                Path(repo), relpath, content, message=commit_msg,
+                author=(name or subject, email or f"{subject}@vexa.local"))
+        except FileExistsError:
+            return skill_actions.ActionResult(
+                "invalid", f"There's already a {skill.label} document by that name — give it a "
+                           f"different one and I'll write it.")
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("skill-act: write failed for %s/%s", subject, skill.id)
+            return skill_actions.ActionResult(
+                "failed", f"I couldn't write into your {skill.label} repo. Nothing was changed.",
+                detail=str(exc)[:200])
+
+        # 4. PUSH. On a rejection roll the commit back — leaving it is what wedges the clone.
+        try:
+            pull_origin(Path(repo), token=token)          # a second meeting may have landed
+        except Exception:  # noqa: BLE001
+            pass                                           # the push below reports it truthfully
+        try:
+            push_origin(Path(repo), token=token)
+        except Exception as exc:  # noqa: BLE001
+            skill_actions.rollback(Path(repo), sha)
+            logger.warning("skill-act: push rejected for %s/%s — %s", subject, skill.id, exc)
+            return skill_actions.ActionResult(
+                "conflict",
+                f"Your {skill.label} repo moved on while I was writing, so I didn't push. Nothing "
+                f"was changed — ask me again and I'll retry.", detail=str(exc)[:200])
+        return skill_actions.ActionResult("written", _skill_written_message(skill), detail=relpath)
+
+    @app.post("/internal/skills/act")
+    def skills_act(body: SkillAct):
+        """Write a product document into the caller's pinned repo and push it.
+
+        Called by the in-worker tool, authenticated by the per-turn grant — never by a subject in
+        the body. Answers a FIXED vocabulary of outcomes so the assistant can say something true in
+        the room; git's own error text never crosses this boundary, because it carries the remote
+        URL and, on an auth failure, the token."""
+        grant = _resolve_skill_grant(body.grant)
+        if grant is None:
+            raise HTTPException(status_code=403, detail="expired or unknown turn grant")
+        subject = str(grant.get("subject") or "")
+        skill = skills_registry.get(body.skill)
+        if skill is None or skill.id not in skills_registry.known(grant.get("skills") or []):
+            # The turn may only act on a product the OWNER enabled for that meeting. The tool list
+            # already reflects this, but a tool list is a prompt-visible thing and this is not.
+            return {"status": "not-linked",
+                    "message": f"{body.skill} is not turned on for this meeting."}
+        result = _skill_act(subject, skill, body)
+        return {"status": result.status, "message": result.message}
+
     @app.get("/api/skills/repos")
     def skills_repos_get(request: Request):
         """What each repo-backed skill is pinned to, and what the caller could pin it to.
@@ -2595,7 +2804,7 @@ def create_app(
     # responder must not hold itself: the dispatcher + stream reader (the turn), and the deployment
     # bot key (the reply hop). The responder stays a pure orchestrator and is provable offline.
     def _meet_chat_turn(subject: str, session: str, focus: dict, prompt: str, title: str = "",
-                        scope: str = SCOPE_TRANSCRIPT) -> str:
+                        scope: str = SCOPE_TRANSCRIPT, skills: "list | None" = None) -> str:
         """Run ONE agent turn headlessly and return the assistant's text.
 
         The same grounding and dispatch the SSE route builds — deliberately assembled from the same
@@ -2634,6 +2843,15 @@ def create_app(
             workspaces=[{"id": subject, "mode": "ro"}],
         )
         unit_id = units.dispatch_id(inv)
+        # THE TURN'S AUTHORITY TO ACT, minted per turn and resolved server-side. The tool runs in
+        # the worker and the GitHub credential does not, so something has to carry "this turn acts
+        # for this subject, on these products" across — and it must not be the request body, which
+        # the model composes. Scoped to the products the OWNER enabled for this meeting, so a turn
+        # can never write to a repo the meeting was not about.
+        enabled = skills_registry.known(skills or [])
+        if enabled:
+            inv.setdefault("context", {})["skill_grant"] = _mint_skill_grant(unit_id, subject, enabled)
+            inv["context"]["skill_tools"] = ",".join(enabled)
         # No model credential ⇒ the worker can only fail with its own "Not logged in" text, which
         # means nothing to someone sitting in a meeting. Say so in words they can act on instead of
         # going silent — silence in a meeting reads as a broken bot.
@@ -2855,6 +3073,8 @@ def create_app(
             # What the copilot offered and nobody has answered. The relay posts proposals directly
             # into the room, so this is the assistant's only record of having offered anything.
             pending_suggestion=_meet_chat_pending,
+            # Which products this meeting is about — and so which tools a turn may be given.
+            skills_for=_meet_skills_for,
             # …and closing it once someone has answered, so the next question is not still being
             # asked about a proposal that was already settled.
             suggestion_answered=_meet_chat_answered,

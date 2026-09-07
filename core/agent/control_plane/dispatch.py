@@ -321,6 +321,15 @@ def build_unit_env(settings: Settings, invocation: dict, *, unit_id: str, token:
         # open a file at all, which is the only reliable way to stop a turn reading private material
         # ALOUD into a room — read-only mounts stop writes, not exfiltration.
         **({"VEXA_CHAT_TOOLS": ",".join(invocation["tools"])} if invocation.get("tools") else {}),
+        # The turn's authority to act on a product, and which products. Minted by the caller and
+        # resolved server-side — the worker carries a reference, never the GitHub credential itself
+        # (the harness passes its whole env to the CLI and to the MCP server it spawns, and an
+        # ordinary chat turn has Bash: a token here is a token the model can print).
+        **({"VEXA_SKILL_GRANT": str((invocation.get("context") or {}).get("skill_grant"))}
+           if (invocation.get("context") or {}).get("skill_grant") else {}),
+        **({"VEXA_SKILL_TOOLS": str((invocation.get("context") or {}).get("skill_tools"))}
+           if (invocation.get("context") or {}).get("skill_tools") else {}),
+        **({"VEXA_SKILL_ACT_URL": settings.skill_act_url} if settings.skill_act_url else {}),
         "VEXA_WORKSPACE_STORE_URL": settings.workspace_store_url,
         "REDIS_URL": settings.redis_url,
     }

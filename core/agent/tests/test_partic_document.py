@@ -190,3 +190,31 @@ def test_it_does_not_invent_canonicalisation_rules():
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))
+
+
+# ── a failed commit must leave nothing behind ─────────────────────────────────────────────
+
+def test_a_failed_commit_removes_the_file_and_unstages_it(tmp_path):
+    """Caught end-to-end against a real repo. A commit refused for a missing committer identity left
+    the file written AND staged, so the next attempt saw the name taken, wrote a discriminated one,
+    and swept the orphan into its own commit — two files in the user's repo from one request, one of
+    them never asked for."""
+    import subprocess
+
+    from control_plane import skill_actions
+
+    repo = tmp_path / "r"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "base", "--allow-empty",
+                    "--author", "T <t@t>"], check=True,
+                   env={"PATH": "/usr/bin:/bin", "GIT_COMMITTER_NAME": "T", "GIT_COMMITTER_EMAIL": "t@t"})
+
+    # An unwritable target makes the git step fail after the file exists.
+    with pytest.raises(Exception):
+        skill_actions.write_document(repo, "p/x.json", "{}", message="")   # empty message → refused
+
+    assert not (repo / "p" / "x.json").exists(), "the file survived a failed commit"
+    staged = subprocess.run(["git", "-C", str(repo), "diff", "--cached", "--name-only"],
+                            capture_output=True, text=True).stdout.strip()
+    assert staged == "", f"a failed commit left {staged!r} staged"

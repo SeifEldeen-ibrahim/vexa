@@ -19,6 +19,7 @@ import {
   sendGmeetChatMessage,
   ensureGmeetChatOpen,
   isGmeetChatOpen,
+  consumeSentEcho,
   wasSentByUs,
   scrapeGmeetParticipantEmails,
   type GmeetChatMessage,
@@ -354,3 +355,27 @@ console.log('gmeet-chat: sending');
 
 console.log(failed === 0 ? '\ngmeet-chat: all checks passed' : `\ngmeet-chat: ${failed} check(s) FAILED`);
 process.exit(failed === 0 ? 0 : 1);
+
+// ── an echo is suppressed ONCE ────────────────────────────────────────────────────────────
+// Every send comes back exactly once — that is what an echo IS — so a second identical line is
+// somebody else typing. Observed live: the same sentence was posted through the API and then
+// pasted into the room by hand, and the human's copy vanished. It cannot be told apart by sender,
+// because Meet gave that row no resolvable author, which is why the text guard is load-bearing.
+{
+  rememberSent("@vexa what do you know about Partic?");
+  check("asking does not consume — a predicate anyone can use twice",
+    wasSentByUs("@vexa what do you know about Partic?") === true
+    && wasSentByUs("@vexa what do you know about Partic?") === true);
+  check("the bot's own echo is suppressed",
+    consumeSentEcho("@vexa what do you know about Partic?") === true);
+  check("the SAME text a second time is a person, and gets through",
+    consumeSentEcho("@vexa what do you know about Partic?") === false);
+
+  rememberSent("Done — the pipeline is written.");
+  check("a different send is unaffected by the consumed one",
+    consumeSentEcho("Done — the pipeline is written.") === true);
+
+  rememberSent("hello there");
+  check("a truncated render still matches once", consumeSentEcho("hello ther") === true);
+  check("…and only once", consumeSentEcho("hello ther") === false);
+}

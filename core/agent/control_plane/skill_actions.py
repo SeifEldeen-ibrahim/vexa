@@ -58,8 +58,15 @@ def slugify(name: str, *, fallback: str = "untitled") -> str:
     return (s[:48].strip("-") or fallback)
 
 
+#: Attribution, the same split the workspace commits already use (D4): the AUTHOR is the human whose
+#: request drove this, the COMMITTER is the platform. A fresh clone has no identity configured and
+#: git refuses to commit without one — "Committer identity unknown" — so it travels in the
+#: environment rather than being written into the user's repo config, where it would outlive us.
+_COMMITTER = {"GIT_COMMITTER_NAME": "Vexa", "GIT_COMMITTER_EMAIL": "platform@vexa.ai"}
+
+
 def _git(repo: Path, *args: str) -> str:
-    out = subprocess.run(["git", *args], cwd=str(repo), env=scrubbed_git_env(),
+    out = subprocess.run(["git", *args], cwd=str(repo), env={**scrubbed_git_env(), **_COMMITTER},
                          capture_output=True, text=True, timeout=60)
     if out.returncode != 0:
         raise RuntimeError((out.stderr or out.stdout).strip()[:400])
@@ -81,11 +88,23 @@ def write_document(repo: Path, relpath: str, content: str, *, message: str,
         raise FileExistsError(relpath)
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(content, encoding="utf-8")
-    _git(repo, "add", "--", relpath)
-    args = ["commit", "-m", message]
-    if author:
-        args += ["--author", f"{author[0]} <{author[1]}>"]
-    _git(repo, *args)
+    try:
+        _git(repo, "add", "--", relpath)
+        args = ["commit", "-m", message]
+        if author:
+            args += ["--author", f"{author[0]} <{author[1]}>"]
+        _git(repo, *args)
+    except Exception:
+        # A failed commit must not leave the file behind, staged. It did once — a commit refused for
+        # a missing committer identity left `pipelines/x.json` written AND in the index, so the next
+        # attempt saw the name taken, wrote a discriminated one, and swept the orphan into ITS commit.
+        # Two files in the user's repo from one request, one of them never asked for.
+        try:
+            _git(repo, "reset", "--", relpath)
+        except Exception:  # noqa: BLE001
+            pass
+        target.unlink(missing_ok=True)
+        raise
     return _git(repo, "rev-parse", "HEAD")
 
 

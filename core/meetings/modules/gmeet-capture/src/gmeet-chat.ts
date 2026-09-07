@@ -143,7 +143,14 @@ function rememberSent(text: string): void {
 }
 
 /** Did THIS bot type `text` in the last minute? Compared on a normalised form, because Meet
- *  collapses whitespace and may truncate what it renders back. */
+ *  collapses whitespace and may truncate what it renders back.
+ *
+ *  A match is CONSUMED. Every send comes back exactly once — that is the whole shape of an echo —
+ *  so a second identical line is somebody else typing, and forgetting the entry on the first hit is
+ *  what tells them apart. Left in place, the guard suppressed a person who quoted the bot back at
+ *  it: observed when the same sentence was posted through the API and then pasted into the room by
+ *  hand, and the second one vanished. It cannot be resolved by the sender instead — Meet gave that
+ *  row no resolvable author at all, which is why this guard is the load-bearing one. */
 export function wasSentByUs(text: string): boolean {
   const norm = (v: string) => v.trim().replace(/\s+/g, ' ').toLowerCase();
   const probe = norm(text);
@@ -153,6 +160,32 @@ export function wasSentByUs(text: string): boolean {
     if (now - t > SENT_TTL_MS) { sentRecently.delete(k); continue; }
     const mine = norm(k);
     if (mine === probe || mine.startsWith(probe) || probe.startsWith(mine)) return true;
+  }
+  return false;
+}
+
+/** Like `wasSentByUs`, but FORGETS the match — the form the emit path uses.
+ *
+ *  Every send comes back exactly once, which is what an echo is, so a second identical line is
+ *  somebody else typing. Left remembered, the guard suppressed a person who quoted the bot back at
+ *  it: observed when one sentence was posted through the API and then pasted into the room by hand,
+ *  and the human's copy vanished. It cannot be told apart by sender — Meet gave that row no
+ *  resolvable author, which is why the text guard is the load-bearing one.
+ *
+ *  Kept separate from the predicate above so asking is not the same as deciding: a check that
+ *  mutates is a check nobody can use twice, including a test. */
+export function consumeSentEcho(text: string): boolean {
+  const norm = (v: string) => v.trim().replace(/\s+/g, ' ').toLowerCase();
+  const probe = norm(text);
+  if (!probe) return false;
+  const now = Date.now();
+  for (const [k, t] of sentRecently) {
+    if (now - t > SENT_TTL_MS) { sentRecently.delete(k); continue; }
+    const mine = norm(k);
+    if (mine === probe || mine.startsWith(probe) || probe.startsWith(mine)) {
+      sentRecently.delete(k);
+      return true;
+    }
   }
   return false;
 }
@@ -488,7 +521,7 @@ export function createGmeetChat(opts: GmeetChatOptions): GmeetChat {
     }
     // Echo control, two independent guards. The text guard is the load-bearing one — Meet gave the
     // bot's own reply no resolvable author, so the name guard alone let it read itself back.
-    if (wasSentByUs(msg.text)) { log(`chat (our own send, not emitted) ${msg.text.slice(0, 60)}`); return; }
+    if (consumeSentEcho(msg.text)) { log(`chat (our own send, not emitted) ${msg.text.slice(0, 60)}`); return; }
     if (isSelf(msg.sender)) { log(`chat (self, not emitted) ${msg.text.slice(0, 60)}`); return; }
     log(`chat ${msg.sender}: ${msg.text.slice(0, 60)}`);
     try { opts.onMessage(msg); } catch { /* never break capture */ }

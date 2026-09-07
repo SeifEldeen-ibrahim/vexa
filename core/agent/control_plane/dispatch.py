@@ -206,7 +206,8 @@ def _worker_cwd(root: str, subject: str, mounts: list[dict]) -> str:
     return normal["path"] if normal else f"{root}/{subject}"
 
 
-def _apply_granted_modes(mounts: list[dict], granted: list[dict]) -> list[dict]:
+def _apply_granted_modes(mounts: list[dict], granted: list[dict],
+                         subject: "str | None" = None) -> list[dict]:
     """Downgrade each mount to read-only where the dispatch granted ``mode: "ro"``.
 
     A grant is ``{"id": <subject>, "mode": …}`` — ``units.make_dispatch`` defaults it to the SUBJECT,
@@ -239,9 +240,26 @@ def _apply_granted_modes(mounts: list[dict], granted: list[dict]) -> list[dict]:
     if not ro:
         return mounts
 
+    # A grant keyed on the SUBJECT is a statement about the whole turn, not about one workspace.
+    # `units.make_dispatch` defaults the grant list to `[{"id": subject, ...}]`, so "the subject is
+    # granted ro" means "this turn acts read-only" — and every mount the dispatch materializes is
+    # reachable by it. Matching that grant per-workspace narrowed ONLY the baseline (whose path ends
+    # in the subject) and left every other mount read-write:
+    #
+    #     seed              /workspaces/6                       ro    <- matched
+    #     vibe-pipe-a1b2c3  /workspaces/.attached/6/vibe-pipe…   RW    <- missed
+    #     team-xyz          /shared-store/team-xyz               RW    <- missed, and not even theirs
+    #
+    # So an attached repo or a workspace shared with this subject stayed WRITABLE to a turn the
+    # caller declared read-only — the same defect as the incident above, fixed then for the baseline
+    # only. A subject-level `ro` now narrows every mount in the set.
+    subject_ro = bool(ro & {str(subject or "")}) if subject else False
+
     def owns(mount: dict) -> bool:
         if str(mount.get("role")) == "system":
             return False                       # the platform's continuity tier — see above
+        if subject_ro:
+            return True                        # a turn-level grant covers the whole set
         if str(mount.get("slug")) in ro:
             return True
         # The owning segment of the mount path: /workspaces/6 -> "6";
@@ -282,7 +300,7 @@ def build_unit_env(settings: Settings, invocation: dict, *, unit_id: str, token:
     #
     # A grant can only ever REMOVE write here, never add it: a workspace the stack built read-only
     # (the platform `_global` tier) stays read-only whatever the invocation asks for.
-    mounts = _apply_granted_modes(mounts, invocation.get("workspaces") or [])
+    mounts = _apply_granted_modes(mounts, invocation.get("workspaces") or [], subject)
     env = {
         "VEXA_OWNER": subject,                                    # quota + cred-brokerage axis = the person
         "VEXA_LAUNCHER": identity["launcher"],

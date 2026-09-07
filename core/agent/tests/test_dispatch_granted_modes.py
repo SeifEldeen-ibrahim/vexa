@@ -97,3 +97,69 @@ def test_the_original_mount_dicts_are_not_mutated():
     stack = _stack()
     _apply_granted_modes(stack, RO_GRANT)
     assert stack[1]["write"] is True
+
+
+# ── a subject-level grant covers the WHOLE set ────────────────────────────────────────────
+
+REAL_STACK_WITH_ATTACHED = [
+    {"slug": "seed", "path": "/workspaces/6", "role": "private", "write": True, "primary": True},
+    # An ATTACHED repo — what pinning a GitHub repo produces. Its slug is a hash of the repo URL and
+    # its path ends in that slug, so neither matches a grant keyed on the subject.
+    {"slug": "vibe-pipe-a1b2c3", "path": "/workspaces/.attached/6/vibe-pipe-a1b2c3",
+     "role": "private", "write": True},
+    # A SHARED workspace — someone ELSE's, that this subject is a member of.
+    {"slug": "team-xyz", "path": "/shared-store/team-xyz", "role": "shared", "write": True},
+    {"slug": "_system", "path": "/workspaces/.system/6", "role": "system", "write": True},
+]
+
+
+def _stack_with_attached():
+    return [dict(m) for m in REAL_STACK_WITH_ATTACHED]
+
+
+def test_an_ATTACHED_repo_is_narrowed_by_a_subject_grant():
+    """The defect this fixes, live in shipped code: matching a subject-keyed grant per-workspace
+    narrowed only the baseline (whose path ends in the subject) and left an attached repo READ-WRITE
+    in a turn the caller declared read-only. Same failure as the incident the module documents,
+    fixed then for the baseline only."""
+    out = _apply_granted_modes(_stack_with_attached(), RO_GRANT, "6")
+    assert next(m for m in out if m["slug"] == "vibe-pipe-a1b2c3")["write"] is False
+
+
+def test_a_SHARED_workspace_is_narrowed_too():
+    """It is not even this subject's own data — it belongs to whoever shared it."""
+    out = _apply_granted_modes(_stack_with_attached(), RO_GRANT, "6")
+    assert next(m for m in out if m["slug"] == "team-xyz")["write"] is False
+
+
+def test_the_whole_set_except_the_continuity_tier():
+    out = _apply_granted_modes(_stack_with_attached(), RO_GRANT, "6")
+    assert [m["write"] for m in out] == [False, False, False, True]
+
+
+def test_an_ordinary_rw_turn_keeps_every_mount_writable():
+    """The negative control. A fix that narrowed everything would 'pass' the rows above and break
+    the product — the owner typing in the Assistant tab must still be able to write."""
+    out = _apply_granted_modes(_stack_with_attached(), [{"id": "6", "mode": "rw"}], "6")
+    assert all(m["write"] for m in out)
+
+
+def test_no_grant_at_all_changes_nothing():
+    for granted in ([], None or []):
+        out = _apply_granted_modes(_stack_with_attached(), granted, "6")
+        assert all(m["write"] for m in out)
+
+
+def test_without_a_subject_the_old_per_workspace_matching_still_applies():
+    """The parameter is optional, so a caller that does not pass it keeps the previous behaviour
+    rather than silently narrowing nothing."""
+    out = _apply_granted_modes(_stack_with_attached(), [{"id": "vibe-pipe-a1b2c3", "mode": "ro"}])
+    assert next(m for m in out if m["slug"] == "vibe-pipe-a1b2c3")["write"] is False
+    assert next(m for m in out if m["slug"] == "team-xyz")["write"] is True
+
+
+def test_a_grant_for_a_DIFFERENT_subject_does_not_narrow_this_stack():
+    """The grant list is the invocation's; the subject is the dispatch's. They must agree before a
+    turn-level narrowing applies."""
+    out = _apply_granted_modes(_stack_with_attached(), [{"id": "7", "mode": "ro"}], "6")
+    assert next(m for m in out if m["slug"] == "vibe-pipe-a1b2c3")["write"] is True

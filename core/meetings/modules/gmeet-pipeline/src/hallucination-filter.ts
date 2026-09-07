@@ -26,7 +26,13 @@ function loadPhrases(): Set<string> {
         const content = readFileSync(join(dir, file), 'utf-8');
         for (const line of content.split('\n')) {
           const t = line.trim();
-          if (t && !t.startsWith('#')) phrases.add(t.toLowerCase());
+          if (!t || t.startsWith('#')) continue;
+          // Both the written form and its bare form. The list is punctuated as speech ("OK.",
+          // "Bye!"), transcripts are not always, and matching was one-sided — the candidate got
+          // stripped and the entry did not, so "ok" missed "OK.".
+          phrases.add(t.toLowerCase());
+          const bare = t.toLowerCase().replace(/[.!?…]+$/g, '').trim();
+          if (bare) phrases.add(bare);
         }
       }
     }
@@ -46,17 +52,21 @@ export function isHallucination(text: string): boolean {
   const trimmed = text.trim();
   const lower = trimmed.toLowerCase();
 
-  // Known phrase (exact match, then retry with normalized punctuation)
+  // Known phrase (exact match, then retry with normalized punctuation, then without a leading
+  // conjunction — Whisper prefixes its stock outros with "and"/"so"/"but" often enough that
+  // "and we'll see you next time." walked past a list containing "I'll see you next time.").
   const db = loadPhrases();
-  if (db.has(lower)) return true;
-  const stripped = lower.replace(/[.!?…]+$/g, '').replace(/\.{2,}$/g, '');
-  if (stripped !== lower && db.has(stripped)) return true;
-  if (stripped !== lower && db.has(stripped + '...')) return true;
-  if (stripped !== lower && db.has(stripped + '.')) return true;
+  const known = (candidate: string): boolean => {
+    if (db.has(candidate)) return true;
+    const bare = candidate.replace(/[.!?…]+$/g, '').replace(/\.{2,}$/g, '');
+    if (bare === candidate) return false;
+    return db.has(bare) || db.has(bare + '...') || db.has(bare + '.');
+  };
+  if (known(lower)) return true;
+  const unled = lower.replace(/^(?:and|so|but|well|okay|ok)[,\s]+/, '');
+  if (unled !== lower && known(unled)) return true;
 
-  // Too short (single word < 10 chars)
   const words = trimmed.split(/\s+/);
-  if (words.length <= 1 && trimmed.length < 10) return true;
 
   // Repetition loop: same 3-6 word phrase repeated 3+ times
   if (words.length >= 9) {

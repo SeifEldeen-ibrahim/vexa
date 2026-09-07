@@ -37,7 +37,7 @@ from control_plane import meeting_steering
 from control_plane.meet_identity import MeetIdentityResolver
 from control_plane.meeting_chat_responder import (
     MeetingChatResponder, MEET_CHAT_WEB_TOOLS, MEET_CHAT_WORKSPACE_TOOLS,
-    SCOPE_TRANSCRIPT, SCOPE_WORKSPACE, is_same_proposal,
+    SCOPE_TRANSCRIPT, SCOPE_WORKSPACE, is_same_proposal, meet_chat_tools,
 )
 from control_plane import schedule_digest as schedule_digest_mod
 from control_plane import routines as routines_mod
@@ -2904,7 +2904,7 @@ def create_app(
         inv = units.make_dispatch(
             subject=subject, trigger="message",
             start=units.entrypoint(inline=grounded), context=ctx,
-            tools=(MEET_CHAT_WORKSPACE_TOOLS if scope == SCOPE_WORKSPACE else MEET_CHAT_WEB_TOOLS),
+            tools=meet_chat_tools(scope, skills_registry.known(skills or [])),
             workspaces=[{"id": subject, "mode": "ro"}],
         )
         unit_id = units.dispatch_id(inv)

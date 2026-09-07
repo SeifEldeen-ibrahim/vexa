@@ -160,8 +160,22 @@ SCOPE_WORKSPACE = "workspace"
 #: both scopes because doing what was agreed to is not a question of how much history may be read —
 #: the copilot proposed it out loud in the room, and someone the owner gate accepted said yes.
 MEET_CHAT_ACTION_TOOLS = ["product-actions"]
-MEET_CHAT_WEB_TOOLS = ["WebSearch", "WebFetch"] + MEET_CHAT_ACTION_TOOLS
+MEET_CHAT_WEB_TOOLS = ["WebSearch", "WebFetch"]
 MEET_CHAT_WORKSPACE_TOOLS = ["Read", "Glob", "Grep"] + MEET_CHAT_WEB_TOOLS
+
+
+def meet_chat_tools(scope: str, skill_ids) -> list:
+    """The tools an in-meeting turn is dispatched with.
+
+    The action toolbelt is added ONLY when the meeting has a product enabled. Attaching it
+    unconditionally put five tool descriptions in front of a model whose meeting had none of them
+    on — and a tool list is prompt-visible, so it read its own menu and told the room that Partic,
+    BIAMI, ContentMorph, Matrix and 10x Factory were "all wired up here". Knowledge the owner never
+    granted, leaking through the capability surface instead of the prompt.
+
+    The two scopes still differ only by how much HISTORY is in reach, and both can act."""
+    base = list(MEET_CHAT_WORKSPACE_TOOLS if scope == SCOPE_WORKSPACE else MEET_CHAT_WEB_TOOLS)
+    return base + (MEET_CHAT_ACTION_TOOLS if skill_ids else [])
 
 
 def _norm(v: "str | None") -> str:

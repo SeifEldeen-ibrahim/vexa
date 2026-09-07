@@ -96,10 +96,17 @@ def test_an_unknown_name_is_not_silently_granted(tmp_path):
 
 # ── the server itself, over real stdio ────────────────────────────────────────────────────
 
+#: Tests below exercise what a tool DOES. The gating tests set their own env; everything else runs
+#: with all products on, because a tool server with nothing enabled correctly offers nothing.
+ALL_ON = {"VEXA_SKILL_TOOLS": "partic,biami,matrix,contentmorph,tenx"}
+
+
 def _rpc(*messages, env=None) -> list:
+    import os as _os
     proc = subprocess.run([sys.executable, str(_SERVER)],
                           input="".join(json.dumps(m) + "\n" for m in messages),
-                          capture_output=True, text=True, timeout=30, env=env)
+                          capture_output=True, text=True, timeout=30,
+                          env=env if env is not None else {**_os.environ, **ALL_ON})
     return [json.loads(line) for line in proc.stdout.splitlines() if line.strip()]
 
 
@@ -179,14 +186,15 @@ def test_an_unreachable_endpoint_REPORTS_failure_rather_than_raising(monkeypatch
     """A tool that throws inside a turn reads to the model as a broken tool rather than a service
     that is down — and it will then tell the meeting something confident and wrong."""
     import os
-    env = dict(os.environ, MATRIX_ENDPOINT="http://127.0.0.1:9/never")
+    env = dict(os.environ, **ALL_ON, MATRIX_ENDPOINT="http://127.0.0.1:9/never")
     got = _call("matrix_create_task", "anything", env=env)
     assert got["status"] == "failed" and "could not reach" in got["message"]
 
 
 def test_an_unreachable_CONTROL_PLANE_reports_failure_rather_than_raising():
     import os
-    env = dict(os.environ, VEXA_SKILL_ACT_URL="http://127.0.0.1:9/never", VEXA_SKILL_GRANT="g")
+    env = dict(os.environ, **ALL_ON, VEXA_SKILL_ACT_URL="http://127.0.0.1:9/never",
+               VEXA_SKILL_GRANT="g")
     got = _act("partic_create_pipeline", "{}", env=env)
     assert got["status"] == "failed" and "nothing was changed" in got["message"].lower()
 
@@ -233,19 +241,17 @@ def test_both_scopes_can_act_on_an_agreed_proposal():
     """Acting is not a question of how much history may be read. A transcript-scoped meeting is the
     ordinary case — the copilot proposed something out loud and the owner said yes — and refusing to
     act there would make the whole loop depend on a workspace grant nobody was asked for."""
-    from control_plane.meeting_chat_responder import (
-        MEET_CHAT_WEB_TOOLS, MEET_CHAT_WORKSPACE_TOOLS,
-    )
-    assert "product-actions" in MEET_CHAT_WEB_TOOLS
-    assert "product-actions" in MEET_CHAT_WORKSPACE_TOOLS
+    from control_plane.meeting_chat_responder import meet_chat_tools
+
+    assert "product-actions" in meet_chat_tools("transcript", ["partic"])
+    assert "product-actions" in meet_chat_tools("workspace", ["partic"])
 
 
 def test_neither_scope_can_CHANGE_anything_in_the_workspace():
     """The question comes from a room the owner does not control."""
-    from control_plane.meeting_chat_responder import (
-        MEET_CHAT_WEB_TOOLS, MEET_CHAT_WORKSPACE_TOOLS,
-    )
-    for granted in (MEET_CHAT_WEB_TOOLS, MEET_CHAT_WORKSPACE_TOOLS):
+    from control_plane.meeting_chat_responder import meet_chat_tools
+
+    for granted in (meet_chat_tools("transcript", ["partic"]), meet_chat_tools("workspace", ["partic"])):
         assert not ({"Write", "Edit", "Bash", "NotebookEdit"} & set(granted))
 
 
@@ -253,13 +259,61 @@ def test_every_granted_name_is_either_a_builtin_or_a_REAL_descriptor(tmp_path):
     """A granted name the registry cannot resolve becomes a bare string handed to the harness — the
     turn then reports success and simply cannot do the thing. Anything hyphenated is a toolbelt
     name by convention; it must exist in tools-seed."""
-    from control_plane.meeting_chat_responder import MEET_CHAT_WORKSPACE_TOOLS
+    from control_plane.meeting_chat_responder import meet_chat_tools
     known = set(_registry().names())
-    for name in MEET_CHAT_WORKSPACE_TOOLS:
+    for name in meet_chat_tools("workspace", ["partic"]):
         assert name in known or name.isalnum(), f"{name!r} resolves to nothing"
 
 
 def test_the_workspace_grant_resolves_end_to_end(tmp_path):
-    from control_plane.meeting_chat_responder import MEET_CHAT_WORKSPACE_TOOLS
-    allowed, mcp_config = attach_toolbelt(tmp_path / "belt", MEET_CHAT_WORKSPACE_TOOLS, _registry())
+    from control_plane.meeting_chat_responder import meet_chat_tools
+
+    granted = meet_chat_tools("workspace", ["partic"])
+    allowed, mcp_config = attach_toolbelt(tmp_path / "belt", granted, _registry())
     assert "mcp__product-actions" in allowed and mcp_config
+
+
+# ── a meeting with nothing enabled must see NOTHING ───────────────────────────────────────
+
+def test_no_skills_enabled_advertises_NO_product_tools():
+    """The bug this replaces, reported verbatim from a live meeting with nothing turned on:
+    "Partic, BIAMI, ContentMorph, Matrix, and 10x Factory are all wired up here."
+
+    A tool list is prompt-visible. `if ENABLED and skill not in ENABLED` read an empty list as
+    "no filter" rather than as "nothing", so every product's tool — and its description — reached a
+    model whose owner had granted none of them. The knowledge leaked through the capability surface
+    while the prompt was correctly empty."""
+    import os
+    env = {k: v for k, v in os.environ.items() if not k.startswith("VEXA_SKILL")}
+    out = _rpc({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}, env=env)
+    assert out[0]["result"]["tools"] == []
+
+
+def test_no_skills_enabled_refuses_every_product_CALL_too():
+    """Listing is not the only surface — a model can name a tool it was never shown."""
+    import os
+    env = {k: v for k, v in os.environ.items() if not k.startswith("VEXA_SKILL")}
+    for tool in ("partic_create_pipeline", "matrix_create_task"):
+        got = _call(tool, "anything", env=env)
+        assert got["status"] == "unavailable", tool
+
+
+def test_the_toolbelt_is_not_even_ATTACHED_with_nothing_enabled():
+    """Belt and braces at the layer above: the dispatch does not grant `product-actions` at all, so
+    the server is never launched and there is no menu to read."""
+    from control_plane.meeting_chat_responder import meet_chat_tools
+
+    assert "product-actions" not in meet_chat_tools("transcript", [])
+    assert "product-actions" not in meet_chat_tools("workspace", [])
+    assert "product-actions" in meet_chat_tools("transcript", ["partic"])
+    assert "product-actions" in meet_chat_tools("workspace", ["partic"])
+
+
+def test_both_scopes_still_act_and_differ_only_by_history():
+    """The rule that must survive this fix: transcript-vs-workspace is about how much MEETING
+    history is in reach, and BOTH can build."""
+    from control_plane.meeting_chat_responder import meet_chat_tools
+
+    t, w = meet_chat_tools("transcript", ["partic"]), meet_chat_tools("workspace", ["partic"])
+    assert "product-actions" in t and "product-actions" in w
+    assert set(w) - set(t) == {"Read", "Glob", "Grep"}

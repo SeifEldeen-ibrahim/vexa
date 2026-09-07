@@ -32,8 +32,15 @@ ACT_URL = (os.environ.get("VEXA_SKILL_ACT_URL") or "").strip()
 DESCRIBE_URL = ACT_URL.replace("/act", "/describe") if ACT_URL else ""
 ACT_GRANT = (os.environ.get("VEXA_SKILL_GRANT") or "").strip()
 
-#: Which products this turn may act on. The control plane checks this again — a tool list is a
-#: prompt-visible thing — but filtering here keeps a tool the meeting never enabled off the menu.
+#: Which products this turn may act on. FAIL CLOSED: absent means NONE, never "all".
+#:
+#: It was the other way round, and the tool list is prompt-visible — so a meeting with nothing
+#: enabled advertised all five tools, the model read its own menu, and told the room "Partic, BIAMI,
+#: ContentMorph, Matrix and 10x Factory are all wired up here". That is precisely the property the
+#: whole feature exists to provide, defeated by a truthiness check: an empty list read as "no
+#: filter" rather than as "nothing".
+#:
+#: A turn cannot use these without a grant anyway, so refusing when none is named costs nothing.
 ENABLED = [s.strip() for s in (os.environ.get("VEXA_SKILL_TOOLS") or "").split(",") if s.strip()]
 
 #: tool name → the skill it READS for. A repo-backed product's import gate rejects anything
@@ -171,7 +178,7 @@ def _tool_list() -> list:
     enabled ones is what makes the per-product switch real at the tool boundary."""
     out = []
     for name, skill in DESCRIBE_SKILL.items():
-        if ENABLED and skill not in ENABLED:
+        if skill not in ENABLED:
             continue
         label = next(l for t, (_e, l, _a) in TOOLS.items() if TOOL_SKILL.get(t) == skill)
         out.append({
@@ -187,13 +194,13 @@ def _tool_list() -> list:
             d_skill = DESCRIBE_SKILL[name]
             result = ({"status": "unavailable",
                        "message": "That product isn't turned on for this meeting."}
-                      if ENABLED and d_skill not in ENABLED else _describe(d_skill))
+                      if d_skill not in ENABLED else _describe(d_skill))
             return {"jsonrpc": "2.0", "id": mid, "result": {
                 "content": [{"type": "text", "text": json.dumps(result)}],
                 "isError": result.get("status") in ("failed", "invalid"),
             }}
         skill = TOOL_SKILL.get(name, "")
-        if ENABLED and skill not in ENABLED:
+        if skill not in ENABLED:
             continue
         if skill in REPO_BACKED:
             out.append({
@@ -245,7 +252,7 @@ def _handle(msg: dict) -> "dict | None":
             return {"jsonrpc": "2.0", "id": mid,
                     "error": {"code": -32601, "message": f"unknown tool {name!r}"}}
         skill = TOOL_SKILL.get(name, "")
-        if ENABLED and skill not in ENABLED:
+        if skill not in ENABLED:
             result = {"status": "unavailable",
                       "message": f"{TOOLS[name][1]} isn't turned on for this meeting."}
         elif skill in REPO_BACKED:

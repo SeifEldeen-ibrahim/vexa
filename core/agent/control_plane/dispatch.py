@@ -434,6 +434,12 @@ def build_unit_env(settings: Settings, invocation: dict, *, unit_id: str, token:
 # ``meeting_id`` is the row id. Both are agent-api internal — the sealed MeetingRef forbids them.
 _INTERNAL_MEETING_HINTS = frozenset({"transcript_start_id", "numeric_meeting_id", "native_id"})
 
+#: Internal CONTEXT hints — carried on the in-memory dispatch for ``build_unit_env`` to read, and
+#: stripped before the contract check like every other hint here. ``unit.v1``'s context is
+#: additionalProperties:false, and a sealed contract is not something to widen for a routing value:
+#: a new field would also make every worker older than the control plane reject its own config.
+_INTERNAL_CONTEXT_HINTS = frozenset({"session", "skill_grant", "skill_tools"})
+
 
 def _without_chat_session(invocation: dict) -> dict:
     """A shallow copy with internal routing hints removed for the unit.v1 contract check. Also strips
@@ -446,7 +452,8 @@ def _without_chat_session(invocation: dict) -> dict:
     ctx_dict = ctx if isinstance(ctx, dict) else None
     meeting = ctx_dict.get("meeting") if ctx_dict and ctx_dict.get("kind") == "meeting" else None
     needs_clean = has_principal or (ctx_dict is not None and (
-        "session" in ctx_dict or (isinstance(meeting, dict) and bool(_INTERNAL_MEETING_HINTS & meeting.keys()))
+        bool(_INTERNAL_CONTEXT_HINTS & ctx_dict.keys())
+        or (isinstance(meeting, dict) and bool(_INTERNAL_MEETING_HINTS & meeting.keys()))
     ))
     if not needs_clean:
         return invocation
@@ -454,7 +461,7 @@ def _without_chat_session(invocation: dict) -> dict:
     if has_principal:
         clean["identity"] = {k: v for k, v in identity.items() if k != "principal"}
     if ctx_dict is not None:
-        clean_ctx = {k: v for k, v in ctx_dict.items() if k != "session"}
+        clean_ctx = {k: v for k, v in ctx_dict.items() if k not in _INTERNAL_CONTEXT_HINTS}
         if isinstance(meeting, dict) and (_INTERNAL_MEETING_HINTS & meeting.keys()):
             clean_ctx["meeting"] = {k: v for k, v in meeting.items() if k not in _INTERNAL_MEETING_HINTS}
         clean["context"] = clean_ctx

@@ -163,3 +163,49 @@ def test_a_grant_for_a_DIFFERENT_subject_does_not_narrow_this_stack():
     turn-level narrowing applies."""
     out = _apply_granted_modes(_stack_with_attached(), [{"id": "7", "mode": "ro"}], "6")
     assert next(m for m in out if m["slug"] == "vibe-pipe-a1b2c3")["write"] is True
+
+
+# ── internal hints must not reach the sealed contract ─────────────────────────────────────
+
+def test_the_skill_grant_is_stripped_before_the_contract_check():
+    """`unit.v1`'s context is additionalProperties:false. Carrying a routing value there without
+    stripping it made EVERY meeting-chat turn fail validation and the assistant went silent — the
+    failure mode is total, because the dispatch never happens at all.
+
+    Widening the sealed schema is not the alternative: a new field would also make every worker
+    older than the control plane reject its own config."""
+    import contracts
+    from control_plane.dispatch import _without_chat_session
+
+    inv = {
+        "identity": {"subject": "6", "launcher": "user:6"}, "runner": "claude-code",
+        "workspaces": [{"id": "6", "mode": "ro"}], "trigger": "message",
+        "start": {"entrypoint": {"inline": "hi"}},
+        "context": {"kind": "none", "skill_grant": "s3cret", "skill_tools": "partic"},
+    }
+    clean = _without_chat_session(inv)
+    assert clean["context"] == {"kind": "none"}
+    contracts.validate_unit_invocation(clean)          # must not raise
+
+
+def test_the_grant_SURVIVES_on_the_in_memory_dispatch():
+    """Stripping is for the wire only — `build_unit_env` reads the hint off the original, so a copy
+    that mutated the caller's dict would take the turn's authority to act away with it."""
+    from control_plane.dispatch import _without_chat_session
+
+    inv = {"identity": {"subject": "6", "launcher": "user:6"}, "runner": "claude-code",
+           "workspaces": [{"id": "6", "mode": "ro"}], "trigger": "message",
+           "start": {"entrypoint": {"inline": "hi"}},
+           "context": {"kind": "none", "skill_grant": "s3cret"}}
+    _without_chat_session(inv)
+    assert inv["context"]["skill_grant"] == "s3cret"
+
+
+def test_a_dispatch_with_no_hints_is_returned_UNCHANGED():
+    """The common path allocates nothing — and identity is the same object, not a copy."""
+    from control_plane.dispatch import _without_chat_session
+
+    inv = {"identity": {"subject": "6", "launcher": "user:6"}, "runner": "claude-code",
+           "workspaces": [{"id": "6", "mode": "ro"}], "trigger": "message",
+           "start": {"entrypoint": {"inline": "hi"}}, "context": {"kind": "none"}}
+    assert _without_chat_session(inv) is inv

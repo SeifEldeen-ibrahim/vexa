@@ -178,6 +178,10 @@ adminApi:
 # Meetings + recordings (compose: meeting-api → :8080).
 meetingApi:
   enabled: true
+  # Gates the acts.v1 interactive family (chat_send/chat_read, and speak once it is wired) on every
+  # spawn. OFF by default: an interactive bot can type into and speak in a customer's meeting, so it
+  # is opt-in per deployment and per request (`voice_agent_enabled` on POST /bots).
+  voiceAgentEnabled: false
   replicaCount: 2
   # Keep the process alive briefly after Kubernetes marks the Pod terminating. This gives
   # EndpointSlice/kube-proxy enough time to stop routing fresh connections to the old IP before
@@ -250,6 +254,14 @@ runtime:
     idleTimeoutSec: ""
   # Active-phase remote-audio silence window. Empty uses the bot's 10-minute default.
   aloneSilenceWindowMs: ""
+  # Comma-separated names this deployment says out loud (products, people, companies). Sent as the
+  # Whisper prompt with every audio window, so speech-to-text stops inventing spellings for words it
+  # has never heard. Empty = no vocabulary bias.
+  sttVocabulary: ""
+  # Answer Google Meet's Gemini note-taking consent prompt on the bot's behalf ("true"). Off by
+  # default: consent belongs to the account holder. Set it only where the bot account is yours —
+  # the prompt renders inside the bot's own browser, unreachable by anyone in the meeting.
+  acceptGeminiConsent: ""
   resources:
     requests: { cpu: 50m, memory: 256Mi }
     limits:   { cpu: 500m, memory: 768Mi }
@@ -294,6 +306,18 @@ runtime:
 # Agent control plane — /invocations dispatch + /api/chat SSE (compose: agent-api → :8100).
 agentApi:
   enabled: true
+  # The in-meeting chat assistant: a participant typing "@vexa <question>" in a meeting's own chat
+  # gets an answer there, in the same thread the Assistant tab shows. OFF by default because ANY
+  # participant — including an external guest — can address it; its turns run read-only, and the
+  # prefix is a spam filter rather than a permission check.
+  meetChat:
+    enabled: false
+    prefix: "@vexa"
+    always: false               # true = treat EVERY chat line as addressed; a dedicated room only
+    anyone: false               # true = answer every participant, not just the meeting owner
+    ownerNames: ""              # extra Meet display names that count as the owner (comma separated)
+    googleIdentity: false       # ask Google which ACCOUNT a chat sender is (needs the owner's grant)
+    minIntervalSeconds: 5       # bounds a participant pasting the address repeatedly
   replicaCount: 1               # shares a workspace store with spawned workers; keep single for RWO PVC
   image:
     repository: vexaai/v012-agent-api

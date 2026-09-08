@@ -84,6 +84,12 @@ class Settings(BaseSettings):
     # A unit's unit.v1.tools names resolve against this dir into --allowedTools + an .mcp.json.
     tools_seed_dir: str = "/app/tools-seed"
 
+    # Where a worker's product tools reach back to write into the owner's pinned repo. The control
+    # plane does that work because it holds the GitHub credential and the clone; the worker holds
+    # only a per-turn grant. Empty ⇒ repo-backed tools report that they cannot write, rather than
+    # failing in a way the meeting cannot act on.
+    skill_act_url: str = "http://agent-api:8100/internal/skills/act"
+
     # Workspace-authored routines are reconciled from /workspaces/*/routines/*.md onto the durable
     # runtime scheduler. Set to 0 to disable the background reconciler.
     routine_reconcile_interval_sec: int = Field(default=60, ge=0)

@@ -31,6 +31,7 @@ gateway's contextvars (the cross-hop trace ``test_tracing.py`` asserts).
 """
 from __future__ import annotations
 
+import json
 from typing import Any, Callable, Optional
 
 import json
@@ -43,6 +44,11 @@ from .obs import TraceMiddleware as _DefaultTraceMiddleware
 from .obs import log_event as _default_log_event
 from .ports import RedisBus, TranscriptStore
 
+
+#: Upper bound on one `POST /bots/{platform}/{native}/chat` message. Google Meet's own composer caps
+#: a chat message at 500 characters, so anything longer cannot be delivered as a single message and
+#: is refused at the boundary rather than silently truncated in the browser.
+CHAT_SEND_MAX_CHARS = 500
 
 # The two INTENT states the USER owns (pre-FSM). The user dropdown is the source of truth for
 # these; they sit BEFORE `requested` and are NEVER passed to the bot FSM (LifecycleSink.apply_change).
@@ -815,12 +821,11 @@ def build_router(
         return JSONResponse(content=body)
 
     # --- GET /bots/{platform}/{native_meeting_id}/chat (#579 C3, sealed api.v1 ChatMessagesResponse).
-    # Thin HONEST restore: the route + owner boundary are real (unowned/unknown native → 404), but
-    # 0.12 does not PERSIST in-meeting chat server-side (chat frames flow live over the va:…:chat WS
-    # channel and are not stored), so the captured-message list is always empty until a chat-capture
-    # backend lands. The response conforms to the sealed shape; the empty list is the truthful state,
-    # not a fabricated one. The POST (send) half is a SIGNED GAP — see the PR (no bot-command backend
-    # in the 0.12 core). ---
+    # The route + owner boundary are real (unowned/unknown native → 404), but 0.12 does not PERSIST
+    # in-meeting chat server-side, so the captured-message list is always empty. Chat that the bot
+    # OBSERVES now reaches the transcript as `source:'chat'` segments (the gmeet/jitsi readers), so
+    # the durable record of a meeting's chat is its TRANSCRIPT, not this list; this endpoint stays
+    # honestly empty rather than duplicating that under a shape it does not fill. ---
     @router.get("/bots/{platform}/{native_meeting_id}/chat")
     async def read_meeting_chat(
         platform: str,
@@ -835,6 +840,99 @@ def build_router(
                 detail=f"Meeting not found for platform {platform} and ID {native_meeting_id}",
             )
         return JSONResponse(content={"messages": []})
+
+    # --- POST /bots/{platform}/{native_meeting_id}/chat — SEND a message into the live meeting.
+    #
+    # Closes the sealed-but-waived gap recorded in api.v1's KNOWN_GAPS.json ("no bot-command
+    # (send-to-meeting) backend in the 0.12 core"). There is one now: acts.v1 is the control-plane →
+    # bot command bus, and this route is its owner-scoped HTTP skin.
+    #
+    # The publish is FIRE-AND-FORGET by contract, hence 202 rather than 200: redis pub/sub delivers
+    # to whoever is subscribed at that instant, and the bot may have left, may not have the chat
+    # panel reachable, or may have `voiceAgentEnabled` false — none of which this process can
+    # observe. A 200 would claim delivery we cannot verify. The bot logs the outcome on its own side.
+    #
+    # Ownership is the SAME boundary the GET uses: someone else's meeting is a 404, never a 403 —
+    # confirming a row exists across a tenant boundary is itself a leak. ---
+    @router.post("/bots/{platform}/{native_meeting_id}/chat", status_code=202)
+    async def send_meeting_chat(
+        platform: str,
+        native_meeting_id: str,
+        payload: dict,
+        x_user_id: Optional[str] = Header(default=None),
+    ):
+        return await _send_chat(platform, native_meeting_id,
+                                _resolve_user_id(x_user_id), (payload or {}).get("text"))
+
+    async def _send_chat(platform: str, native_meeting_id: str, user_id: int, text):
+        """Publish one acts.v1 `chat_send` for an OWNED meeting. Shared by the public (api-key) and
+        internal (platform-authenticated) routes so the validation and the owner boundary are the
+        same code, not two copies that drift."""
+        if not isinstance(text, str) or not text.strip():
+            raise HTTPException(status_code=422, detail="body must carry a non-empty string `text`")
+        if len(text) > CHAT_SEND_MAX_CHARS:
+            raise HTTPException(
+                status_code=422,
+                detail=f"`text` exceeds {CHAT_SEND_MAX_CHARS} characters",
+            )
+        meeting_id = await _resolve_owned_native(user_id, platform, native_meeting_id)
+        if meeting_id is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Meeting not found for platform {platform} and ID {native_meeting_id}",
+            )
+        if redis is None:
+            raise HTTPException(status_code=503, detail="command bus unavailable")
+        act = {"action": "chat_send", "text": text}
+        try:
+            await redis.publish(f"bot_commands:meeting:{meeting_id}", json.dumps(act))
+        except Exception as e:  # noqa: BLE001 — a bus fault is a typed 503, never a silent 202
+            log_event(
+                "chat_send_publish_failed", audience="system", level="error",
+                span="meetings.chat", user_id=user_id,
+                meeting_id=f"{platform}/{native_meeting_id}", fields={"error": str(e)},
+            )
+            raise HTTPException(status_code=503, detail="could not reach the bot command bus")
+        log_event(
+            "chat_send_published", audience="system", level="info",
+            span="meetings.chat", user_id=user_id, meeting_id=f"{platform}/{native_meeting_id}",
+            fields={"chars": len(text)},
+        )
+        return JSONResponse(status_code=202, content={"status": "queued"})
+
+    # --- POST /internal/bots/{platform}/{native_meeting_id}/chat — the SAME send, as a named user.
+    #
+    # The public route above is owner-scoped off the gateway-resolved API key, which means a caller
+    # can only send into meetings THAT key owns. That is right for an API consumer and wrong for the
+    # agent: agent-api answers on behalf of whichever user owns the live meeting, and it holds one
+    # deployment-wide bot key, so on a multi-user deployment every meeting except that key-holder's
+    # got a silent 404. Possession of one shared key was also, in effect, the authorization boundary
+    # for "who may make the bot speak here".
+    #
+    # This route takes the owner EXPLICITLY and authenticates the CALLER as the platform, over the
+    # loopback-only internal tier (INTERNAL_API_SECRET, never exposed through the gateway). The owner
+    # check is unchanged — it just runs against the user the caller names rather than the key's user,
+    # so a wrong or absent owner still 404s. `include_in_schema=False`: internal, not api.v1. ---
+    @router.post("/internal/bots/{platform}/{native_meeting_id}/chat",
+                 status_code=202, include_in_schema=False)
+    async def internal_send_meeting_chat(
+        platform: str,
+        native_meeting_id: str,
+        payload: dict,
+        authorization: Optional[str] = Header(default=None),
+    ):
+        import os as _os
+
+        secret = _os.getenv("INTERNAL_API_SECRET")
+        bearer = (authorization or "").removeprefix("Bearer ").strip()
+        if not (secret and bearer and bearer == secret):
+            raise HTTPException(status_code=401, detail="internal tier requires INTERNAL_API_SECRET")
+        raw_user = (payload or {}).get("user_id")
+        try:
+            user_id = int(raw_user)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=422, detail="body must carry an integer `user_id`")
+        return await _send_chat(platform, native_meeting_id, user_id, (payload or {}).get("text"))
 
     # --- GET /meetings/{platform}/{native_meeting_id}/participants → who was in this meeting, as far as
     # the 0.12 core actually KNOWS. Owner-scoped (404 on someone else's meeting — never an empty roster,

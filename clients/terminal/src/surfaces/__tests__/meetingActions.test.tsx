@@ -216,3 +216,46 @@ describe("actionsFor — each action fires the correct endpoint+body", () => {
     expect(body.meeting_url).toBe("https://us02web.zoom.us/j/1234567890?pwd=x");
   });
 });
+
+/** A-7: the join PREFS reach the real call site. `actionsFor`'s Send/Re-send builds its body through
+ *  joinBody, so a forced language and a chosen name ride the row action — the drift that let one
+ *  call site diverge from another is what joinPrefs exists to make impossible. */
+describe("Send now carries the join preferences", () => {
+  beforeEach(() => window.localStorage.clear());
+  afterEach(() => {
+    window.localStorage.clear();
+    delete process.env.NEXT_PUBLIC_DEFAULT_BOT_NAME;
+  });
+
+  // runMeetingAction's `finally` fires refreshMeetings(), so the LAST fetch is /api/meetings —
+  // pick the bot POST out of the calls rather than trusting call order.
+  const send = async (status: string) => {
+    const action = actionsFor(row(status)).find((a) => a.id === "send" || a.id === "resend")!;
+    await action.run();
+    const call = fetchMock.mock.calls.find((c) => String(c[0]) === "/api/bots")!;
+    expect(call).toBeDefined();
+    return { url: String(call[0]), body: JSON.parse(String((call[1] as RequestInit).body)) };
+  };
+
+  it("omits language and bot_name by default (auto-detect + deployment default)", async () => {
+    const { url, body } = await send("idle");
+    expect(url).toBe("/api/bots");
+    expect("language" in body).toBe(false);
+    expect("bot_name" in body).toBe(false);
+  });
+
+  it("sends a forced language and a chosen bot name on Send now", async () => {
+    window.localStorage.setItem("vexa.join.language", "de");
+    window.localStorage.setItem("vexa.join.botName", "Scribe");
+    const { body } = await send("idle");
+    expect(body.language).toBe("de");
+    expect(body.bot_name).toBe("Scribe");
+    expect(body.native_meeting_id).toBe(NATIVE);
+  });
+
+  it("carries them on Re-send of a completed meeting too", async () => {
+    window.localStorage.setItem("vexa.join.language", "fr");
+    const { body } = await send("completed");
+    expect(body.language).toBe("fr");
+  });
+});

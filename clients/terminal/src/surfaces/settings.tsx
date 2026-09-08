@@ -7,7 +7,7 @@
 import { useEffect, useState, type CSSProperties, type ReactNode } from "react";
 import { registerTab } from "../contributions";
 import { Icon } from "../ui-kit";
-import { GitHubTokenCard, TokensPanel } from "./tokens";
+import { GitHubTokenCard, SkillReposCard, TokensPanel } from "./tokens";
 import { presentError } from "./apiClient";
 import { CalendarConnectionsPanel } from "./calendarConnections";
 import { getModelPrefs, setModelPrefs, getTranscriptionPrefs, setTranscriptionPrefs, getGlobalSetting, setGlobalSetting, testModels, testTranscription, type ConfigTestResult } from "./settingsApi";
@@ -214,13 +214,29 @@ function AccountSection() {
   );
 }
 
+/** The GitHub credential and the repos it reaches, in one section and in that order.
+ *
+ *  They are rendered together because they are coupled: a repo cannot be chosen until a token is
+ *  saved, and the picker cannot discover on its own that one just was. Saving bumps a key the
+ *  picker re-fetches on — otherwise it keeps saying "no GitHub token saved" with its dropdown
+ *  disabled until the page is reloaded, which is what someone hits the moment they set this up. */
+function GitHubSection() {
+  const [reloadKey, setReloadKey] = useState(0);
+  return (
+    <>
+      <GitHubTokenCard onTokenChange={() => setReloadKey((k) => k + 1)} />
+      <SkillReposCard reloadKey={reloadKey} />
+    </>
+  );
+}
+
 function SettingsView() {
   const [section, setSection] = useState<SectionId>("calendar");
   const bodies: Record<SectionId, ReactNode> = {
     calendar: <CalendarConnectionsPanel />,
     models: <ModelsSection />,
     tokens: <TokensPanel />,
-    github: <GitHubTokenCard />,
+    github: <GitHubSection />,
     account: <AccountSection />,
   };
   return (

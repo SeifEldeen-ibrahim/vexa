@@ -18,6 +18,7 @@ honestly. Built lazily (PEP 562) so ``uvicorn control_plane.api:app`` wires the 
 from __future__ import annotations
 
 import os
+import shutil
 
 import hashlib
 import hmac
@@ -34,14 +35,22 @@ from jsonschema.exceptions import ValidationError
 from pydantic import BaseModel
 
 from control_plane import meeting_steering
+from control_plane.meet_identity import MeetIdentityResolver
+from control_plane.meeting_chat_responder import (
+    MeetingChatResponder, MEET_CHAT_WEB_TOOLS, MEET_CHAT_WORKSPACE_TOOLS,
+    SCOPE_TRANSCRIPT, SCOPE_WORKSPACE, is_same_proposal, meet_chat_tools,
+)
 from control_plane import schedule_digest as schedule_digest_mod
 from control_plane import routines as routines_mod
 from control_plane.config_preflight import NOT_CONFIGURED, capability_state, missing_capability_keys
+from shared import skills as skills_registry
 from shared import units
 from control_plane import workspace_routines as workspace_routines_mod
 from shared.agent_config import default_meeting_model, load_meeting_config
 from shared.seeding import resolve_seed_dir, seed_workspace, validate_seed
 from control_plane.workspace_attach import (
+    _git_clone as clone_repo,
+    workspace_dir_for,
     CloneError,
     activate_workspace,
     active_workspaces,
@@ -60,11 +69,13 @@ from control_plane.workspace_attach import (
     workspace_dir_for,
 )
 from control_plane.repo_ref import RepoRefError, assert_fetchable
-from control_plane.workspace_publish import PublishError, RepoExistsError, publish_workspace, published_remote_url
+from control_plane.workspace_publish import (list_github_repos, PublishError, RepoExistsError,
+                                             publish_workspace, published_remote_url)
 from control_plane.workspace_git_sync import RemoteSyncError, pull_origin, push_origin, remote_status
 from control_plane.workspace_purpose import read_purpose, write_purpose
 from control_plane import workspace_membership as membership_mod
 from control_plane import git_credentials as git_creds
+from control_plane import partic_document, skill_actions, skill_repos
 from control_plane import system_mounts
 from control_plane.workspace_membership import MembershipError, MembershipIndex, InMemoryMembershipIndex
 from control_plane.dispatch import Dispatcher
@@ -87,6 +98,21 @@ def _upload_filename(name: str | None) -> str:
     base = re.sub(r"\s+", "_", base)
     base = re.sub(r"[^A-Za-z0-9._-]", "_", base).strip("._-")
     return base[:160] or "upload"
+
+
+def _env_flag(name: str, *, default: bool = False) -> bool:
+    """Read a boolean deployment knob. Unset ⇒ ``default``; an unparseable value is treated as the
+    default and logged, never coerced by ``bool()`` (which reads "false" as True)."""
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    v = raw.strip().lower()
+    if v in ("1", "true", "yes", "on"):
+        return True
+    if v in ("0", "false", "no", "off"):
+        return False
+    logger.warning("%s=%r is not a boolean — using %s", name, raw, default)
+    return default
 
 
 def _truncate_title(text: str, *, limit: int = 60) -> str:
@@ -474,6 +500,85 @@ class MeetingStart(BaseModel):
     native_id: str              # the platform meeting id (e.g. a Google Meet code abc-defg-hij)
     subject: Optional[str] = None  # DERIVED from X-User-Id (P20); ignored if sent.
     title: Optional[str] = None
+
+
+class SkillAct(BaseModel):
+    """The in-worker tool asking the control plane to write a document into the pinned repo.
+
+    There is no `subject` here on purpose: the turn's identity comes from `grant`, which the model
+    cannot compose. A body-supplied subject would be a cross-user write primitive reachable from
+    every worker container on the network."""
+    model_config = {"extra": "forbid"}
+    grant: str
+    skill: str
+    #: What to create, in the product's own format. Partic: a `partic.pipeline/v1` JSON object.
+    #: BIAMI: the TSV text of the process.
+    document: str
+    #: What the meeting called it — becomes the file name, never a path.
+    name: str = ""
+
+
+class SkillEnabled(BaseModel):
+    """The in-worker tool asking which products its meeting currently allows."""
+    model_config = {"extra": "forbid"}
+    grant: str
+
+
+class SkillDescribe(BaseModel):
+    """The in-worker tool asking what it is authoring against."""
+    model_config = {"extra": "forbid"}
+    grant: str
+    skill: str
+
+
+class SkillRepoPin(BaseModel):
+    """Pin one of the caller's own GitHub repos to a repo-backed skill.
+
+    Pinning CLONES the repo into the caller's workspace store, so it is done once in Settings and
+    not per meeting: a clone is a network op and a meeting is not the place for it."""
+    model_config = {"extra": "forbid"}
+    skill: str
+    #: The https clone URL, from the picker. Empty ⇒ unpin.
+    repo: str = ""
+    ref: str = "main"
+
+
+class MeetingSkills(BaseModel):
+    """Turn ONE product skill on or off for ONE meeting.
+
+    Skills are OFF for every new meeting, and with none on the copilot's prompt carries no product
+    knowledge at all — it cannot propose a pipeline because it has never heard of one. Enabling a
+    skill gives the copilot that product's vocabulary and gives the assistant the owner's OWN pinned
+    repo for it, read-only.
+
+    Deliberately one skill per call: the UI toggles them individually, and a whole-set write would
+    let a stale tab clear a skill somebody else's tab just enabled."""
+    model_config = {"extra": "forbid"}
+    native_id: str
+    platform: str = "google_meet"
+    meeting_id: Optional[str] = None
+    #: A registry id (`partic`, `biami`, …). Unknown ids are refused rather than stored.
+    skill: str
+    on: bool
+
+
+class MeetingChatAccess(BaseModel):
+    """Grant or revoke WORKSPACE grounding for a meeting's in-chat assistant.
+
+    Default (and the state of every new meeting) is transcript-only: the assistant answers from that
+    meeting's transcript and can open nothing else. Granting `workspace` lets it also read the owner's
+    workspace — which includes PAST meetings' notes, because the copilot writes those regardless of
+    this setting. Anyone in the room can address the assistant, so this grant decides what a guest can
+    get read out to them."""
+    model_config = {"extra": "forbid"}
+    native_id: str
+    platform: str = "google_meet"
+    #: Read the owner's stored records (past meetings, notes) as well as this transcript.
+    workspace: "bool | None" = None
+    #: Answer EVERY participant, not just the owner. Turns the identity question off rather than
+    #: solving it — for a room where everyone present is trusted with the owner's assistant.
+    anyone: "bool | None" = None
+    meeting_id: "str | None" = None
 
 
 class MeetingProcess(BaseModel):
@@ -1179,6 +1284,176 @@ def create_app(
         start_id = cursor or "0-0"
         return {"native_id": body.native_id, "meeting_id": row_id, "processing": True, "resumed_from": start_id}
 
+    def _meet_chat_access_key(row: str) -> str:
+        return f"meetchat:meeting:{row}:workspace"
+
+    def _meet_chat_anyone_key(row: str) -> str:
+        return f"meetchat:meeting:{row}:anyone"
+
+    def _meet_chat_pending_key(row: str) -> str:
+        return f"meetchat:meeting:{row}:pending"
+
+    def _meet_chat_proposed_key(row: str) -> str:
+        return f"meetchat:meeting:{row}:proposed"
+
+    def _meet_meeting_key(subject: str, native_id: str, meeting_id: "str | None") -> tuple:
+        """``(row_id, key)`` for a per-meeting grant — the meetings-domain ROW id when it can be
+        resolved, else the native code as a last resort.
+
+        Every per-meeting grant keys this way for one reason: a native code collides across users
+        AND across one user's re-sends of the same link, so keying a grant by it would hand a
+        stranger's meeting the access this user granted."""
+        live_entry = next(
+            (m for m in live.list()
+             if m.get("native_id") == native_id or m.get("session_uid") == native_id),
+            None,
+        )
+        row_id = (
+            meeting_id
+            or (str(live_entry["numeric_meeting_id"])
+                if live_entry and live_entry.get("numeric_meeting_id") else None)
+        )
+        return row_id, (row_id or native_id)
+
+    def _meet_skills_key(row: str) -> str:
+        return f"meetskills:meeting:{row}"
+
+    def _meet_skills_for(meeting_key: str) -> list:
+        """The skills enabled for this meeting, in registry order. Any fault ⇒ NONE.
+
+        Failing closed here means a redis blip makes the copilot quieter, never louder — it cannot
+        start talking about products the owner did not enable."""
+        import redis as _redis
+
+        try:
+            r = _redis.from_url(redis_url, decode_responses=True)
+            return skills_registry.known(list(r.smembers(_meet_skills_key(str(meeting_key))) or []))
+        except Exception:  # noqa: BLE001
+            logger.exception("meet-skills: lookup failed for %s", meeting_key)
+            return []
+
+    #: How long an unanswered proposal stays live. A suggestion is about what is being discussed
+    #: NOW; agreeing to one half an hour later means agreeing to something nobody remembers saying.
+    MEET_CHAT_PENDING_TTL_SEC = 15 * 60
+
+    #: How long the record of "we already asked this" lasts. It spans the MEETING, not the moment:
+    #: a topic returned to twenty minutes later should not be proposed again as if it were new.
+    MEET_CHAT_PROPOSED_TTL_SEC = 6 * 3600
+
+    #: How long a workspace grant survives without being refreshed. A meeting is over in hours; the
+    #: grant must not outlive it and silently apply to a re-send of the same link next week.
+    MEET_CHAT_GRANT_TTL_SEC = 12 * 3600
+
+    @app.post("/api/meeting/chat-access", status_code=202)
+    def meeting_chat_access(body: MeetingChatAccess, request: Request):
+        """Set the in-meeting assistant's grounding scope for ONE meeting (desired state only).
+
+        Keyed on the meetings-domain ROW id for the same reason everything else here is: the native
+        code collides across users and across one user's re-sends, so keying a GRANT by it would hand
+        a stranger's meeting the access this user granted. Off/absent ⇒ transcript-only."""
+        import redis as _redis
+
+        subject = subject_of(request)
+        row_id, key = _meet_meeting_key(subject, body.native_id, body.meeting_id)
+        # Owner check: only the meeting's owner may widen what its chat assistant can read.
+        if row_id and _meeting_owner_lookup(subject, row_id) is None:
+            raise HTTPException(status_code=404, detail="Meeting not found")
+        try:
+            r = _redis.from_url(redis_url, decode_responses=True)
+            # Each field is set only when the caller named it, so a client toggling one grant does
+            # not silently clear the other.
+            if body.workspace is not None:
+                if body.workspace:
+                    r.set(_meet_chat_access_key(key), SCOPE_WORKSPACE, ex=MEET_CHAT_GRANT_TTL_SEC)
+                else:
+                    r.delete(_meet_chat_access_key(key))
+            if body.anyone is not None:
+                if body.anyone:
+                    r.set(_meet_chat_anyone_key(key), "1", ex=MEET_CHAT_GRANT_TTL_SEC)
+                else:
+                    r.delete(_meet_chat_anyone_key(key))
+            scope = SCOPE_WORKSPACE if r.get(_meet_chat_access_key(key)) == SCOPE_WORKSPACE else SCOPE_TRANSCRIPT
+            anyone = r.get(_meet_chat_anyone_key(key)) == "1"
+        except Exception as e:  # noqa: BLE001 — a store fault must not read as "granted"
+            logger.exception("meet-chat access write failed for %s", key)
+            raise HTTPException(status_code=503, detail=f"could not record the grant: {e}")
+        return {"native_id": body.native_id, "meeting_id": row_id, "scope": scope, "anyone": anyone}
+
+    @app.get("/api/meeting/chat-access")
+    def meeting_chat_access_get(request: Request, native_id: str, meeting_id: Optional[str] = None):
+        """What the in-meeting assistant may currently do here — the READ half of the grants.
+
+        Without this a reloaded tab renders both toggles from `useState(false)` while the server may
+        hold "anyone" and "workspace": the control shows the opposite of the truth, and the next
+        click sends the opposite of what the user believes they are asking for. Harmless-looking with
+        two switches; not harmless once a switch decides whether a commit lands in someone's repo."""
+        import redis as _redis
+
+        subject = subject_of(request)
+        row_id, key = _meet_meeting_key(subject, native_id, meeting_id)
+        try:
+            r = _redis.from_url(redis_url, decode_responses=True)
+            scope = SCOPE_WORKSPACE if r.get(_meet_chat_access_key(key)) == SCOPE_WORKSPACE else SCOPE_TRANSCRIPT
+            anyone = r.get(_meet_chat_anyone_key(key)) == "1"
+        except Exception:  # noqa: BLE001 — a read fault reads as the CLOSED state, never as granted
+            logger.exception("meet-chat access read failed for %s", key)
+            scope, anyone = SCOPE_TRANSCRIPT, False
+        return {"native_id": native_id, "meeting_id": row_id, "scope": scope, "anyone": anyone}
+
+    @app.get("/api/meeting/skills")
+    def meeting_skills_get(request: Request, native_id: str, meeting_id: Optional[str] = None):
+        """Which skills are on for this meeting, and which of them the caller cannot yet act on.
+
+        `missing_repo` is the difference between "enabled" and "usable": a repo-backed skill with
+        nothing pinned lets the copilot propose and then leaves the assistant with nowhere to write.
+        The UI needs to say so at the toggle rather than in the meeting."""
+        subject = subject_of(request)
+        row_id, key = _meet_meeting_key(subject, native_id, meeting_id)
+        enabled = _meet_skills_for(key)
+        return {
+            "native_id": native_id, "meeting_id": row_id,
+            "available": [{"id": sk.id, "label": sk.label, "repo_backed": sk.repo_backed,
+                           "pin_hint": sk.pin_hint}
+                          for sk in skills_registry.SKILLS],
+            "enabled": enabled,
+            "missing_repo": skill_repos.missing_pins(wsr.root, subject, enabled),
+        }
+
+    @app.post("/api/meeting/skills", status_code=202)
+    def meeting_skills_set(body: MeetingSkills, request: Request):
+        """Turn one skill on or off for one meeting (desired state only).
+
+        Keyed on the meetings-domain ROW id, like every other per-meeting grant: the native code
+        collides across users and across one user's re-sends, so keying by it would hand a stranger's
+        meeting the skill this user enabled."""
+        import redis as _redis
+
+        subject = subject_of(request)
+        if skills_registry.get(body.skill) is None:
+            raise HTTPException(status_code=400, detail=f"unknown skill {body.skill!r}")
+        row_id, key = _meet_meeting_key(subject, body.native_id, body.meeting_id)
+        # Only the meeting's owner may change what its copilot knows about.
+        if row_id and _meeting_owner_lookup(subject, row_id) is None:
+            raise HTTPException(status_code=404, detail="Meeting not found")
+        sid = skills_registry.get(body.skill).id
+        try:
+            r = _redis.from_url(redis_url, decode_responses=True)
+            if body.on:
+                r.sadd(_meet_skills_key(key), sid)
+                # The same rolling TTL the other grants carry: a meeting is over in hours, and a
+                # skill must not outlive it and silently apply to a re-send of the link next week.
+                r.expire(_meet_skills_key(key), MEET_CHAT_GRANT_TTL_SEC)
+            else:
+                r.srem(_meet_skills_key(key), sid)
+            enabled = skills_registry.known(list(r.smembers(_meet_skills_key(key)) or []))
+        except HTTPException:
+            raise
+        except Exception as e:  # noqa: BLE001 — a store fault must not read as "enabled"
+            logger.exception("meet-skills write failed for %s", key)
+            raise HTTPException(status_code=503, detail=f"could not record the skill: {e}")
+        return {"native_id": body.native_id, "meeting_id": row_id, "enabled": enabled,
+                "missing_repo": skill_repos.missing_pins(wsr.root, subject, enabled)}
+
     @app.post("/api/chat")
     def chat(body: ChatBody, request: Request):
         """A chat *now*-dispatch: spawn the isolated container, stream its Stream back as SSE.
@@ -1736,6 +2011,356 @@ def create_app(
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
         return {"set": stored, "masked": git_creds.masked_github_token(wsr.root, subject)}
+
+    #: How long a turn may act after it was dispatched. The grant is for THIS turn, not for the
+    #: container's whole life — a warm worker serves later messages and must not still be able to
+    #: write a repo on the strength of a turn that ended.
+    SKILL_ACT_TTL_SEC = 15 * 60
+
+    def _skill_grant_key(unit_id: str) -> str:
+        return f"skillgrant:{unit_id}"
+
+    def _mint_skill_grant(unit_id: str, subject: str, meeting_key: str) -> str:
+        """Authorise this meeting's worker to act on the subject's behalf.
+
+        The tool runs in the worker and the credential does not, so something must carry the subject
+        across — and it must not be the request body, which the model composes.
+
+        It names the MEETING, not the products. Which products are enabled is read live, at the
+        moment a tool is called: a worker is reused for every message in a meeting and its env is
+        frozen at creation (a create for a running workload is a TOUCH that discards the spec), so a
+        grant that listed products would be answering with whatever was enabled the first time
+        somebody spoke. Enabling Partic mid-meeting then did nothing at all, which is what happened.
+
+        A compromised worker can therefore do what its meeting currently allows, and nothing else —
+        including nothing at all, the moment the owner turns a product off."""
+        import secrets as _secrets
+
+        import redis as _redis
+
+        secret = _secrets.token_urlsafe(24)
+        r = _redis.from_url(redis_url, decode_responses=True)
+        r.setex(_skill_grant_key(secret), SKILL_ACT_TTL_SEC,
+                json.dumps({"unit": unit_id, "subject": subject, "meeting": str(meeting_key)}))
+        return secret
+
+    def _skills_of_grant(grant: dict) -> list:
+        """The products this grant's meeting has enabled RIGHT NOW."""
+        return _meet_skills_for(str((grant or {}).get("meeting") or ""))
+
+    def _resolve_skill_grant(secret: str) -> "dict | None":
+        import redis as _redis
+
+        if not secret:
+            return None
+        try:
+            raw = _redis.from_url(redis_url, decode_responses=True).get(_skill_grant_key(secret))
+        except Exception:  # noqa: BLE001
+            logger.exception("skill-act: grant lookup failed")
+            return None
+        try:
+            return json.loads(raw) if raw else None
+        except ValueError:
+            return None
+
+    def _skill_written_message(skill) -> str:
+        """What the room is told on success.
+
+        It says the document was WRITTEN, not that the thing exists — because it does not yet.
+        Partic imports out of band and rejects non-canonical documents where we will never see it,
+        and a BIAMI process does not exist until someone runs the import. Claiming "created" would
+        be a confident lie told to a customer in a live meeting."""
+        if skill.id == "biami":
+            return ("Done — the process is imported into your BIAMI database and pushed. It'll be "
+                    "there next time your cluster syncs.")
+        return (f"Done — I've written the pipeline into your {skill.label} repo. It'll appear in "
+                f"{skill.label} once it imports.")
+
+    class _Prepared:
+        def __init__(self, status, message="", detail="", detail_parts=None):
+            self.status, self.message, self.detail = status, message, detail
+            self.detail_parts = detail_parts
+
+    def _prepare_skill_document(skill, body, repo: Path) -> "_Prepared":
+        """Turn what the model wrote into (path, content, commit message) — or say why not."""
+        raw = (body.document or "").strip()
+        if not raw:
+            return _Prepared("invalid", f"I didn't get a {skill.label} document to write.")
+        if skill.id == "partic":
+            try:
+                document = json.loads(raw)
+            except ValueError as exc:
+                return _Prepared("invalid", "That pipeline document isn't valid JSON, so I didn't "
+                                            "write it.", detail=str(exc)[:200])
+            errors = partic_document.validate(document, partic_document.load_connectors(repo))
+            if errors:
+                # Said to the ROOM in one line; the specifics go to the model via the tool result,
+                # which is where a retry can use them.
+                return _Prepared("invalid",
+                                 "That pipeline wouldn't have imported, so I didn't write it — "
+                                 f"{errors[0]}", detail=" | ".join(errors[:5]))
+            base = skill_actions.partic_document_name(document)
+            relpath = skill_actions.unique_relpath(repo, skill_actions.PARTIC_DIR, base, ".json",
+                                                   token=body.grant)
+            content = json.dumps(document, indent=2, sort_keys=False) + "\n"
+            return _Prepared("ok", detail_parts=(relpath, content,
+                                                 f"Add Partic pipeline {base} (via Vexa)"))
+        # BIAMI: a TSV, written under its own name. NEVER temp/import.tsv — that is a staging slot
+        # whose content records what is already in the committed database, and overwriting it from a
+        # meeting both destroys that record and races the other meeting.
+        base = skill_actions.slugify(body.name or "", fallback="process")
+        relpath = skill_actions.unique_relpath(repo, skill_actions.BIAMI_DIR, base, ".tsv",
+                                               token=body.grant)
+        content = raw if raw.endswith("\n") else raw + "\n"
+        return _Prepared("ok", detail_parts=(relpath, content,
+                                             f"Add BIAMI process {base} (via Vexa)"))
+
+    def _skill_act(subject: str, skill, body) -> "skill_actions.ActionResult":
+        """Pull, validate, write, commit, push — in that order, for that reason.
+
+        `pull_origin` refuses while the local clone is AHEAD, so pulling only after a rejected push
+        deadlocks and leaves the clone permanently wedged (the Terminal's git panel breaks with it).
+        Pulling first, while the clone is still clean, is the only order that recovers."""
+        if not skill_repos.read_pins(wsr.root, subject).get(skill.id):
+            return skill_actions.ActionResult(
+                "not-linked",
+                f"I can draft that, but this meeting isn't connected to a {skill.label} repo yet — "
+                f"it can be pinned in Vexa settings.")
+        repo = skill_repos.repo_for(wsr.root, subject, skill.id)
+        if repo is None or not Path(repo).is_dir():
+            return skill_actions.ActionResult(
+                "not-linked",
+                f"The {skill.label} repo this meeting points at isn't reachable any more — "
+                f"it can be re-pinned in Vexa settings.")
+
+        token = git_creds.read_github_token(wsr.root, subject)
+        # 1. PULL FIRST, while the clone is clean. A divergence here is recoverable; the same
+        #    divergence discovered after a commit is not.
+        try:
+            pull_origin(Path(repo), token=token)
+        except RemoteSyncError as exc:
+            logger.warning("skill-act: pull refused for %s/%s — %s", subject, skill.id, exc)
+            return skill_actions.ActionResult(
+                "conflict",
+                f"Your {skill.label} repo has changes I haven't caught up with, so I didn't write "
+                f"anything. Nothing was changed.", detail=str(exc))
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("skill-act: pull failed for %s/%s", subject, skill.id)
+            return skill_actions.ActionResult(
+                "failed", f"I couldn't reach your {skill.label} repo, so I didn't create anything. "
+                          f"Nothing was changed.", detail=str(exc)[:200])
+
+        # 2. VALIDATE — for Partic, against the rules its own import gate states.
+        prepared = _prepare_skill_document(skill, body, Path(repo))
+        if prepared.status != "ok":
+            return skill_actions.ActionResult(prepared.status, prepared.message, prepared.detail)
+        relpath, content, commit_msg = prepared.detail_parts   # type: ignore[attr-defined]
+
+        # 3. WRITE + COMMIT, authored by the owner.
+        name, email = _meet_chat_owner_identity(subject) if _meet_chat_owner_identity else (None, None)
+        try:
+            sha = skill_actions.write_document(
+                Path(repo), relpath, content, message=commit_msg,
+                author=(name or subject, email or f"{subject}@vexa.local"))
+        except FileExistsError:
+            return skill_actions.ActionResult(
+                "invalid", f"There's already a {skill.label} document by that name — give it a "
+                           f"different one and I'll write it.")
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("skill-act: write failed for %s/%s", subject, skill.id)
+            return skill_actions.ActionResult(
+                "failed", f"I couldn't write into your {skill.label} repo. Nothing was changed.",
+                detail=str(exc)[:200])
+
+        # BIAMI: RUN ITS OWN IMPORTER. The TSV is a definition, not a process — the process lives in
+        # `db/pro_cess.db`, which the engine writes and the cluster syncs, while `temp/*.tsv` is not
+        # a synced surface at all. Pushing the file alone would deliver something that never becomes
+        # anything. Import is not execution: `cmd=import` registers a task, `cmd=request` runs one,
+        # and we only ever issue the first.
+        if skill.id == "biami":
+            try:
+                tail = skill_actions.biami_import(Path(repo), relpath)
+                logger.info("skill-act: BIAMI import for %s — %s", subject, tail[-200:])
+                sha = skill_actions.commit_all(
+                    Path(repo), f"Import BIAMI process {Path(relpath).stem} (via Vexa)",
+                    author=(name or subject, email or f"{subject}@vexa.local")) or sha
+            except Exception as exc:  # noqa: BLE001
+                skill_actions.rollback(Path(repo), sha)
+                logger.exception("skill-act: BIAMI import failed for %s", subject)
+                return skill_actions.ActionResult(
+                    "failed",
+                    "I wrote the process but BIAMI's importer wouldn't accept it, so I've undone it. "
+                    "Nothing was changed.", detail=str(exc)[-300:])
+
+        # 4. PUSH. On a rejection roll the commit back — leaving it is what wedges the clone.
+        try:
+            pull_origin(Path(repo), token=token)          # a second meeting may have landed
+        except Exception:  # noqa: BLE001
+            pass                                           # the push below reports it truthfully
+        try:
+            push_origin(Path(repo), token=token)
+        except Exception as exc:  # noqa: BLE001
+            skill_actions.rollback(Path(repo), sha)
+            logger.warning("skill-act: push rejected for %s/%s — %s", subject, skill.id, exc)
+            return skill_actions.ActionResult(
+                "conflict",
+                f"Your {skill.label} repo moved on while I was writing, so I didn't push. Nothing "
+                f"was changed — ask me again and I'll retry.", detail=str(exc)[:200])
+        return skill_actions.ActionResult("written", _skill_written_message(skill), detail=relpath)
+
+    @app.post("/internal/skills/enabled")
+    def skills_enabled(body: SkillEnabled):
+        """Which products this grant's meeting has enabled, right now.
+
+        The tool server asks at startup rather than reading its container env, because that env is
+        frozen at container creation and a worker serves a whole meeting. Reading it meant the tool
+        menu reflected whatever was enabled when the first message arrived — so turning a product on
+        mid-meeting changed nothing until the worker was reaped."""
+        grant = _resolve_skill_grant(body.grant)
+        if grant is None:
+            raise HTTPException(status_code=403, detail="expired or unknown turn grant")
+        return {"enabled": _skills_of_grant(grant)}
+
+    @app.post("/internal/skills/knowledge")
+    def skills_knowledge(body: SkillEnabled):
+        """The copilot's product knowledge for THIS meeting — only what is enabled, right now.
+
+        Served from the deployment's own files, never from the user's workspace. It used to live at
+        `agents/skills/*.md` inside the workspace, where the copilot could merge just the enabled
+        ones into its prompt — and where a workspace-scoped assistant with a Read tool could open ALL
+        of them regardless. The gate was on the prompt and on the tools while the source text sat in
+        a directory anyone could list, so a meeting with only Partic on could still be told what
+        BIAMI is, in this file's own words.
+
+        Isolation has to be about REACH, not about what a prompt was asked to include."""
+        grant = _resolve_skill_grant(body.grant)
+        if grant is None:
+            raise HTTPException(status_code=403, detail="expired or unknown turn grant")
+        enabled = _skills_of_grant(grant)
+        return {"enabled": enabled, "steering": skills_registry.read_knowledge(enabled)}
+
+    @app.post("/internal/skills/describe")
+    def skills_describe(body: SkillDescribe):
+        """What the model needs to AUTHOR for this product, read from the owner's own pinned repo.
+
+        The repo is deliberately not mounted into the turn — the token stays here and a writable
+        mount would put unrelated Vexa commits into the user's repo forever — but the assistant
+        still has to know what it is writing against. A product's import gate rejects anything
+        non-canonical, and its contract and connector list are the only statement of what canonical
+        means; without them the model invents connector names and every document is a rejection
+        nobody in the meeting ever sees.
+
+        Available in BOTH grounding scopes, because this is the product's own documentation and has
+        nothing to do with how much MEETING history is in reach. It carries no credential: a Partic
+        connector file holds schema, not secrets."""
+        grant = _resolve_skill_grant(body.grant)
+        if grant is None:
+            raise HTTPException(status_code=403, detail="expired or unknown turn grant")
+        subject = str(grant.get("subject") or "")
+        skill = skills_registry.get(body.skill)
+        if skill is None or skill.id not in _skills_of_grant(grant):
+            return {"status": "not-linked",
+                    "message": f"{body.skill} is not turned on for this meeting."}
+        if not skill_repos.read_pins(wsr.root, subject).get(skill.id):
+            return {"status": "not-linked",
+                    "message": f"This meeting isn't connected to a {skill.label} repo yet."}
+        repo = skill_repos.repo_for(wsr.root, subject, skill.id)
+        if repo is None or not repo.is_dir():
+            return {"status": "not-linked",
+                    "message": f"The {skill.label} repo isn't reachable any more."}
+        described = (skill_actions.partic_describe(repo) if skill.id == "partic"
+                     else skill_actions.biami_describe(repo))
+        return {"status": "ok", **described}
+
+    @app.post("/internal/skills/act")
+    def skills_act(body: SkillAct):
+        """Write a product document into the caller's pinned repo and push it.
+
+        Called by the in-worker tool, authenticated by the per-turn grant — never by a subject in
+        the body. Answers a FIXED vocabulary of outcomes so the assistant can say something true in
+        the room; git's own error text never crosses this boundary, because it carries the remote
+        URL and, on an auth failure, the token."""
+        grant = _resolve_skill_grant(body.grant)
+        if grant is None:
+            raise HTTPException(status_code=403, detail="expired or unknown turn grant")
+        subject = str(grant.get("subject") or "")
+        skill = skills_registry.get(body.skill)
+        if skill is None or skill.id not in _skills_of_grant(grant):
+            # The turn may only act on a product the OWNER has enabled — read fresh, so turning one
+            # OFF takes effect on the next call rather than at the end of the meeting.
+            return {"status": "not-linked",
+                    "message": f"{body.skill} is not turned on for this meeting."}
+        result = _skill_act(subject, skill, body)
+        return {"status": result.status, "message": result.message}
+
+    @app.get("/api/skills/repos")
+    def skills_repos_get(request: Request):
+        """What each repo-backed skill is pinned to, and what the caller could pin it to.
+
+        The repo list needs the caller's stored token and one GitHub call, so it is fetched only
+        when asked for — `repos` is empty (with a reason) rather than an error when no token is
+        saved, because "you have not linked GitHub" is a state the UI renders, not a failure."""
+        subject = subject_of(request)
+        pins = skill_repos.read_pins(wsr.root, subject)
+        token = git_creds.read_github_token(wsr.root, subject)
+        repos: list = []
+        note = ""
+        if not token:
+            note = "no GitHub token saved"
+        else:
+            try:
+                repos = list_github_repos(token)
+            except PublishError as exc:
+                note = str(exc)          # already token-redacted (P15)
+        return {
+            "skills": [{"id": sk.id, "label": sk.label, "pin_hint": sk.pin_hint,
+                        "pinned": pins.get(sk.id)}
+                       for sk in skills_registry.SKILLS if sk.repo_backed],
+            "repos": repos, "note": note, "token_set": bool(token),
+        }
+
+    @app.post("/api/skills/repos")
+    def skills_repos_set(body: SkillRepoPin, request: Request):
+        """Pin (or, with an empty repo, unpin) one repo-backed skill.
+
+        Clones through the SAME `activate_workspace` every attached workspace uses, so the repo
+        lands in this caller's own store under their own subject and two users pinning the same URL
+        get two independent clones. The pin then holds only the SLUG — `repo`/`ref` already live in
+        the attach state, and a second writer of those would drift the moment a workspace is
+        renamed or deleted."""
+        subject = subject_of(request)
+        skill = skills_registry.get(body.skill)
+        if skill is None or not skill.repo_backed:
+            raise HTTPException(status_code=400, detail=f"not a repo-backed skill: {body.skill!r}")
+        if not (body.repo or "").strip():
+            return {"skills": skill_repos.unpin(wsr.root, subject, skill.id)}
+        token = git_creds.read_github_token(wsr.root, subject)
+        url, ref = body.repo.strip(), (body.ref or "main")
+        slug = skill_repos.slug_for_repo(url)
+        dest = skill_repos.repo_dir(wsr.root, subject, slug)
+        if dest is None:
+            raise HTTPException(status_code=400, detail="invalid subject or repo")
+        # A PLAIN clone, keeping its own .git and origin. Deliberately not `activate_workspace`:
+        # that folds a repo into the workspace model — wrapping a non-workspace-shaped repo in a
+        # template, nesting it under kg/ and DROPPING its .git — which leaves nothing to pull from
+        # or push to. Both of the first two repos anyone pinned were non-compliant, so that path
+        # could never have worked.
+        try:
+            if (dest / ".git").is_dir():
+                pull_origin(dest, token=token)
+            else:
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.rmtree(dest, ignore_errors=True)
+                clone_repo(url, ref, dest, token or None)
+        except (CloneError, RemoteSyncError) as exc:
+            # Token-redacted upstream (P15). Settings is the honest place for a bad token to
+            # surface — where the person can fix it, and not mid-meeting.
+            raise HTTPException(status_code=502, detail=f"could not clone that repo: {exc}")
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("skill-repo: clone failed for %s/%s", subject, skill.id)
+            raise HTTPException(status_code=502, detail=f"could not clone that repo: {exc}")
+        pins = skill_repos.pin(wsr.root, subject, skill.id, slug=slug, repo=url, ref=ref)
+        return {"skills": pins, "slug": slug, "cloned": True}
 
     @app.get("/api/workspace/git-remote-status")
     def ws_git_remote_status(request: Request, slug: Optional[str] = None):
@@ -2300,6 +2925,302 @@ def create_app(
         elif not token:
             token = os.environ.get("TRANSCRIPTION_SERVICE_TOKEN", "")
         return _ct.run_transcription_test(url, token, source)
+
+    # ── the in-meeting chat assistant ──────────────────────────────────────────────────────────
+    # A participant types "@vexa …" in the meeting chat and gets an answer THERE, from the same
+    # agent and in the same conversation thread the Assistant tab shows.
+    #
+    # Both collaborators are built here, at the composition root, because both need things the
+    # responder must not hold itself: the dispatcher + stream reader (the turn), and the deployment
+    # bot key (the reply hop). The responder stays a pure orchestrator and is provable offline.
+    def _meet_chat_turn(subject: str, session: str, focus: dict, prompt: str, title: str = "",
+                        scope: str = SCOPE_TRANSCRIPT, skills: "list | None" = None) -> str:
+        """Run ONE agent turn headlessly and return the assistant's text.
+
+        The same grounding and dispatch the SSE route builds — deliberately assembled from the same
+        pieces (`_context_grounding` → `units.make_dispatch` → `stream_reader.read`) so a Meet-chat
+        answer and an Assistant-tab answer come from the same machinery.
+
+        Two deliberate differences from the SSE route, both because the input is UNTRUSTED:
+          * GROUNDING SCOPE. By default the turn mounts NO workspace at all — it answers from the
+            meeting transcript folded into the prompt and nothing else. Read-only mounts would stop a
+            participant CHANGING the workspace, but not a guest asking the agent to read private
+            notes out loud into a room the owner does not control; the only reliable answer to
+            exfiltration is having nothing private in scope. `workspace` scope (opt-in per meeting)
+            mounts the owner's workspaces READ-ONLY.
+          * there is no resume/retry machinery — nobody is holding a stream open to reconnect.
+        """
+        body = ChatBody(prompt=prompt, session=session,
+                        context=ChatContextBody(focus=focus, surface={"list": "meetings"}))
+        ctx, tools, grounded = _context_grounding(
+            body, session, redis_url,
+            schedule_rows=lambda: _schedule_source(subject),
+            workspace_mounts=lambda: (active_workspaces(wsr.root, subject)
+                                      + shared_active_mounts(wsr.root, subject, mindex.list(subject))),
+        )
+        # `_context_grounding` has already folded the meeting transcript into `grounded`, so a
+        # transcript-scoped turn still has everything it needs to answer about the room — it simply
+        # carries no mounts. An empty list is the honest expression of that: nothing to read, so
+        # nothing to leak.
+        # The scopes differ by which HISTORY is reachable. Both can search the web; neither can
+        # write. unit.v1 requires at least one granted workspace, so a transcript-scoped turn still
+        # MOUNTS one — it simply has no file tools to open it with, which is the property that
+        # matters: no past records in reach, and nothing private to read aloud into the room.
+        inv = units.make_dispatch(
+            subject=subject, trigger="message",
+            start=units.entrypoint(inline=grounded), context=ctx,
+            tools=meet_chat_tools(scope),
+            workspaces=[{"id": subject, "mode": "ro"}],
+        )
+        unit_id = units.dispatch_id(inv)
+        # THE TURN'S AUTHORITY TO ACT, minted per turn and resolved server-side. The tool runs in
+        # the worker and the GitHub credential does not, so something has to carry "this turn acts
+        # for this subject, on these products" across — and it must not be the request body, which
+        # the model composes. Scoped to the products the OWNER enabled for this meeting, so a turn
+        # can never write to a repo the meeting was not about.
+        # The grant names this MEETING; which products it allows is read live at call time, so a
+        # toggle takes effect on the next message rather than on the next container.
+        meeting_key = str(focus.get("meeting_id") or "")
+        if meeting_key:
+            inv.setdefault("context", {})["skill_grant"] = _mint_skill_grant(
+                unit_id, subject, meeting_key)
+        # No model credential ⇒ the worker can only fail with its own "Not logged in" text, which
+        # means nothing to someone sitting in a meeting. Say so in words they can act on instead of
+        # going silent — silence in a meeting reads as a broken bot.
+        if capability_state("model_inference") == NOT_CONFIGURED:
+            cfg = dispatcher.resolve_model_config(subject)
+            if cfg is not None and not _has_custom_model_endpoint(cfg):
+                return "I can't answer right now - this deployment has no model credentials configured."
+        # Index the thread so it appears in the Assistant tab beside the ones typed there.
+        # Title from the QUESTION, not the prompt — the prompt carries this module's own
+        # instructions ("Answer them in the meeting chat. Be brief …") and they read as nonsense in
+        # the Assistant tab's thread list.
+        is_new = not any(r["session"] == session for r in sess.list(subject))
+        sess.upsert(subject, session, title=_truncate_title(title or prompt) if is_new else None)
+        start = _stream_tail_id(redis_url, units.output_topic(unit_id)) or None
+        unit_id = dispatcher.dispatch(inv)
+        parts: list[str] = []
+        for item in stream_reader.read(unit_id, resume=start):
+            if item is None:
+                continue
+            ev = item[0] if isinstance(item, tuple) else item
+            kind = ev.get("type")
+            if kind == "message-delta" and ev.get("text"):
+                parts.append(str(ev["text"]))
+            elif kind in ("turn-complete", "rejected"):
+                break
+            elif kind == "done":
+                if ev.get("ok") is False and ev.get("reply"):
+                    parts.append(str(ev["reply"]))
+                break
+            elif kind in ("error", "stream-error"):
+                return str(ev.get("message") or "The assistant hit an error answering that.")
+        return "".join(parts).strip()
+
+    def _meet_chat_post(owner: str, platform: str, native: str, text: str) -> bool:
+        """Deliver one reply into the meeting chat, AS the meeting's owner.
+
+        Goes to meeting-api's INTERNAL route over the loopback tier, naming the owner explicitly,
+        rather than to the public owner-scoped route with a deployment-wide API key. The key version
+        worked only for meetings owned by whoever held that key — every other user's meeting got a
+        silent 404 — and made "who may make the bot speak here" a question of who possesses one
+        shared secret on the host. Naming the owner keeps the SAME owner check (a wrong owner still
+        404s) while authenticating the CALLER as the platform, which is what it actually is."""
+        import urllib.request
+
+        secret = os.environ.get("INTERNAL_API_SECRET", "")
+        base = (os.environ.get("VEXA_MEETING_API_URL") or "").rstrip("/")
+        if not (secret and base):
+            logger.warning("meet-chat: no internal meeting-api route configured - cannot deliver the reply")
+            return False
+        try:
+            req = urllib.request.Request(
+                f"{base}/internal/bots/{platform}/{native}/chat",
+                data=json.dumps({"user_id": owner, "text": text}).encode(), method="POST",
+                headers={"Authorization": f"Bearer {secret}", "Content-Type": "application/json"},
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                return 200 <= resp.status < 300
+        except Exception:  # noqa: BLE001 — a delivery failure is logged, never raised at the pool
+            logger.exception("meet-chat: reply delivery failed for %s/%s", platform, native)
+            return False
+
+    def _meet_chat_access(meeting_key: str) -> str:
+        """The meeting's granted grounding scope, read fresh each turn so a revoke takes effect
+        immediately. Any fault, missing key or unexpected value ⇒ transcript-only: failing open here
+        would read private notes into a room."""
+        import redis as _redis
+
+        r = _redis.from_url(redis_url, decode_responses=True)
+        return SCOPE_WORKSPACE if r.get(_meet_chat_access_key(str(meeting_key))) == SCOPE_WORKSPACE \
+            else SCOPE_TRANSCRIPT
+
+    _owner_identity_cache: dict = {}
+
+    def _meet_google_credentials(subject: str):
+        """(refresh_token, google_account_id) for a subject, from the identity tier."""
+        import urllib.request
+
+        secret = os.environ.get("INTERNAL_API_SECRET", "")
+        base = (os.environ.get("VEXA_ADMIN_API_URL") or "").rstrip("/")
+        if not (secret and base):
+            return (None, None)
+        req = urllib.request.Request(f"{base}/internal/users/{subject}/google-grant",
+                                     headers={"X-Internal-Secret": secret})
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            body = json.loads(resp.read().decode() or "{}")
+        return (body.get("refresh_token"), body.get("sub"))
+
+    _meet_resolver = None
+    if _env_flag("VEXA_GOOGLE_MEET_IDENTITY", default=False):
+        _gid = os.environ.get("GOOGLE_CLIENT_ID", "")
+        _gsecret = os.environ.get("GOOGLE_CLIENT_SECRET", "")
+        if _gid and _gsecret:
+            _meet_resolver = MeetIdentityResolver(
+                credentials=_meet_google_credentials, client_id=_gid, client_secret=_gsecret)
+        else:
+            logger.warning("VEXA_GOOGLE_MEET_IDENTITY is on but GOOGLE_CLIENT_ID/SECRET are unset - "
+                           "the in-meeting assistant cannot identify anyone")
+
+    def _meet_chat_identity(subject: str, native: str, sender: str) -> dict:
+        """Ask Google who this chat sender is. Returns the resolver's verdict, or a neutral
+        'unavailable' when Meet identity is not configured — never a match."""
+        if _meet_resolver is None:
+            return {"status": "unconfigured", "user_id": None, "is_owner": False}
+        return _meet_resolver.resolve(subject, native, sender)
+
+    def _meet_chat_owner_identity(subject: str):
+        """(name, email) for a subject, from the identity service's internal tier. Cached — a
+        meeting's owner does not change mid-call, and this sits on the path of every question."""
+        import urllib.request
+
+        key = str(subject)
+        if key in _owner_identity_cache:
+            return _owner_identity_cache[key]
+        secret = os.environ.get("INTERNAL_API_SECRET", "")
+        base = (os.environ.get("VEXA_ADMIN_API_URL") or "").rstrip("/")
+        if not (secret and base):
+            logger.warning("meet-chat: no internal identity route configured - nobody will be "
+                           "recognised as the owner")
+            return (None, None)
+        # admin-api's internal tier authenticates on X-Internal-Secret, NOT a bearer token — the
+        # meetings side uses Authorization for the same secret, so this is easy to get wrong and
+        # fails as a flat 403 that reads like a bad key rather than a wrong header.
+        req = urllib.request.Request(f"{base}/internal/users/{key}/identity",
+                                     headers={"X-Internal-Secret": secret})
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            body = json.loads(resp.read().decode() or "{}")
+        ident = (body.get("name"), body.get("email"))
+        _owner_identity_cache[key] = ident
+        return ident
+
+    def _meet_chat_anyone(meeting_key: str) -> bool:
+        """Per-MEETING 'answer everyone' grant, on top of the deployment default. Read fresh each
+        turn; any fault is False, because failing open here answers strangers."""
+        import redis as _redis
+
+        try:
+            r = _redis.from_url(redis_url, decode_responses=True)
+            return r.get(_meet_chat_anyone_key(str(meeting_key))) == "1"
+        except Exception:  # noqa: BLE001
+            logger.exception("meet-chat: anyone-grant lookup failed for %s", meeting_key)
+            return False
+
+    def _meet_chat_remember(meeting_key: str, text: str) -> None:
+        """Record the proposal just posted into a meeting, so an approval has a referent."""
+        import redis as _redis
+
+        try:
+            r = _redis.from_url(redis_url, decode_responses=True)
+            r.setex(_meet_chat_pending_key(str(meeting_key)), MEET_CHAT_PENDING_TTL_SEC, text)
+        except Exception:  # noqa: BLE001
+            logger.exception("meet-chat: could not record the pending proposal for %s", meeting_key)
+
+    def _meet_chat_pending(meeting_key: str) -> "str | None":
+        """The proposal this meeting is waiting on, or None. A fault reads as 'nothing pending' —
+        the assistant then answers the message as an ordinary question, which is the safe miss."""
+        import redis as _redis
+
+        try:
+            r = _redis.from_url(redis_url, decode_responses=True)
+            return r.get(_meet_chat_pending_key(str(meeting_key)))
+        except Exception:  # noqa: BLE001
+            logger.exception("meet-chat: pending-proposal lookup failed for %s", meeting_key)
+            return None
+
+    def _meet_chat_answered(meeting_key: str) -> None:
+        """Close the open proposal: the assistant has now put it in front of someone who replied.
+
+        Without this the proposal stays open for its whole TTL, and EVERY later question in the
+        meeting — "what time is it in Cairo?" — arrives with "you recently offered … and nobody has
+        answered yet" attached. One answer per question asked."""
+        import redis as _redis
+
+        try:
+            _redis.from_url(redis_url, decode_responses=True).delete(_meet_chat_pending_key(str(meeting_key)))
+        except Exception:  # noqa: BLE001
+            logger.exception("meet-chat: could not close the pending proposal for %s", meeting_key)
+
+    def _meet_chat_already_proposed(meeting_key: str, text: str) -> bool:
+        """Has this meeting already been asked this? Records it when it has not.
+
+        Check and record are ONE call because they are one decision: a proposal that is about to be
+        posted is a proposal that has been made. Splitting them leaves a window where two beats both
+        read 'no' and both post — which is exactly the failure being fixed."""
+        import redis as _redis
+
+        key = _meet_chat_proposed_key(str(meeting_key))
+        try:
+            r = _redis.from_url(redis_url, decode_responses=True)
+            for prior in (r.lrange(key, 0, 50) or []):
+                if is_same_proposal(prior, text):
+                    return True
+            r.rpush(key, text)
+            r.expire(key, MEET_CHAT_PROPOSED_TTL_SEC)
+            return False
+        except Exception:  # noqa: BLE001
+            logger.exception("meet-chat: duplicate-proposal check failed for %s", meeting_key)
+            return False
+
+    responder = None
+    if _env_flag("VEXA_MEET_CHAT_ENABLED", default=False):
+        responder = MeetingChatResponder(
+            run_turn=_meet_chat_turn,
+            post_reply=_meet_chat_post,
+            access=_meet_chat_access,
+            bot_name=os.environ.get("DEFAULT_BOT_NAME", "Vexa"),
+            prefix=os.environ.get("VEXA_MEET_CHAT_PREFIX", "@vexa"),
+            always=_env_flag("VEXA_MEET_CHAT_ALWAYS", default=False),
+            # Default: only the meeting's OWNER is answered. Everyone else is read and ignored.
+            anyone=_env_flag("VEXA_MEET_CHAT_ANYONE", default=False),
+            anyone_for=_meet_chat_anyone,
+            owner_identity=_meet_chat_owner_identity,
+            # Google's own answer to "which account is this?", when the deployment has the grant.
+            # It outranks every name comparison — see the responder's identity ladder.
+            meet_identity=_meet_chat_identity,
+            # Extra display names that count as the owner. Needed because Meet shows a chosen name
+            # ("Seif Ibrahim") while an account may only know an email ("seif@..."), and the match is
+            # whole-name — a first name is not an identity.
+            owner_names=[n.strip() for n in os.environ.get("VEXA_MEET_CHAT_OWNER_NAMES", "").split(",") if n.strip()],
+            # What the copilot offered and nobody has answered. The relay posts proposals directly
+            # into the room, so this is the assistant's only record of having offered anything.
+            pending_suggestion=_meet_chat_pending,
+            # Which products this meeting is about — and so which tools a turn may be given.
+            skills_for=_meet_skills_for,
+            # …and closing it once someone has answered, so the next question is not still being
+            # asked about a proposal that was already settled.
+            suggestion_answered=_meet_chat_answered,
+            min_interval_s=float(os.environ.get("VEXA_MEET_CHAT_MIN_INTERVAL_S", "5")),
+        )
+        app.state.meet_chat_responder = responder
+    # The suggestion relay lives in the composition root but needs create_app's poster, so it is
+    # published here rather than reached for — the same handshake as the responder above.
+    app.state.meet_chat_post = _meet_chat_post
+    app.state.meet_chat_remember = _meet_chat_remember
+    app.state.meet_chat_already_proposed = _meet_chat_already_proposed
+    app.state.meet_skills_for = _meet_skills_for
+    app.state.mint_skill_grant = _mint_skill_grant
+
     return app
 
 
@@ -2364,9 +3285,29 @@ def _build_production_app() -> FastAPI:
     # The in-process meetings Integration (replaces the standalone bridge container): a daemon thread
     # tails transcription_segments → fans tc:meeting:{uid} + arms the copilot dispatch on activity.
     # NOTE: no `subject=` → the watcher uses its PRE-M2 `u_live` placeholder; live-meeting dispatch (M2)
-    # must pass the real meeting owner here (see transcription_watcher.start).
+    # must pass the real meeting owner here (see transcription_watcher.start). The responder is
+    # separate: it takes the owner off the segment (invocation.v1 `ownerUserId`) and fails closed
+    # without one, so it never inherits that placeholder.
     from control_plane import transcription_watcher
-    transcription_watcher.start(settings.redis_url, dispatcher, app.state.live_meetings)
+    transcription_watcher.start(settings.redis_url, dispatcher, app.state.live_meetings,
+                                chat_responder=getattr(app.state, "meet_chat_responder", None),
+                                mint_skill_grant=getattr(app.state, "mint_skill_grant", None))
+    # The copilot's proposals → the meeting's own chat. Its own thread, because delivering a
+    # suggestion is an HTTP call and the arm loop is the sole re-arm/reap arbiter for every copilot
+    # on the deployment — the same reason the chat responder does not run there either.
+    if _env_flag("VEXA_MEET_CHAT_ENABLED", default=False):
+        _poster = getattr(app.state, "meet_chat_post", None)
+        if _poster is not None:
+            transcription_watcher.start_suggestion_relay(
+                settings.redis_url,
+                post_reply=_poster,
+                owner_for=lambda k: transcription_watcher.MEETING_OWNERS.get(str(k)),
+                remember=getattr(app.state, "meet_chat_remember", None),
+                already_proposed=getattr(app.state, "meet_chat_already_proposed", None),
+                # The enforcement half of "a meeting with no skills cannot propose": the prompt
+                # carries no product knowledge, and this drops anything that appears regardless.
+                skills_for=getattr(app.state, "meet_skills_for", None),
+            )
     return app
 
 

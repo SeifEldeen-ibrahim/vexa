@@ -1,0 +1,13 @@
+{
+  "tool": {
+    "name": "product-actions",
+    "scope": "action:create",
+    "grant": "auto",
+    "transport": "mcp",
+    "mcp_server": "product-actions"
+  },
+  "mcp": {
+    "command": "python3",
+    "args": ["/app/tools-seed/product-actions/server.py"]
+  }
+}

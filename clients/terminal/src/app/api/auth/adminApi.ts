@@ -331,3 +331,34 @@ export async function findOrCreateUserToken(
   }
   return { ok: true, user, token: minted.data.token };
 }
+
+
+/** Record the user's Google grant (refresh token + account id) on the internal tier.
+ *
+ *  This is what lets the in-meeting assistant answer "is the person typing in this chat the account
+ *  that owns the meeting?" — Meet's chat exposes a display NAME and nothing else, and two Google
+ *  accounts can carry the same one. The account id is the identity.
+ *
+ *  Best effort by design: a failure here must never block a sign-in. The user simply has no Meet
+ *  identity until their next login, and the assistant degrades to answering nobody rather than
+ *  answering the wrong person.
+ */
+export async function recordGoogleGrant(
+  userId: string | number,
+  grant: { refresh_token?: string; sub?: string; scopes?: string },
+): Promise<boolean> {
+  const url = (process.env.VEXA_ADMIN_API_URL || "").replace(/\/$/, "");
+  const secret = process.env.VEXA_INTERNAL_API_SECRET || process.env.INTERNAL_API_SECRET || "";
+  if (!url || !secret) return false;
+  try {
+    const r = await fetch(`${url}/internal/users/${userId}/google-grant`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", "X-Internal-Secret": secret },
+      body: JSON.stringify(grant),
+      cache: "no-store",
+    });
+    return r.ok;
+  } catch {
+    return false;
+  }
+}

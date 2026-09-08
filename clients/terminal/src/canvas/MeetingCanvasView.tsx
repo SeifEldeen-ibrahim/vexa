@@ -1,7 +1,8 @@
 "use client";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { CanvasActionsProvider, useActions, OPEN_ENTITY_EVENT } from "./actions";
 import { MeetingHealthBanner } from "./MeetingHealthBanner";
+import { MeetingSkills } from "./MeetingSkills";
 import { LiveTranscriptEngine, type EngineActions, type EngineEntity, type EngineSignal } from "./LiveTranscriptEngine";
 import { useMeetingNotes } from "./notes";
 import { deriveProcessingView } from "./processingView";
@@ -101,6 +102,50 @@ function MeetingCanvasBody({ meetingId }: { meetingId?: string }) {
     }
   };
 
+  // ── the in-meeting assistant's reach ────────────────────────────────────────────────────────
+  // Anyone in the meeting can address the assistant, and it answers AS the owner. By default it can
+  // only see THIS meeting's transcript, so a guest has nothing private to pull out of it. Granting
+  // the workspace also brings PAST meetings' notes into scope (the copilot writes those regardless
+  // of this setting) — which is the point, and also why it is off until deliberately turned on.
+  const [chatWorkspace, setChatWorkspace] = useState(false);
+  const [chatAnyone, setChatAnyone] = useState(false);
+  const [chatAccessBusy, setChatAccessBusy] = useState(false);
+
+  // HYDRATE from the server. Without this both switches render from `useState(false)` on every
+  // mount while the server may hold "anyone" and "workspace" — so a reloaded tab showed the
+  // OPPOSITE of the truth, and the next click sent the opposite of what the user meant. Tolerable
+  // with two switches; not once a switch decides whether a commit lands in someone's repo.
+  useEffect(() => {
+    if (!meetingId) return;
+    let live = true;
+    const q = `native_id=${encodeURIComponent(nativeId ?? meetingId)}&meeting_id=${encodeURIComponent(meetingId)}`;
+    void fetch(`/api/meeting/chat-access?${q}`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (!live || !d) return;
+        setChatWorkspace(d.scope === "workspace");
+        setChatAnyone(Boolean(d.anyone));
+      })
+      .catch(() => { /* leave the closed defaults — never render "open" on a failed read */ });
+    return () => { live = false; };
+  }, [meetingId, nativeId]);
+  // One writer for both grants. The endpoint only touches the field it is given, so flipping one
+  // never silently clears the other.
+  const setChatAccess = (patch: { workspace?: boolean; anyone?: boolean }) => {
+    if (!meetingId || chatAccessBusy) return;
+    const revert = { workspace: chatWorkspace, anyone: chatAnyone };
+    setChatAccessBusy(true);
+    if (patch.workspace !== undefined) setChatWorkspace(patch.workspace);   // optimistic
+    if (patch.anyone !== undefined) setChatAnyone(patch.anyone);
+    void fetch("/api/meeting/chat-access", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ meeting_id: meetingId, native_id: nativeId ?? meetingId, ...patch }),
+    })
+      .then((r) => { if (!r.ok) { setChatWorkspace(revert.workspace); setChatAnyone(revert.anyone); } })
+      .catch(() => { setChatWorkspace(revert.workspace); setChatAnyone(revert.anyone); })
+      .finally(() => setChatAccessBusy(false));
+  };
+
   // Completed meetings get view names (nothing is "processing" any more); live keeps the arm/disarm wording.
   const label = effectiveLive ? `Processing ${processing ? "on" : "off"}` : (processing ? "Processed" : "Raw");
 
@@ -124,6 +169,61 @@ function MeetingCanvasBody({ meetingId }: { meetingId?: string }) {
           {label}
         </button>
         <span style={{ fontSize: 11.5, color: "var(--t3)" }}>{processing ? "cleaned + copilot" : "raw transcript"}</span>
+        {/* Always shown, not gated on `effectiveLive`. The live flag goes stale (a bot the runtime
+            lost still reads as live, and a real live meeting can read as not-live for a beat), and
+            hiding this hid it exactly when someone was trying to set the meeting up — the grant was
+            unreachable and the assistant looked broken rather than restricted. It is a per-meeting
+            setting, meaningful before and during the call. */}
+        {meetingId && (
+          <>
+            <span style={{ flex: 1 }} />
+            <button
+              type="button"
+              onClick={() => setChatAccess({ anyone: !chatAnyone })}
+              aria-pressed={chatAnyone}
+              disabled={chatAccessBusy}
+              title={chatAnyone
+                ? "Anyone in the meeting can ask the assistant. It answers as you, to the whole room."
+                : "Only you are answered. Others are ignored — and if two people share your display name, nobody is answered, because a chat message cannot say which of them wrote it."}
+              style={{
+                display: "flex", alignItems: "center", gap: 7, cursor: chatAccessBusy ? "default" : "pointer",
+                background: chatAnyone ? "var(--accent)" : "transparent",
+                color: chatAnyone ? "var(--on-accent)" : "var(--t2)",
+                border: `1px solid ${chatAnyone ? "var(--accent)" : "var(--line2)"}`,
+                borderRadius: 8, padding: "4px 10px", fontSize: 12, fontWeight: 600,
+                opacity: chatAccessBusy ? 0.6 : 1,
+              }}
+            >
+              <span style={{ width: 7, height: 7, borderRadius: "50%", background: chatAnyone ? "var(--on-accent)" : "var(--t3)", flex: "none" }} />
+              {chatAnyone ? "@vexa: anyone can ask" : "@vexa: only me"}
+            </button>
+            <button
+              type="button"
+              onClick={() => setChatAccess({ workspace: !chatWorkspace })}
+              aria-pressed={chatWorkspace}
+              disabled={chatAccessBusy}
+              title={chatWorkspace
+                ? "The in-meeting assistant can read your workspace — including past meetings' notes. Anyone in the meeting can ask it."
+                : "The in-meeting assistant answers only from this meeting's transcript. Anyone in the meeting can ask it."}
+              style={{
+                display: "flex", alignItems: "center", gap: 7, cursor: chatAccessBusy ? "default" : "pointer",
+                background: chatWorkspace ? "var(--accent)" : "transparent",
+                color: chatWorkspace ? "var(--on-accent)" : "var(--t2)",
+                border: `1px solid ${chatWorkspace ? "var(--accent)" : "var(--line2)"}`,
+                borderRadius: 8, padding: "4px 10px", fontSize: 12, fontWeight: 600,
+                opacity: chatAccessBusy ? 0.6 : 1,
+              }}
+            >
+              <span style={{ width: 7, height: 7, borderRadius: "50%", background: chatWorkspace ? "var(--on-accent)" : "var(--t3)", flex: "none" }} />
+              {chatWorkspace ? "@vexa: workspace" : "@vexa: transcript only"}
+            </button>
+            {/* What this meeting is ABOUT — a third axis, orthogonal to the two grants beside it.
+                `anyone` decides who may ask; `workspace` decides how much history is in reach;
+                this decides which products @vexa has ever heard of. All three compose: a
+                transcript-only meeting with a product on can still propose and still build. */}
+            <MeetingSkills meetingId={meetingId} nativeId={nativeId} />
+          </>
+        )}
       </div>
       <MeetingHealthBanner />
       <main style={{ flex: 1, minHeight: 0, overflow: "auto" }}>

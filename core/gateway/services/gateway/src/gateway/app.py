@@ -689,6 +689,12 @@ def create_app(
     async def read_meeting_chat(platform: str, native_meeting_id: str, request: Request):
         return await _forward("GET", _meeting(f"/bots/{platform}/{native_meeting_id}/chat"), request)
 
+    # The SEND half of the meeting-chat pair. Forwarded to the same meeting-api owner boundary; it
+    # publishes an acts.v1 `chat_send` onto the meeting's bot command bus and answers 202.
+    @app.post("/bots/{platform}/{native_meeting_id}/chat")
+    async def send_chat(platform: str, native_meeting_id: str, request: Request):
+        return await _forward("POST", _meeting(f"/bots/{platform}/{native_meeting_id}/chat"), request)
+
     # ---- user self-serve webhook config (main.py:1080 set_user_webhook_proxy) ----
     # Identity OWNS the config (user.data JSONB via admin-api); the gateway is the public edge for
     # it, exactly like the meeting routes: _forward resolves the key via /internal/validate (the

@@ -38,6 +38,8 @@ from llm import (
 )
 from llm.errors import _AUTH_SIGNATURE_RE  # noqa: F401 — re-exported for the worker.worker shim
 from shared.seeding import resolve_seed_dir, seed_workspace, validate_seed
+from shared import skills as skills_registry
+from shared.tools import ToolRegistry, attach_toolbelt
 
 log = logging.getLogger("agent_api.worker")
 
@@ -298,13 +300,19 @@ def _extra_mount_paths(work: Path) -> list[Path]:
 def run_turn_over_workspace(
     work: Path, prompt: str, *, model: str | None = None, allowed_tools: list[str] | None = None,
     commit: bool = True, session_continuity: bool = True, session: str = DEFAULT_CHAT_SESSION,
+    mcp_config: str | None = None,
 ) -> Iterator[dict]:
     """One governed agent turn over the mounted workspace SET: resume from the session file, DECLARE the
     active mounts to the model, drive ``run_harness_turn`` (which commits EACH changed mount, authored by
     the dispatch principal), and persist the captured session id. A stale resume (the harness session
     expired) retries fresh once.
-    ``allowed_tools`` defaults to Read/Write/Edit; pass ``["Read"]`` for a propose-only (no-write) turn.
-    ``session`` namespaces the continuity file so chat threads stay distinct (default ``"main"``)."""
+    ``allowed_tools`` defaults to Read/Write/Edit when it is ``None``; pass ``["Read"]`` for a
+    propose-only (no-write) turn, or ``[]`` for a TOOL-LESS turn that can only answer from its prompt.
+    ``[]`` and ``None`` are deliberately different: an empty list is a caller saying "no tools", and
+    reading it as "use the defaults" is how a restricted turn silently gets Read/Write/Edit back.
+    ``session`` namespaces the continuity file so chat threads stay distinct (default ``"main"``).
+    ``mcp_config`` attaches the turn's MCP servers (``shared.tools.attach_toolbelt`` writes it); the
+    harness runs ``--strict-mcp-config``, so the turn gets those servers and no others."""
     _ensure_repo(work)
     # Resolve the harness through the worker.worker seam at call time so a test patching
     # `worker.worker.harness_factory` reaches this call site (the harness was one module historically).
@@ -319,7 +327,7 @@ def run_turn_over_workspace(
     # session_continuity=False (the meeting copilot): never read/write the shared chat session — its
     # card-extraction beats must NOT pollute the user's chat conversation memory.
     resume = _resume_id(chat_root, sess_file, harness) if session_continuity else None
-    allowed = allowed_tools or ["Read", "Write", "Edit"]
+    allowed = ["Read", "Write", "Edit"] if allowed_tools is None else list(allowed_tools)
     # Declare the mount set to the model VERBATIM (WP-A1.1) + the write-routing policy (WP-A1.2), so the
     # agent never guesses where it may read/write. Single-mount turns get no mounts preamble; the
     # kg-links rule ([[wikilinks]] render as actionable entity chips) applies to EVERY turn.
@@ -328,7 +336,7 @@ def run_turn_over_workspace(
     extras = _extra_mount_paths(work)
     turn_prompt = kg_links_preamble() + mounts_preamble(mounts) + prompt
     gen = run_harness_turn(work, turn_prompt, harness, allowed_tools=allowed, session=resume, model=model,
-                           commit=commit, author=author, extra_mounts=extras)
+                           commit=commit, author=author, extra_mounts=extras, mcp_config=mcp_config)
     first = next(gen, None)
     if resume and first is not None and first.get("type") == "done" and not first.get("ok", True):
         if sess_file.exists():
@@ -337,7 +345,7 @@ def run_turn_over_workspace(
         # harness subprocess to whatever the interpreter does with an unreferenced generator.
         close_event_stream(gen)
         gen = run_harness_turn(work, turn_prompt, harness, allowed_tools=allowed, session=None, model=model,
-                               commit=commit, author=author, extra_mounts=extras)
+                               commit=commit, author=author, extra_mounts=extras, mcp_config=mcp_config)
         first = next(gen, None)
     captured: str | None = None
     try:
@@ -352,8 +360,16 @@ def run_turn_over_workspace(
         # close does that on every interpreter. See `llm.ports.close_event_stream`.
         close_event_stream(gen)
     if captured and session_continuity:
-        sess_file.parent.mkdir(parents=True, exist_ok=True)
-        sess_file.write_text(captured)
+        # Losing continuity costs the NEXT turn its memory of this one. Failing here costs THIS turn
+        # everything: the answer has already streamed out, and an exception at this point kills the
+        # worker with the reply half-delivered and the thread gone. A read-only continuity tier is a
+        # deployment fault to fix, not a reason to lose an answer someone is waiting on.
+        try:
+            sess_file.parent.mkdir(parents=True, exist_ok=True)
+            sess_file.write_text(captured)
+        except OSError:
+            log.warning("could not persist the session id at %s — this thread starts fresh next turn",
+                        sess_file, exc_info=True)
 
 
 def start_prompt(start: dict) -> str | None:
@@ -431,6 +447,7 @@ def main() -> None:  # pragma: no cover — the container entrypoint (wired in t
     # Meeting entry functions imported function-locally to avoid an import cycle at module load
     # (worker.meeting imports the generic helpers from this module).
     from worker.meeting import (
+        SUGGESTION_STREAM,
         meeting_card_turn,
         meeting_doc_turn,
         serve_meeting,
@@ -466,6 +483,75 @@ def main() -> None:  # pragma: no cover — the container entrypoint (wired in t
         native = os.environ.get("VEXA_MEETING_ID") or row_id
         session_uid = os.environ.get("VEXA_MEETING_SESSION_UID") or native
         platform = os.environ.get("VEXA_MEETING_PLATFORM") or "google_meet"
+        _skill_grant = os.environ.get("VEXA_SKILL_GRANT") or ""
+        _skill_url = (os.environ.get("VEXA_SKILL_ACT_URL") or "").replace("/act", "/knowledge")
+
+        # ── which products this meeting is about, read FRESH each beat ──────────────────────────
+        # Not stamped into the env at dispatch: a create for a workload already running is a TOUCH
+        # that returns the live status and DISCARDS the spec, and the copilot is re-armed every 30s
+        # — so a skill toggled during a meeting would never reach the container, and the switch
+        # would only ever have worked if flipped before the copilot spawned. That is not what a live
+        # toggle means. The copilot already holds a redis client (it consumes the transcript through
+        # one), so it reads the key the control plane writes, the same way the chat assistant reads
+        # its own grants: per turn.
+        _skill_cache: dict = {}
+
+        def _skills_now() -> list:
+            """The skills enabled for this meeting right now. Never raises — a redis blip must not
+            stop transcript processing, which is the copilot's real job and is unrelated to this."""
+            try:
+                return skills_registry.known(
+                    list(client.smembers(f"meetskills:meeting:{row_id}") or []))
+            except (OSError, ValueError, RuntimeError, ConnectionError):
+                # A store that is unreachable degrades to "no products", quietly and on purpose.
+                log.warning("could not read the enabled skills; treating as none", exc_info=True)
+                return []
+            except Exception:  # noqa: BLE001
+                # Anything else here is OUR bug, not the store's. Catching it as "no products" is
+                # how a missing import shipped: the copilot degraded to silence on every beat of
+                # every meeting, and the only trace was a warning nobody reads. Still degrade — a
+                # meeting must not stop — but say plainly that this is broken.
+                log.error("the enabled-skills lookup is BROKEN; no product will ever be proposed "
+                          "until this is fixed", exc_info=True)
+                return []
+
+        def _skill_knowledge(enabled: list) -> str:
+            """The product prose for this meeting, from the CONTROL PLANE.
+
+            Not from the workspace. These files used to live at `agents/skills/*.md` inside it, where
+            the copilot merged only the enabled ones — and where a workspace-scoped assistant with a
+            Read tool could open all five regardless, so a meeting with only Partic on could be told
+            what BIAMI is. The gate was on the prompt while the text sat in a listable directory.
+
+            Any failure is NO product knowledge: quieter, never louder."""
+            if not enabled or not _skill_url or not _skill_grant:
+                return ""
+            import urllib.request
+
+            body = json.dumps({"grant": _skill_grant}).encode()
+            req = urllib.request.Request(_skill_url, data=body, method="POST",
+                                         headers={"Content-Type": "application/json"})
+            try:
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    return str((json.loads(resp.read().decode() or "{}") or {}).get("steering") or "")
+            except Exception:  # noqa: BLE001
+                log.warning("could not fetch product knowledge; continuing without it", exc_info=True)
+                return ""
+
+        def _skill_shaped(enabled: list) -> dict:
+            """The parts of the copilot's prompt that depend on which products are enabled.
+
+            Re-resolved when the set changes, cached otherwise: the files are small, but a beat is
+            not the place to re-read them for nothing."""
+            key = tuple(enabled)
+            if key not in _skill_cache:
+                c = load_meeting_config(work, enabled)
+                extra = _skill_knowledge(enabled)
+                steering = f"{c.steering.rstrip()}\n\n{extra}" if extra else c.steering
+                _skill_cache[key] = {"card_kinds": c.card_kinds, "steering": steering,
+                                     "polish_rules": c.polish_rules, "tag_rules": c.tag_rules}
+                log.info("meeting skills now: %s", ",".join(enabled) or "(none)")
+            return _skill_cache[key]
         import datetime as _dt
         date = _dt.date.today().isoformat()
         title = f"Meeting {native}"
@@ -496,9 +582,19 @@ def main() -> None:  # pragma: no cover — the container entrypoint (wired in t
             )
         serve_meeting(
             client, transcript_stream=transcript_stream, out_topic=out_topic,
+            # The products enabled for this meeting, read FRESH each beat.
+            #
+            # Not stamped into the env at dispatch: a create for a workload already running is a
+            # TOUCH that returns the live status and discards the spec, so a skill toggled during a
+            # meeting would never reach the container — and the copilot is re-armed every 30s, so
+            # every later stamp is thrown away. The toggle would only have worked if flipped before
+            # the copilot spawned, which is not what a live switch means.
+            #
+            # The copilot already holds a redis client (it consumes the transcript through one), so
+            # it reads the toggle the same way the chat assistant reads its grants: per turn, from
+            # the control plane's key. Any fault ⇒ no skills, which is quieter, never louder.
             card_turn=lambda segs: meeting_card_turn(
-                work, segs, model=cfg.model, card_kinds=cfg.card_kinds, steering=cfg.steering,
-                polish_rules=cfg.polish_rules, tag_rules=cfg.tag_rules,
+                work, segs, model=cfg.model, **_skill_shaped(_skills_now()),
             ),
             idle_ms=idle_ms, beat_segments=cfg.cadence_segments,
             doc_turn=doc_turn, enabled=cfg.enabled,
@@ -515,6 +611,13 @@ def main() -> None:  # pragma: no cover — the container entrypoint (wired in t
             cursor_key=f"proc:meeting:{row_id}:cursor",
             on_proc_note=on_proc_note,
             on_envelope=on_envelope,
+            # A copilot SUGGESTION goes to one shared stream the control plane consumes and posts
+            # into the meeting's own chat — the same carrier shape as the bot's transcript. The
+            # worker stays tool-less and networkless; the host does the talking.
+            on_suggestion=lambda card: client.xadd(SUGGESTION_STREAM, {"payload": json.dumps({
+                "meeting_id": str(session_uid), "native_id": str(native), "platform": platform,
+                "title": card.get("title") or "", "body": card.get("body") or "",
+            })}),
             # Provenance stamped on every processed-notes entry: what pipeline/provider/model
             # produced this cleaned view — persisted verbatim into the durable view's `params`
             # (meeting.data processed views) by the meeting-api db-writer (reproducibility).
@@ -526,12 +629,23 @@ def main() -> None:  # pragma: no cover — the container entrypoint (wired in t
         )
     else:  # chat / routine / event — run the entrypoint, then serve interactive messages
         # Research-capable toolset: WEB search/fetch + the workspace tools. Writes are committed by
-        # run_harness_turn. Override with VEXA_CHAT_TOOLS (comma-separated).
-        chat_tools = (os.environ.get("VEXA_CHAT_TOOLS")
-                      or "Read,Write,Edit,Glob,Grep,Bash,WebSearch,WebFetch").split(",")
+        # run_harness_turn. Override with VEXA_CHAT_TOOLS (comma-separated), or the literal `none`
+        # for a TOOL-LESS turn — one that can only answer from what its prompt already contains.
+        # `none` exists because an empty string cannot express it: `os.environ.get(...) or default`
+        # reads "" as absent and hands the turn the full toolset back.
+        _raw_tools = os.environ.get("VEXA_CHAT_TOOLS")
+        chat_tools = ([] if (_raw_tools or "").strip().lower() == "none"
+                      else (_raw_tools or "Read,Write,Edit,Glob,Grep,Bash,WebSearch,WebFetch").split(","))
+        # A name in that list may be a `tool.v1` toolbelt entry rather than a builtin: the registry
+        # attaches its MCP server and the rest pass through untouched. This is the whole reason a
+        # dispatch can hand a turn a capability the worker image knows nothing about.
+        chat_tools, mcp_config = attach_toolbelt(
+            Path(os.environ.get("VEXA_TOOLBELT_DIR") or "/tmp/vexa-toolbelt"), chat_tools,
+            ToolRegistry.from_dir(os.environ.get("VEXA_TOOLS_SEED_DIR") or "/app/tools-seed"))
         session = os.environ.get("VEXA_CHAT_SESSION") or DEFAULT_CHAT_SESSION
         serve(
             client, out_topic=out_topic, in_topic=os.environ["VEXA_UNIT_IN_TOPIC"],
-            turn=lambda prompt: run_turn_over_workspace(work, prompt, model=model, allowed_tools=chat_tools, session=session),
+            turn=lambda prompt: run_turn_over_workspace(work, prompt, model=model, allowed_tools=chat_tools,
+                                                        session=session, mcp_config=mcp_config),
             start=json.loads(os.environ.get("VEXA_START", "{}")), idle_ms=idle_ms,
         )

@@ -87,6 +87,11 @@ spec:
                   key: ADMIN_API_TOKEN
             - name: DEFAULT_BOT_NAME
               value: {{ .Values.meetingApi.defaultBotName | default "" | quote }}
+            # Gates the acts.v1 interactive family (chat_send/chat_read, speak, screen, avatar) on
+            # every spawn. OFF by default — a bot that can type into and speak in a customer's
+            # meeting is opt-in per deployment, and per request via `voice_agent_enabled`.
+            - name: VOICE_AGENT_ENABLED
+              value: {{ .Values.meetingApi.voiceAgentEnabled | default false | quote }}
             - name: TRANSCRIPTION_SERVICE_URL
               value: {{ .Values.meetingApi.transcriptionServiceUrl | default "" | quote }}
             - name: TRANSCRIPTION_SERVICE_TOKEN

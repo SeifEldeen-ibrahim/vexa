@@ -36,6 +36,8 @@ from shared import units
 logger = logging.getLogger("agent_api.tx_watch")
 
 SRC = "transcription_segments"           # the wire every bot publishes to (configurable upstream)
+SUGGESTIONS = "meet_suggestions"         # the copilot's proposals, awaiting delivery into a meeting chat
+SUGGESTION_GROUP = "agent_suggestions"   # our consumer group on it
 GROUP = "agent_copilot"                  # our consumer group — independent of the collector's
 REARM_SEC = 30.0                         # re-touch a meeting's dispatch at most this often (keep-alive)
 # Rolling TTL the arm block refreshes on the ``proc:meeting:{row}:on`` flag while segments flow —
@@ -53,6 +55,9 @@ _native: dict[str, tuple[str, str]] = {}  # numeric meeting_id → (native_meeti
 # retried on the next segment — the new meeting's row may not be visible in the gateway list yet),
 # but we throttle the refetch per meeting_id so a quiet miss doesn't hammer the gateway every segment.
 _resolve_miss_at: dict[str, float] = {}  # numeric meeting_id → last failed-resolve (monotonic)
+#: meeting ROW id → owning user id, learned from the segments the bot stamps. Read by the suggestion
+#: relay, which sees no transcript of its own.
+MEETING_OWNERS: dict[str, str] = {}
 RESOLVE_RETRY_SEC = 3.0
 # The gateway/meeting-api caps `limit` at 100 (>100 → HTTP 422 Unprocessable Entity). Asking for more
 # made EVERY resolve fail, so _resolve_native always returned None. Post-P0 the carrier no longer
@@ -213,23 +218,162 @@ def _resume_cursor(r, key: str) -> str:
     return str(cursor) if cursor else "0-0"
 
 
-def start(redis_url: str, dispatcher, live, *, subject: str = "u_live") -> threading.Thread:
+def start_suggestion_relay(redis_url: str, *, post_reply, owner_for, remember=None,
+                           already_proposed=None, skills_for=None) -> threading.Thread:
+    """Deliver the copilot's suggestions into the meeting they came from.
+
+    The copilot has no tools and no network — deliberately, since it consumes an untrusted
+    transcript — so it cannot speak into the meeting itself. It writes proposals to one shared
+    stream and this thread does the talking, which is the same split the bot's transcript already
+    uses: the sandboxed producer writes a carrier, the control plane owns every socket.
+
+    ``owner_for(meeting_key)`` supplies the account to post as; without one the suggestion is
+    DROPPED. A proposal posted under a guessed identity would be worse than one never made.
+
+    ``remember(meeting_key, text)`` records what was just proposed, so that when someone answers
+    "@vexa yes" the assistant knows what it is agreeing to. The proposal is posted into the meeting
+    by THIS thread and not by an agent turn, so without this the assistant would have no record of
+    ever having offered anything.
+
+    ``already_proposed(meeting_key, text)`` says whether this meeting has heard this proposal
+    before. A copilot beat has no memory of the beat before it, so the same need IS offered twice —
+    observed live, in two different phrasings a minute apart."""
+    t = threading.Thread(
+        target=_run_suggestions,
+        args=(redis_url, post_reply, owner_for, remember, already_proposed, skills_for),
+        daemon=True, name="tx-suggest",
+    )
+    t.start()
+    return t
+
+
+def _run_suggestions(redis_url: str, post_reply, owner_for, remember=None, already_proposed=None,
+                     skills_for=None) -> None:
+    import redis as redislib
+
+    r = redislib.from_url(redis_url, decode_responses=True, socket_keepalive=True, health_check_interval=10)
+    try:
+        r.xgroup_create(SUGGESTIONS, SUGGESTION_GROUP, id="$", mkstream=True)
+    except redislib.exceptions.ResponseError as e:
+        if "BUSYGROUP" not in str(e):
+            raise
+    # A suggestion is only worth making WHILE the thing is being discussed. One that surfaces after a
+    # restart, minutes late and out of context, is noise — so the group starts at `$` and a backlog is
+    # never replayed.
+    logger.info("suggestion relay up — consuming %s (group=%s)", SUGGESTIONS, SUGGESTION_GROUP)
+    while True:
+        try:
+            resp = r.xreadgroup(SUGGESTION_GROUP, "agent-api", {SUGGESTIONS: ">"}, count=10, block=5000)
+        except (redislib.exceptions.TimeoutError, redislib.exceptions.ConnectionError):
+            continue
+        except Exception:  # noqa: BLE001 — the relay must never die on a bad frame
+            logger.exception("suggestion xreadgroup failed; retrying")
+            time.sleep(1)
+            continue
+        for _stream, entries in resp or []:
+            for msg_id, fields in entries:
+                try:
+                    r.xack(SUGGESTIONS, SUGGESTION_GROUP, msg_id)
+                    _deliver_suggestion(json.loads(fields.get("payload") or "{}"), post_reply,
+                                        owner_for, remember, already_proposed, skills_for)
+                except Exception:  # noqa: BLE001
+                    logger.exception("bad suggestion frame; skipping")
+
+
+def _deliver_suggestion(p: dict, post_reply, owner_for, remember=None, already_proposed=None,
+                        skills_for=None) -> None:
+    key = str(p.get("meeting_id") or "")
+    native = str(p.get("native_id") or key)
+    platform = p.get("platform") or "google_meet"
+    title = (p.get("title") or "").strip()
+    body = (p.get("body") or "").strip()
+    if not key or not (title or body):
+        return
+    # The lookup is injected, so it is not this module's to trust. A registry fault must read as
+    # "no owner" — which drops the suggestion — rather than killing the relay for every meeting.
+    try:
+        owner = owner_for(key)
+    except Exception:  # noqa: BLE001
+        logger.exception("meet-suggest: owner lookup failed for meeting %s", key)
+        owner = None
+    if not owner:
+        logger.warning("meet-suggest: no owner known for meeting %s — dropping %r", key, title or body)
+        return
+    # THE MEETING MUST BE ABOUT THIS. A copilot with no product knowledge should never produce a
+    # proposal — but "should never" is a property of a prompt, and a prompt is a hope. Nothing
+    # downstream checked, so a model that invented one anyway got it posted into the room and an
+    # approval then reached a tool, for a product the owner never enabled. The gate belongs here,
+    # where it is a fact: no skills enabled ⇒ nothing is delivered, whatever the model produced.
+    if skills_for is not None:
+        try:
+            enabled = skills_for(key)
+        except Exception:  # noqa: BLE001 — a lookup fault must read as "not enabled", never as open
+            logger.exception("meet-suggest: skill lookup failed for meeting %s", key)
+            enabled = []
+        if not enabled:
+            logger.warning("meet-suggest: DROPPED a proposal for meeting %s — no product skill is "
+                           "enabled there (%r)", key, (title or body)[:70])
+            return
+
+    # ASKED ONCE. Each copilot beat proposes from a fresh transcript window with no memory of the
+    # beat before it, so a need that is still being discussed gets offered again in different words
+    # — observed live, twice a minute apart for one pipeline. Asking a room the same question twice
+    # is worse than not asking: the second one reads as the bot having missed the answer to the
+    # first. A lookup fault means "not seen before" — a duplicate is cheaper than silence.
+    if already_proposed is not None:
+        try:
+            if already_proposed(key, body or title):
+                logger.info("meet-suggest: already asked this in meeting %s — not asking twice (%r)",
+                            key, (body or title)[:70])
+                return
+        except Exception:  # noqa: BLE001
+            logger.exception("meet-suggest: duplicate check failed for %s — posting anyway", key)
+    # The proposal is posted as a QUESTION, and says how to accept it. Someone reading a meeting chat
+    # mid-conversation needs to know instantly that nothing has happened yet and what would.
+    text = body or title
+    if not text.rstrip().endswith("?"):
+        text = f"{text.rstrip().rstrip('.')}?"
+    text = f"{text} — reply \"@vexa yes\" and I'll do it."
+    try:
+        ok = post_reply(str(owner), platform, native, text)
+        logger.info("meet-suggest: %s for %s/%s — %r",
+                    "delivered" if ok else "delivery FAILED", platform, native, title or body[:60])
+    except Exception:  # noqa: BLE001
+        logger.exception("meet-suggest: delivery raised for %s/%s", platform, native)
+        return
+    # Only a proposal that actually REACHED the room is worth remembering: an approval can only
+    # follow something someone read. Recorded after delivery, and never allowed to fail the relay.
+    if ok and remember is not None:
+        try:
+            remember(key, body or title)
+        except Exception:  # noqa: BLE001
+            logger.exception("meet-suggest: could not record the pending proposal for %s", key)
+
+
+def start(redis_url: str, dispatcher, live, *, subject: str = "u_live", chat_responder=None,
+          mint_skill_grant=None) -> threading.Thread:
     """Spawn the watcher (the ARM daemon thread) and return it (tests/introspection). ``keymap``
     (numeric meeting_id → row-id routing key) is the arm thread's own state.
 
     ``subject`` is a PRE-M2 placeholder (defaults to ``u_live``): every armed copilot is attributed to
     this one subject. Live-meeting dispatch (M2) must resolve and pass the real meeting OWNER instead —
-    until then the copilot's meeting doc lands in the placeholder workspace, not the owner's."""
+    until then the copilot's meeting doc lands in the placeholder workspace, not the owner's.
+
+    ``chat_responder`` (optional) receives in-meeting chat segments. It takes the owner off the
+    SEGMENT (invocation.v1 ``ownerUserId``, stamped by the bot) rather than from ``subject``, so it
+    never inherits the placeholder above — and it must never block this thread (see ``offer``)."""
     keymap: dict[str, str] = {}
     t = threading.Thread(
-        target=_run_arm, args=(redis_url, dispatcher, live, subject, keymap),
+        target=_run_arm,
+        args=(redis_url, dispatcher, live, subject, keymap, chat_responder, mint_skill_grant),
         daemon=True, name="tx-watch",
     )
     t.start()
     return t
 
 
-def _run_arm(redis_url: str, dispatcher, live, subject: str, keymap: dict) -> None:
+def _run_arm(redis_url: str, dispatcher, live, subject: str, keymap: dict, chat_responder=None,
+             mint_skill_grant=None) -> None:
     """Inbound watch → key on the row id, register live, re-arm copilot, reap on session_end. Does NOT
     write the transcript carrier — meeting-api's collector owns ``tc:meeting:{row_id}`` (P23/P0)."""
     import redis as redislib
@@ -259,7 +403,7 @@ def _run_arm(redis_url: str, dispatcher, live, subject: str, keymap: dict) -> No
                 try:
                     r.xack(SRC, GROUP, msg_id)
                     _handle(r, dispatcher, live, subject, json.loads(fields.get("payload") or "{}"),
-                            last_arm, keymap, first_seen)
+                            last_arm, keymap, first_seen, chat_responder, mint_skill_grant)
                 except Exception:  # noqa: BLE001
                     logger.exception("bad transcription frame; skipping")
 
@@ -267,7 +411,8 @@ def _run_arm(redis_url: str, dispatcher, live, subject: str, keymap: dict) -> No
 RESOLVE_GRACE_SEC = 6.0  # how long to wait for a native id before falling back to the numeric key
 
 
-def _handle(r, dispatcher, live, subject, p, last_arm, keymap, first_seen) -> None:
+def _handle(r, dispatcher, live, subject, p, last_arm, keymap, first_seen, chat_responder=None,
+            mint_skill_grant=None) -> None:
     # P0 (cross-tenant leak fix): the TRANSCRIPT CARRIER + :on + :cursor + dispatch keys are the numeric
     # ROW id `mid` — NOT the native Meet code. The native id is NOT unique (it collides across DIFFERENT
     # users and across ONE user's re-sends of the same link), so keying transcript data by it leaked one
@@ -336,6 +481,11 @@ def _handle(r, dispatcher, live, subject, p, last_arm, keymap, first_seen) -> No
     # can't drop the meeting from the list — it reappears on the first segment. Throttle only the spawn.
     # session_uid == the ROW id `mid` too, so the copilot out-stream (unit:agent-meet-{mid}) and the
     # transcript carrier (tc:meeting:{mid}) agree — the terminal SSE reads both by the same id.
+    # Remember who owns this meeting. The suggestion relay has no transcript of its own to learn it
+    # from, and a proposal posted under a guessed identity is worse than one never made.
+    owner_seen = p.get("owner_user_id")
+    if owner_seen:
+        MEETING_OWNERS[key] = str(owner_seen)
     live.add({
         "meeting_id": key, "session_uid": key, "native_id": native, "platform": platform,
         "title": _title(platform, native), "unit_id": f"agent-meet-{key}",
@@ -344,6 +494,50 @@ def _handle(r, dispatcher, live, subject, p, last_arm, keymap, first_seen) -> No
         # proc:meeting:{row_id} which the meeting-api db-writer persists into the meeting row's data JSONB.
         "numeric_meeting_id": mid if mid.isdigit() else None,
     })
+    # ── in-meeting chat → the assistant ───────────────────────────────────────────────────────
+    # A `source:'chat'` segment is a message someone TYPED, not speech. Hand each one to the
+    # responder, which decides whether it is addressed to the bot and answers on ITS OWN pool.
+    #
+    # Two properties this branch must keep:
+    #   * O(1) on THIS thread. `_run_arm` is a SINGLE daemon serving every live meeting on the
+    #     deployment and is the sole re-arm/reap arbiter for every copilot; an agent turn run here
+    #     would stall all of them for its duration. `offer` is non-blocking by contract.
+    #   * Non-fatal. `offer` is also never-raise by contract, but a fault would abort the REST of
+    #     _handle — the live registration and the copilot re-arm below — so the chat branch must not
+    #     be able to cost this meeting its copilot.
+    if chat_responder is not None:
+        try:
+            # The OWNER rides the segment envelope (invocation.v1 `ownerUserId`, stamped by the bot).
+            # Absent ⇒ the responder refuses: answering under a placeholder subject would reply out
+            # of a workspace that belongs to nobody.
+            owner = p.get("owner_user_id")
+            for seg in (p.get("segments") or []):
+                if not isinstance(seg, dict) or seg.get("source") != "chat":
+                    continue
+                text = (seg.get("text") or "").strip()
+                if not text:
+                    continue
+                # The bot stamps `chat:email:<addr>` when the platform exposed one, else
+                # `chat:<name>`. The email is the only identity worth gating on.
+                skey = str(seg.get("speaker_key") or "")
+                sender_email = skey[len("chat:email:"):] if skey.startswith("chat:email:") else None
+                # `chat:dup:` means two people in the room share this display name, so the message
+                # cannot be attributed to either — the absence of an identity, not just a weak one.
+                ambiguous = skey.startswith("chat:dup:")
+                # `chat:uniq:` = the roster confirmed exactly one person here answers to this name.
+                # A plain `chat:<name>` means the roster was unavailable — unknown, not unique.
+                name_unique = True if skey.startswith("chat:uniq:") else (False if ambiguous else None)
+                verdict = chat_responder.offer(
+                    meeting_key=key, platform=platform, native=native, owner=owner,
+                    sender=str(seg.get("speaker") or "Someone"), text=text,
+                    sender_email=sender_email, sender_ambiguous=ambiguous,
+                    sender_name_unique=name_unique,
+                )
+                if verdict != "not-addressed":
+                    logger.info("meet-chat %s/%s: %s", platform, native, verdict)
+        except Exception:  # noqa: BLE001 — never let the chat branch cost the copilot its re-arm
+            logger.exception("meet-chat: offer branch failed for %s/%s", platform, native)
+
     # Processing is OPT-IN per meeting: only arm / keep-alive the copilot while the user has enabled it
     # (the terminal sets ``proc:meeting:{row_id}:on`` via /api/meeting/process — DESIRED STATE only;
     # ADR 0027 makes this loop the ONE dispatch arbiter). Default OFF → no copilot → no processing;
@@ -361,12 +555,14 @@ def _handle(r, dispatcher, live, subject, p, last_arm, keymap, first_seen) -> No
             r.expire(f"proc:meeting:{key}:on", PROC_FLAG_ROLLING_TTL_SEC)
         except Exception:  # noqa: BLE001 — refresh is hygiene; never block the arm
             pass
-        _arm(dispatcher, subject, key, platform, transcript_start_id=_resume_cursor(r, key),
+        _arm(dispatcher, subject, key, platform, mint_skill_grant=mint_skill_grant,
+             transcript_start_id=_resume_cursor(r, key),
              numeric_meeting_id=mid if mid.isdigit() else None, native_id=native)
 
 
 def _arm(dispatcher, subject: str, key: str, platform: str, *, transcript_start_id: str = "0-0",
-         numeric_meeting_id: str | None = None, native_id: str | None = None) -> None:
+         numeric_meeting_id: str | None = None, native_id: str | None = None,
+         mint_skill_grant=None) -> None:
     """Spawn-or-touch the meeting's copilot (keyed agent-meet-{key}, where key is the ROW id). Idempotent
     FOR REAL since ADR 0027: runtime.v1 create touches a running workload (returns its live status) and
     only spawns one that is absent/exited — before that, every re-arm force-replaced the live container
@@ -387,10 +583,34 @@ def _arm(dispatcher, subject: str, key: str, platform: str, *, transcript_start_
         # (proc:meeting:{numeric}) so a re-sent bot on the same native link never mixes/clobbers a
         # previous meeting's processed doc. An internal hint — stripped before the unit.v1 check.
         meeting_ref["numeric_meeting_id"] = str(numeric_meeting_id)
+    # The copilot's authority to fetch what its meeting is ABOUT. It reads the enabled SET from redis
+    # itself, but the product PROSE lives with the deployment and is served by the control plane —
+    # without a grant it resolves the products correctly and then has no idea what any of them IS, so
+    # it recognises nothing and proposes nothing. Observed exactly that way: the copilot healthy,
+    # tagging entities, and structurally unable to suggest.
+    #
+    # It rides inside the meeting ref, beside the other internal hints, and is stripped before the
+    # contract check like all of them.
+    if mint_skill_grant is not None:
+        try:
+            meeting_ref["skill_grant"] = mint_skill_grant(f"agent-meet-{key}", subject, key)
+        except Exception:  # noqa: BLE001 — a copilot with no product knowledge still cleans and tags
+            logger.exception("could not mint a skill grant for meeting %s", key)
+
     inv = units.make_dispatch(
         subject=subject, trigger="transcription",
         start=units.entrypoint(inline=_BRIEF),
         context={"kind": "meeting", "meeting": meeting_ref},
+        # The copilot WRITES: the meeting doc, the envelope and the running transcript file are its
+        # product, not a side effect. `transcription` derives `ro` from input-trust, which is the
+        # right default for a turn driven by an untrusted transcript — so the grant is made HERE,
+        # explicitly, where someone reading the copilot can see it.
+        #
+        # What makes it safe is not the mode but the TOOLSET: a meeting turn is dispatched with no
+        # tools at all, so the model cannot open, read or write a single file. Every write is done
+        # by worker code, to paths worker code chooses, from content the model returned as JSON.
+        # The mode governs the model; here there is no model reaching the filesystem to govern.
+        workspaces=[{"id": subject, "mode": "rw"}],
     )
     try:
         dispatcher.dispatch(inv)  # idempotent: spawns if reaped, touches if running

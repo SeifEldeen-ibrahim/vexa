@@ -1,0 +1,250 @@
+"""The dispatch's tool list, as the WORKER actually resolves it.
+
+A tool that is granted in `unit.v1` and never attached in the container is the worst kind of bug:
+every layer reports success and the assistant simply cannot do the thing. This drives the shipped
+container entrypoint (`worker.engine.main`) with the exact env agent-api stamps, and asserts on what
+reaches the turn.
+"""
+from __future__ import annotations
+
+import json
+import pathlib
+import sys
+import types
+
+import pytest
+
+import worker.engine as engine
+
+_SEED = str(pathlib.Path(__file__).resolve().parents[1] / "tools-seed")
+
+
+class _FakeRedis:
+    def __init__(self, *a, **kw):
+        pass
+
+    @staticmethod
+    def from_url(*a, **kw):
+        return _FakeRedis()
+
+
+def _run_chat_worker(monkeypatch, tmp_path, tools: str) -> dict:
+    """Boot the worker's chat branch and capture the turn it would run."""
+    monkeypatch.setitem(sys.modules, "redis", types.SimpleNamespace(from_url=_FakeRedis.from_url))
+    for k, v in {
+        "REDIS_URL": "redis://x", "VEXA_UNIT_OUT_TOPIC": "unit:1:out", "VEXA_UNIT_IN_TOPIC": "unit:1:in",
+        "VEXA_WORKSPACE_PATH": str(tmp_path / "ws"), "VEXA_CHAT_TOOLS": tools,
+        "VEXA_TOOLS_SEED_DIR": _SEED, "VEXA_TOOLBELT_DIR": str(tmp_path / "belt"),
+        "VEXA_START": "{}",
+    }.items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.delenv("VEXA_TRANSCRIPT_STREAM", raising=False)
+
+    captured: dict = {}
+
+    def fake_turn(work, prompt, **kw):
+        captured.update(kw)
+        return iter(())
+
+    def fake_serve(client, *, out_topic, in_topic, turn, start, idle_ms):
+        turn("anything")          # drive ONE turn, exactly as a chat message would
+
+    monkeypatch.setattr(engine, "run_turn_over_workspace", fake_turn)
+    monkeypatch.setattr(engine, "serve", fake_serve)
+    monkeypatch.setattr(engine, "preflight_provider_guard", lambda: None)
+    engine.main()
+    return captured
+
+
+def test_a_granted_toolbelt_name_reaches_the_turn_as_an_mcp_attachment(monkeypatch, tmp_path):
+    """The whole point: agent-api grants `product-actions` in `unit.v1.tools`, dispatch stamps it
+    into VEXA_CHAT_TOOLS, and the turn comes out holding an MCP server it can actually call."""
+    got = _run_chat_worker(monkeypatch, tmp_path, "Read,Glob,Grep,WebSearch,WebFetch,product-actions")
+    assert "mcp__product-actions" in got["allowed_tools"]
+    assert got["mcp_config"], "the turn was granted a tool with no server attached"
+    servers = json.loads(pathlib.Path(got["mcp_config"]).read_text())["mcpServers"]
+    assert "product-actions" in servers
+
+
+def test_the_builtin_grant_survives_alongside_it(monkeypatch, tmp_path):
+    got = _run_chat_worker(monkeypatch, tmp_path, "Read,Glob,Grep,WebSearch,WebFetch,product-actions")
+    assert [t for t in got["allowed_tools"] if not t.startswith("mcp__")] == \
+        ["Read", "Glob", "Grep", "WebSearch", "WebFetch"]
+    assert "Write" not in got["allowed_tools"] and "Bash" not in got["allowed_tools"]
+
+
+def test_a_turn_that_was_granted_no_toolbelt_attaches_no_server(monkeypatch, tmp_path):
+    got = _run_chat_worker(monkeypatch, tmp_path, "WebSearch,WebFetch")
+    assert got["allowed_tools"] == ["WebSearch", "WebFetch"] and got["mcp_config"] is None
+
+
+def test_a_tool_less_turn_stays_tool_less(monkeypatch, tmp_path):
+    got = _run_chat_worker(monkeypatch, tmp_path, "none")
+    assert got["allowed_tools"] == [] and got["mcp_config"] is None
+
+
+def test_the_config_is_not_written_into_the_workspace(monkeypatch, tmp_path):
+    """The meet-chat turn mounts its workspaces `:ro`. A config written there fails the turn."""
+    got = _run_chat_worker(monkeypatch, tmp_path, "Read,product-actions")
+    assert pathlib.Path(got["mcp_config"]).is_relative_to(tmp_path / "belt")
+    assert not (tmp_path / "ws" / ".claude").exists()
+
+
+if __name__ == "__main__":
+    raise SystemExit(pytest.main([__file__, "-q"]))
+
+
+# ── the copilot's suggestion sink, as the container entrypoint builds it ───────────────────
+
+def _run_meeting_worker(monkeypatch, tmp_path, enabled: "set | None" = None) -> dict:
+    """Boot the worker's MEETING branch and capture the callbacks it hands `serve_meeting`."""
+    import worker.meeting as meeting
+
+    added: list = []
+    enabled_now = {"meetskills:meeting:36": set(enabled or ())}
+    # A workspace shaped like the real seed: `suggestion` is offered in the frontmatter and NARROWED
+    # away when no product is on, so its presence is a true read-out of what the copilot resolved.
+    ws = tmp_path / "ws"
+    (ws / "agents").mkdir(parents=True, exist_ok=True)
+    (ws / "agents" / "meeting.md").write_text(
+        "---\nenabled: true\ncard_kinds: [person, company, product, suggestion]\n---\nwatch things\n")
+
+    class _Redis:
+        def xadd(self, stream, fields):
+            added.append((stream, fields))
+
+        def smembers(self, key):
+            # A WORKING store. The previous fake answered None to everything, so the copilot's
+            # skill lookup "degraded to no products" for the right reason and the test could not
+            # tell that apart from the lookup being broken — which it was, for a missing import.
+            return enabled_now.get(key, set())
+
+        def __getattr__(self, _name):        # every other redis call is a no-op here
+            return lambda *a, **kw: None
+
+    monkeypatch.setitem(sys.modules, "redis", types.SimpleNamespace(from_url=lambda *a, **kw: _Redis()))
+    for k, v in {
+        "REDIS_URL": "redis://x", "VEXA_UNIT_OUT_TOPIC": "unit:1:out", "VEXA_UNIT_IN_TOPIC": "unit:1:in",
+        "VEXA_WORKSPACE_PATH": str(tmp_path / "ws"), "VEXA_TRANSCRIPT_STREAM": "tc:meeting:36",
+        "VEXA_MEETING_NUMERIC_ID": "36", "VEXA_MEETING_ID": "svf-ddio-udq",
+        "VEXA_MEETING_SESSION_UID": "36", "VEXA_MEETING_PLATFORM": "google_meet",
+        "VEXA_START": "{}",
+    }.items():
+        monkeypatch.setenv(k, v)
+
+    captured: dict = {}
+    monkeypatch.setattr(meeting, "serve_meeting", lambda *a, **kw: captured.update(kw))
+    monkeypatch.setattr(engine, "preflight_provider_guard", lambda: None)
+    engine.main()
+    return {"kwargs": captured, "added": added}
+
+
+def test_a_suggestion_card_REACHES_the_stream():
+    """The sink is a lambda built in the container entrypoint, and a name that does not exist in
+    that scope raises only when a real meeting produces a real suggestion — where it is swallowed as
+    "suggestion sink rejected a card" and the proposal is silently lost. Call it here instead."""
+    import pytest as _pytest
+
+    mp = _pytest.MonkeyPatch()
+    try:
+        import tempfile
+
+        got = _run_meeting_worker(mp, pathlib.Path(tempfile.mkdtemp()))
+        got["kwargs"]["on_suggestion"]({"kind": "suggestion", "title": "Partic pipeline",
+                                        "body": "Shall I create a Partic pipeline?"})
+    finally:
+        mp.undo()
+
+    assert len(got["added"]) == 1
+    stream, fields = got["added"][0]
+    assert stream == "meet_suggestions"
+    payload = json.loads(fields["payload"])
+    assert payload["native_id"] == "svf-ddio-udq" and payload["platform"] == "google_meet"
+    assert payload["title"] == "Partic pipeline" and payload["body"] == "Shall I create a Partic pipeline?"
+
+
+def test_the_copilots_card_turn_can_actually_BE_CALLED():
+    """A closure built in the container entrypoint and invoked from another module is only checked
+    when a real meeting produces a real beat — and it fails there, mid-meeting, four layers from
+    anything visible. Twice now: `_skill_shaped(work, cfg, enabled)` against a one-argument
+    definition, and before that a name resolved after the line that reads it.
+
+    Capturing the kwargs proves wiring; CALLING one proves it works. This drives the card turn the
+    way `serve_meeting` does, so a signature that has drifted is a red here instead of a copilot
+    that exits(1) the first time somebody speaks."""
+    import tempfile
+
+    import pytest as _pytest
+
+    import worker.meeting as meeting
+
+    seen: dict = {}
+
+    def fake_card_turn(work, segs, **kw):
+        seen.update(kw)
+        seen["called"] = True
+        return iter(())
+
+    mp = _pytest.MonkeyPatch()
+    try:
+        # Patched BEFORE main() runs: the entrypoint imports this name function-locally, so the
+        # lambda closes over that binding and a later patch would never be seen.
+        mp.setattr(meeting, "meeting_card_turn", fake_card_turn)
+        got = _run_meeting_worker(mp, pathlib.Path(tempfile.mkdtemp()))
+        list(got["kwargs"]["card_turn"]([{"segment_id": "s1", "speaker": "Ada", "text": "hi"}]))
+    finally:
+        mp.undo()
+
+    assert seen.get("called"), "the card turn closure could not be called at all"
+    for key in ("card_kinds", "steering", "polish_rules", "tag_rules"):
+        assert key in seen, f"the card turn did not pass {key}"
+
+
+def test_the_copilot_can_actually_READ_the_enabled_skills():
+    """Shipped broken and invisible: a lost import made `_skills_now` raise a NameError, which its
+    own `except Exception` logged as "treating as none". So every beat of every meeting saw zero
+    products, no product knowledge reached the prompt, and nothing was ever proposed — while the
+    copilot went on tagging entities as if it were fine.
+
+    A fake that answers nothing cannot catch that, because "no products" is also what a healthy
+    lookup returns for a meeting with none enabled. This one answers with a product."""
+    import pytest as _pytest
+
+    import worker.meeting as meeting
+
+    seen: dict = {}
+    mp = _pytest.MonkeyPatch()
+    try:
+        import tempfile
+
+        mp.setattr(meeting, "meeting_card_turn",
+                   lambda work, segs, **kw: (seen.update(kw), iter(()))[1])
+        got = _run_meeting_worker(mp, pathlib.Path(tempfile.mkdtemp()), enabled={"partic"})
+        list(got["kwargs"]["card_turn"]([{"segment_id": "s", "speaker": "A", "text": "hi"}]))
+    finally:
+        mp.undo()
+
+    # The proof the lookup ran and resolved: `suggestion` is only a card kind when a product is on.
+    assert "suggestion" in seen.get("card_kinds", []), \
+        f"the copilot never saw the enabled product — card_kinds were {seen.get('card_kinds')}"
+
+
+def test_with_NO_product_enabled_the_copilot_cannot_propose():
+    """The other side of the same read, so the row above cannot pass by accident."""
+    import pytest as _pytest
+
+    import worker.meeting as meeting
+
+    seen: dict = {}
+    mp = _pytest.MonkeyPatch()
+    try:
+        import tempfile
+
+        mp.setattr(meeting, "meeting_card_turn",
+                   lambda work, segs, **kw: (seen.update(kw), iter(()))[1])
+        got = _run_meeting_worker(mp, pathlib.Path(tempfile.mkdtemp()), enabled=set())
+        list(got["kwargs"]["card_turn"]([{"segment_id": "s", "speaker": "A", "text": "hi"}]))
+    finally:
+        mp.undo()
+
+    assert "suggestion" not in seen.get("card_kinds", [])

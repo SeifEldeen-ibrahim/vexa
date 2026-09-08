@@ -433,3 +433,132 @@ def test_arm_omits_numeric_meeting_id_when_key_is_not_numeric(monkeypatch):
     assert meeting["meeting_id"] == "sess-uid-fallback"    # keyed on the (non-numeric) uid fallback
     assert "numeric_meeting_id" not in meeting            # no row id → the durable-proc hint is omitted
     assert live.by_uid["sess-uid-fallback"]["numeric_meeting_id"] is None
+
+
+def test_the_copilot_is_granted_WRITE_to_the_workspace_it_authors_into(monkeypatch):
+    """The copilot's meeting doc, envelope and running transcript file are its PRODUCT — it is a
+    writer, not a reader. `transcription` derives `ro` from input-trust, so the grant has to be made
+    explicitly at the dispatch or every write fails with `Read-only file system` deep inside a beat,
+    where it is caught and logged and the meeting simply produces nothing.
+
+    What makes it safe is the toolset, not the mode: a meeting turn carries no tools, so no model
+    ever reaches the filesystem. Every write is worker code, to paths worker code chooses."""
+    _reset_module_caches()
+    monkeypatch.setattr(w, "_resolve_native", lambda mid: ("aaa-aaaa-aaa", "google_meet"))
+
+    r, disp, live = _FakeRedis(), _FakeDispatcher(), _FakeLive()
+    r.set("proc:meeting:42:on", "1")
+    w._handle(r, disp, live, "u_live", _payload("42"), *_fresh_state())
+
+    assert disp.dispatched[0]["workspaces"] == [{"id": "u_live", "mode": "rw"}]
+
+
+def test_the_copilot_turn_is_granted_NO_tools(monkeypatch):
+    """The other half of the pair above. It consumes an untrusted transcript, so it gets write access
+    and no way for the model to use it — an empty toolbelt, which the worker reads as tool-less."""
+    _reset_module_caches()
+    monkeypatch.setattr(w, "_resolve_native", lambda mid: ("aaa-aaaa-aaa", "google_meet"))
+
+    r, disp, live = _FakeRedis(), _FakeDispatcher(), _FakeLive()
+    r.set("proc:meeting:42:on", "1")
+    w._handle(r, disp, live, "u_live", _payload("42"), *_fresh_state())
+
+    assert not disp.dispatched[0].get("tools")
+
+
+def test_the_copilot_is_given_a_grant_so_it_can_LEARN_what_its_products_are(monkeypatch):
+    """The copilot reads the enabled SET from redis itself, but the product PROSE lives with the
+    deployment and is served by the control plane. Without a grant it resolves the products
+    correctly and then has no idea what any of them IS — so it recognises nothing and proposes
+    nothing, while cleaning and tagging perfectly and looking healthy. Observed exactly that way in
+    a live meeting: partic enabled, processing on, and no proposal possible."""
+    _reset_module_caches()
+    monkeypatch.setattr(w, "_resolve_native", lambda mid: ("aaa-aaaa-aaa", "google_meet"))
+
+    r, disp, live = _FakeRedis(), _FakeDispatcher(), _FakeLive()
+    r.set("proc:meeting:42:on", "1")
+    minted: list = []
+
+    def mint(unit, subject, meeting):
+        minted.append((unit, subject, meeting))
+        return "grant-abc"
+
+    w._handle(r, disp, live, "u_live", _payload("42"), *_fresh_state(), None, mint)
+
+    assert minted == [("agent-meet-42", "u_live", "42")]
+    assert disp.dispatched[0]["context"]["meeting"]["skill_grant"] == "grant-abc"
+
+
+def test_a_failing_minter_still_arms_the_copilot(monkeypatch):
+    """A copilot with no product knowledge still cleans the transcript and tags entities. Losing
+    that is worse than losing proposals."""
+    _reset_module_caches()
+    monkeypatch.setattr(w, "_resolve_native", lambda mid: ("aaa-aaaa-aaa", "google_meet"))
+
+    def boom(*_a):
+        raise RuntimeError("redis gone")
+
+    r, disp, live = _FakeRedis(), _FakeDispatcher(), _FakeLive()
+    r.set("proc:meeting:42:on", "1")
+    w._handle(r, disp, live, "u_live", _payload("42"), *_fresh_state(), None, boom)
+
+    assert disp.dispatched, "a minting fault stopped the copilot arming at all"
+    assert "skill_grant" not in disp.dispatched[0]["context"]["meeting"]
+
+
+def test_with_no_minter_wired_the_copilot_arms_exactly_as_before(monkeypatch):
+    _reset_module_caches()
+    monkeypatch.setattr(w, "_resolve_native", lambda mid: ("aaa-aaaa-aaa", "google_meet"))
+    r, disp, live = _FakeRedis(), _FakeDispatcher(), _FakeLive()
+    r.set("proc:meeting:42:on", "1")
+    w._handle(r, disp, live, "u_live", _payload("42"), *_fresh_state())
+    assert disp.dispatched and "skill_grant" not in disp.dispatched[0]["context"]["meeting"]
+
+
+def test_the_ARM_LOOP_passes_the_minter_through_to_the_dispatch(monkeypatch):
+    """The tests above call `_handle` directly, so they proved the minter WORKS and said nothing
+    about whether the loop hands it over. It did not: the real call site spans two lines and the
+    edit that added the argument matched a one-line shape, so the copilot spawned with no grant and
+    could not learn what its products are — every check green, the thing still broken in the
+    deployment.
+
+    This drives the loop the way the daemon thread does, so a dropped argument is a red here."""
+    _reset_module_caches()
+    monkeypatch.setattr(w, "_resolve_native", lambda mid: ("aaa-aaaa-aaa", "google_meet"))
+
+    r, disp, live = _FakeRedis(), _FakeDispatcher(), _FakeLive()
+    r.set("proc:meeting:42:on", "1")
+    r.streams["transcription_segments"] = [{"payload": json.dumps(_payload("42"))}]
+    minted: list = []
+
+    class _OneShot(_FakeRedis):
+        """Serves the arm loop exactly one batch, then stops it."""
+        def __init__(self, inner):
+            self.__dict__.update(inner.__dict__)
+            self._served = False
+
+        def xreadgroup(self, *_a, **_kw):
+            if self._served:
+                raise KeyboardInterrupt          # ends the loop deterministically
+            self._served = True
+            return [("transcription_segments", [("1-1", {"payload": json.dumps(_payload("42"))})])]
+
+        def xgroup_create(self, *_a, **_kw):
+            return None
+
+        def xack(self, *_a, **_kw):
+            return None
+
+    fake = _OneShot(r)
+    monkeypatch.setattr(w, "_redis_client", lambda url: fake, raising=False)
+    import redis as _redislib
+    monkeypatch.setattr(_redislib, "from_url", lambda *a, **kw: fake)
+
+    try:
+        w._run_arm("redis://x", disp, live, "u_live", {}, None,
+                   lambda unit, subject, meeting: minted.append((unit, subject, meeting)) or "g")
+    except KeyboardInterrupt:
+        pass
+
+    assert minted, "the arm loop never handed the minter to _handle"
+    assert disp.dispatched[0]["context"]["meeting"]["skill_grant"] == "g"

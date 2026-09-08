@@ -96,3 +96,36 @@ def apply_tool_grant(
     mcp_path = ws / ".claude" / "mcp.json"
     mcp_path.write_text(json.dumps(grant.mcp_config()))
     return allowed, str(mcp_path)
+
+
+def attach_toolbelt(
+    where: Path, tools: Iterable[str], registry: Optional[ToolRegistry]
+) -> "tuple[list[str], Optional[str]]":
+    """A turn's tool list → (``--allowedTools``, an injected ``.mcp.json`` path or None).
+
+    Two kinds of name live in one list, and this is where they separate. A name the registry knows is
+    a ``tool.v1`` toolbelt entry: it attaches its MCP server and enters the allow-set as
+    ``mcp__<server>``. Every other name is a builtin harness tool (``Read``, ``WebSearch``, …) and
+    passes through verbatim.
+
+    The caller's list is the WHOLE set — nothing is added. A turn handed three read-only tools does
+    not acquire a fourth here, which is what lets an untrusted surface (a question typed in a
+    meeting's own chat) name its tools exactly and get exactly those.
+
+    ``where`` is a WRITABLE directory for the generated config — deliberately not the workspace: a
+    turn that mounts its workspaces read-only is precisely the one that needs tools, and writing the
+    config into a ``:ro`` bind fails. The file holds a launch spec and no credential.
+    """
+    names = list(tools)
+    known = set(registry.names()) if registry is not None else set()
+    allowed = [n for n in names if n not in known]
+    if registry is None or not names:
+        return allowed, None
+    grant = registry.resolve([n for n in names if n in known])
+    allowed += grant.allowed_tools
+    if not grant.has_mcp:
+        return allowed, None
+    where.mkdir(parents=True, exist_ok=True)
+    mcp_path = where / "mcp.json"
+    mcp_path.write_text(json.dumps(grant.mcp_config()))
+    return allowed, str(mcp_path)

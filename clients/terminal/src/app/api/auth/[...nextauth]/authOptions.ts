@@ -13,9 +13,15 @@ import { type AuthOptions } from "next-auth";
 import GoogleProvider from "next-auth/providers/google";
 import AzureADProvider from "next-auth/providers/azure-ad";
 import { cookies } from "next/headers";
-import { AUTH_COOKIE, USER_INFO_COOKIE, findOrCreateUserToken } from "../adminApi";
+import { AUTH_COOKIE, USER_INFO_COOKIE, findOrCreateUserToken, recordGoogleGrant } from "../adminApi";
 
 const isGoogleEnabled = () => !!(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET);
+/** Ask Google, at sign-in, for the one extra read-only scope the in-meeting assistant needs to tell
+ *  WHICH ACCOUNT typed a chat message. Off by default: it adds a line to the consent screen and
+ *  forces `prompt=consent`, so a deployment that does not use the in-meeting assistant should not
+ *  pay for it. */
+const googleMeetIdentityEnabled = () =>
+  (process.env.VEXA_GOOGLE_MEET_IDENTITY || "").trim().toLowerCase() === "true";
 const isMicrosoftEnabled = () =>
   !!(process.env.MICROSOFT_CLIENT_ID && process.env.MICROSOFT_CLIENT_SECRET);
 
@@ -38,7 +44,22 @@ export const authOptions: AuthOptions = {
           GoogleProvider({
             clientId: process.env.GOOGLE_CLIENT_ID!,
             clientSecret: process.env.GOOGLE_CLIENT_SECRET!,
-            authorization: { params: { prompt: "select_account" } },
+            authorization: {
+              params: {
+                prompt: googleMeetIdentityEnabled() ? "consent select_account" : "select_account",
+                // A refresh token is issued ONCE, on a consent-granting authorization — hence
+                // `prompt=consent` above. Without both of these a re-login returns an access token
+                // that expires in an hour and no way to renew it.
+                access_type: googleMeetIdentityEnabled() ? "offline" : "online",
+                // Read-only, and only about meeting spaces the user can already see: it grants no
+                // ability to join, change or record anything. It is what lets the in-meeting
+                // assistant tell WHICH ACCOUNT typed a chat message, since Meet's chat carries only
+                // a display name and two accounts can share one.
+                scope: googleMeetIdentityEnabled()
+                  ? "openid email profile https://www.googleapis.com/auth/meetings.space.readonly"
+                  : "openid email profile",
+              },
+            },
           }),
         ]
       : []),
@@ -63,7 +84,7 @@ export const authOptions: AuthOptions = {
   callbacks: {
     /** The load-bearing step: turn a verified OAuth identity into the terminal's `vexa-token` +
      *  `vexa-user-info` cookies, reusing the admin-api find-or-create+mint flow. Deny on any failure. */
-    async signIn({ user, account }) {
+    async signIn({ user, account, profile }) {
       const provider = account?.provider;
       if ((provider !== "google" && provider !== "microsoft") || !user.email) return false;
 
@@ -72,6 +93,26 @@ export const authOptions: AuthOptions = {
         // eslint-disable-next-line no-console
         console.error(`[terminal-auth] ${provider} sign-in failed for ${user.email}: ${result.error}`);
         return false;
+      }
+
+      // Record the Google grant, if this sign-in carried one. BEST EFFORT and deliberately after
+      // the user exists: a failure here must never cost someone their login. Without it the
+      // in-meeting assistant simply cannot identify anyone and answers nobody — which is the safe
+      // direction to fail in.
+      if (provider === "google" && googleMeetIdentityEnabled() && result.user?.id) {
+        const sub = (profile as { sub?: string } | undefined)?.sub;
+        if (account?.refresh_token || sub) {
+          const recorded = await recordGoogleGrant(result.user.id, {
+            refresh_token: account?.refresh_token,
+            sub,
+            scopes: account?.scope,
+          });
+          if (!recorded) {
+            // eslint-disable-next-line no-console
+            console.warn(`[terminal-auth] could not record the Google grant for ${user.email} — ` +
+              "the in-meeting assistant will not be able to identify this user");
+          }
+        }
       }
 
       const opts = {

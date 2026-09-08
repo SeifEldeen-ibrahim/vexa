@@ -196,10 +196,27 @@ export function buildProcessedNotes(
     if (note) notes.push(note);
   });
 
-  // Processed notes that never matched a live segment still render, in arrival order.
+  // Processed notes that never matched a live segment still render, in first-arrival order — ONCE
+  // each, and as their LATEST version.
+  //
+  // The copilot re-emits a note under the SAME id as it refines it (up to three passes), so the
+  // arriving list holds several copies of one line: a real meeting delivered 58 notes carrying 16
+  // distinct ids. The loop above is immune — it reads through a Map, which also means it renders
+  // the newest copy — but this one walked the raw list, so every copy of an unmatched note became
+  // its own line and the page showed the transcript two to four times over.
+  //
+  // Position comes from where the line FIRST appeared (a refinement is the same utterance, not a
+  // later one); the text comes from the newest copy, matching what a matched note already does.
   for (const note of processed) {
-    if (note.id && consumed.has(note.id)) continue;
-    const rendered = processedMeetingNote(note, entities, notes.length);
+    if (!note.id) {
+      const rendered = processedMeetingNote(note, entities, notes.length);
+      if (rendered) notes.push(rendered);      // nothing to key on; it stands alone
+      continue;
+    }
+    if (consumed.has(note.id)) continue;
+    consumed.add(note.id);
+    const latest = processedById.get(note.id) ?? note;
+    const rendered = processedMeetingNote(latest, entities, notes.length);
     if (rendered) notes.push(rendered);
   }
   return notes;

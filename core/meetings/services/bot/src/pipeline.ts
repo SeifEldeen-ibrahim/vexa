@@ -37,7 +37,14 @@ import {
   type TransportEvent,
   type TurnSourceObservation,
 } from '@vexa/mixed-pipeline';
-import { TranscriptionClient, type TranscriptionResult } from '@vexa/transcribe-whisper';
+import {
+  TranscriptionClient,
+  buildSttPrompt,
+  isVocabularyEcho,
+  parseVocabulary,
+  vocabularyPrompt,
+  type TranscriptionResult,
+} from '@vexa/transcribe-whisper';
 import { isMixedLanePlatform, isPerTrackLanePlatform, type Invocation, type Platform } from './config.js';
 import type { TranscriptSegment } from './contracts.js';
 import type { Pipeline, TranscriptSink } from './ports.js';
@@ -410,7 +417,7 @@ function createMixedBotPipeline(
 /** Build the real STT transcribe closure from invocation.v1 — language baked into the call so
  *  the lane never knows about config. transcribeEnabled=false ⇒ a no-op transcribe (the engine
  *  still runs turn gating but emits empty text; recording-only meetings need no STT). */
-export function createTranscribe(inv: Invocation): Transcribe {
+export function createTranscribe(inv: Invocation, env: NodeJS.ProcessEnv = process.env): Transcribe {
   if (inv.transcribeEnabled === false || !inv.transcriptionServiceUrl) {
     return async () => ({ text: '', language: inv.language ?? 'en', duration: 0, segments: [] });
   }
@@ -420,7 +427,22 @@ export function createTranscribe(inv: Invocation): Transcribe {
     model: inv.transcriptionModel ?? undefined,
   });
   const language = inv.language ?? undefined;
-  return (pcm, prompt) => client.transcribe(pcm, language, prompt);
+  // The names this deployment says out loud, biasing every window (see BOT_STT_VOCABULARY). It is
+  // applied HERE, at the one place every lane's audio leaves for the service, so no lane has to know
+  // about it and none can forget it. Empty ⇒ the prompt is exactly the conversation, as before.
+  const terms = parseVocabulary(env.BOT_STT_VOCABULARY);
+  const vocabulary = vocabularyPrompt(terms);
+  return async (pcm, prompt) => {
+    const r = await client.transcribe(pcm, language, buildSttPrompt(vocabulary, prompt));
+    // Conditioning cuts both ways: on a window with little speech in it, the prompt is the
+    // strongest signal present and the model returns THAT. Measured on a real tape — a 1.8-second
+    // near-silent window answered with the name list verbatim. Publishing it would put a fabricated
+    // line in the meeting under a real speaker's name, so the window is reported as silent instead.
+    if (terms.length && isVocabularyEcho(r.text, terms)) {
+      return { ...r, text: '', segments: [] };
+    }
+    return r;
+  };
 }
 
 /**

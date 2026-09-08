@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from pathlib import Path
 import threading
 import time
 from typing import Optional
@@ -206,6 +207,123 @@ def _worker_cwd(root: str, subject: str, mounts: list[dict]) -> str:
     return normal["path"] if normal else f"{root}/{subject}"
 
 
+def _skill_grant_of(invocation: dict) -> str:
+    """This turn's authority to ask what its meeting is about, from wherever it rides.
+
+    A chat turn carries it on `context`; the copilot carries it inside `context.meeting`, beside the
+    other internal meeting hints. Both are stripped before the contract check."""
+    ctx = invocation.get("context") or {}
+    if not isinstance(ctx, dict):
+        return ""
+    direct = ctx.get("skill_grant")
+    if direct:
+        return str(direct)
+    meeting = ctx.get("meeting")
+    return str((meeting or {}).get("skill_grant") or "") if isinstance(meeting, dict) else ""
+
+
+def _reachable(mounts: list[dict]) -> list[dict]:
+    """Drop mounts whose directory is gone, LOUDLY.
+
+    A path that does not exist takes the whole dispatch down rather than just itself: the backend
+    cannot bind it, `docker start` answers 404, and EVERY turn for that subject fails — including
+    the ones that had nothing to do with the missing workspace. Seen for real, from a directory
+    removed outside the app while its entry stayed in the active set; the assistant went silent in
+    a live meeting and the reason was four layers away, in a runtime log.
+
+    One unreachable workspace should cost that workspace, not the assistant. Only genuine absence
+    counts — an empty or unreadable directory still mounts, because "I cannot see inside it" is a
+    different fault from "it is not there", and hiding the first would hide a real problem.
+
+    Scoped to ATTACHED extras. The private baseline, `_system` and `_global` are created on demand by
+    the stack that mounts them, so "not there yet" is their normal state before a first turn and
+    dropping one would break the dispatch it was meant to protect. An attached workspace is different:
+    it exists because a clone put it there, so its absence is a fact about the world, not a step that
+    has not happened yet.
+
+    Applied HERE and not in `build_mount_set`, which is a pure composer: what a mount SET should be
+    is a different question from which of its members this machine can currently bind."""
+    out: list[dict] = []
+    for m in mounts:
+        path = str(m.get("path") or "")
+        created_on_demand = bool(m.get("primary")) or str(m.get("role")) in ("system", "global")
+        if path and not created_on_demand and not Path(path).exists():
+            logger.warning("mount %r (%s) no longer exists — dropping it from this dispatch",
+                           m.get("slug"), path)
+            continue
+        out.append(m)
+    return out
+
+
+def _apply_granted_modes(mounts: list[dict], granted: list[dict],
+                         subject: "str | None" = None) -> list[dict]:
+    """Downgrade each mount to read-only where the dispatch granted ``mode: "ro"``.
+
+    A grant is ``{"id": <subject>, "mode": …}`` — ``units.make_dispatch`` defaults it to the SUBJECT,
+    not to a workspace name. The mount it has to be matched against does NOT carry that id: its
+    ``slug`` is the workspace's own name (``"seed"``, a renamed workspace, a shared slug) and the
+    subject appears only in the PATH::
+
+        grant  {"id": "6", "mode": "ro"}
+        mount  {"slug": "seed", "path": "/workspaces/6", "role": "private", "write": true}
+
+    So matching on ``slug`` alone silently narrows nothing, which is how the first version of this
+    function passed its unit test and still let an untrusted turn write. Match on the slug OR on the
+    path's owning segment, and verify against a mount set captured from a real dispatch rather than
+    an invented one.
+
+    The platform's own ``_system`` tier is NOT narrowed. A grant says what the turn may change in the
+    SUBJECT'S CONTENT; ``/workspaces/.system/<subject>`` is not content — it is where worker code keeps
+    the thread's continuity file, and no model tool addresses it. Narrowing it bought nothing and cost
+    the turn: a live meeting-chat answer streamed out and then the worker died writing
+    ``sessions/meet-google_meet-36.session`` onto a read-only mount, taking the thread with it.
+
+    This seam may only ever REMOVE write, never add it, so a tier the stack built read-only stays
+    read-only. A malformed grant leaves the stack untouched — dropping a turn's workspaces on a bad
+    shape is its own failure — and the caller's trigger/tool gates remain the backstop."""
+    try:
+        ro = {str(g.get("id")) for g in granted
+              if isinstance(g, dict) and str(g.get("mode", "")).lower() == "ro"}
+    except Exception:  # noqa: BLE001 — a malformed grant must not break the dispatch
+        return mounts
+    if not ro:
+        return mounts
+
+    # A grant keyed on the SUBJECT is a statement about the whole turn, not about one workspace.
+    # `units.make_dispatch` defaults the grant list to `[{"id": subject, ...}]`, so "the subject is
+    # granted ro" means "this turn acts read-only" — and every mount the dispatch materializes is
+    # reachable by it. Matching that grant per-workspace narrowed ONLY the baseline (whose path ends
+    # in the subject) and left every other mount read-write:
+    #
+    #     seed              /workspaces/6                       ro    <- matched
+    #     vibe-pipe-a1b2c3  /workspaces/.attached/6/vibe-pipe…   RW    <- missed
+    #     team-xyz          /shared-store/team-xyz               RW    <- missed, and not even theirs
+    #
+    # So an attached repo or a workspace shared with this subject stayed WRITABLE to a turn the
+    # caller declared read-only — the same defect as the incident above, fixed then for the baseline
+    # only. A subject-level `ro` now narrows every mount in the set.
+    subject_ro = bool(ro & {str(subject or "")}) if subject else False
+
+    def owns(mount: dict) -> bool:
+        if str(mount.get("role")) == "system":
+            return False                       # the platform's continuity tier — see above
+        if subject_ro:
+            return True                        # a turn-level grant covers the whole set
+        if str(mount.get("slug")) in ro:
+            return True
+        # The owning segment of the mount path: /workspaces/6 -> "6";
+        # /workspaces/.system/6 -> "6". Both are the subject's own stack.
+        parts = [p for p in str(mount.get("path") or "").split("/") if p]
+        return bool(parts) and parts[-1] in ro
+
+    out: list[dict] = []
+    for m in mounts:
+        if m.get("write") and owns(m):
+            m = {**m, "write": False}
+        out.append(m)
+    return out
+
+
 def build_unit_env(settings: Settings, invocation: dict, *, unit_id: str, token: str,
                    memberships: Optional[list[dict]] = None,
                    model_config: Optional[dict] = None) -> dict[str, str]:
@@ -220,6 +338,19 @@ def build_unit_env(settings: Settings, invocation: dict, *, unit_id: str, token:
     # The whole store root is already bound by the runtime, so this is a WORKER-FACING contract (the paths
     # + roles the turn respects), not a per-mount bind — it generalizes uniformly across all three backends.
     mounts = build_mount_set(settings, subject, memberships)
+    # The GRANT on the invocation is authoritative over the rebuilt stack.
+    #
+    # build_mount_set re-derives the active set from the workspace store and stamps `write: True` on
+    # the private baseline unconditionally, which silently discarded a caller's `mode: "ro"` grant:
+    # `unit.v1` said read-only, `VEXA_WORKSPACES` said read-only, and `VEXA_MOUNTS` — the list the
+    # worker actually materializes — said read-write. Proved live: a turn dispatched `ro` from an
+    # untrusted input surface (a question typed in a meeting's own chat, by anyone in the room)
+    # created and COMMITTED a file in the owner's private workspace.
+    #
+    # A grant can only ever REMOVE write here, never add it: a workspace the stack built read-only
+    # (the platform `_global` tier) stays read-only whatever the invocation asks for.
+    mounts = _apply_granted_modes(mounts, invocation.get("workspaces") or [], subject)
+    mounts = _reachable(mounts)
     env = {
         "VEXA_OWNER": subject,                                    # quota + cred-brokerage axis = the person
         "VEXA_LAUNCHER": identity["launcher"],
@@ -235,6 +366,22 @@ def build_unit_env(settings: Settings, invocation: dict, *, unit_id: str, token:
         "VEXA_WORKSPACE_MOUNT_TARGET": root,                      # where the Runtime binds it in the container
         "VEXA_WORKSPACE_PATH": _worker_cwd(root, subject, mounts),  # the worker's cwd — the primary baseline, or (if it's switched off) the first active normal workspace
         "VEXA_MOUNTS": json.dumps(mounts),                       # the ordered active mount set [{slug,path,role,write,primary}]
+        # The turn's TOOL SET. `unit.v1` carries `tools`; the worker reads VEXA_CHAT_TOOLS. Absent ⇒
+        # the worker's research-capable default. The literal `none` is a TOOL-LESS turn: it cannot
+        # open a file at all, which is the only reliable way to stop a turn reading private material
+        # ALOUD into a room — read-only mounts stop writes, not exfiltration.
+        **({"VEXA_CHAT_TOOLS": ",".join(invocation["tools"])} if invocation.get("tools") else {}),
+        # The turn's authority to act on a product, and which products. Minted by the caller and
+        # resolved server-side — the worker carries a reference, never the GitHub credential itself
+        # (the harness passes its whole env to the CLI and to the MCP server it spawns, and an
+        # ordinary chat turn has Bash: a token here is a token the model can print).
+        # Carried either on the context (a chat turn) or inside the meeting ref (the copilot, whose
+        # context.kind is "meeting" and whose every other hint lives there too).
+        **({"VEXA_SKILL_GRANT": str(_skill_grant_of(invocation))}
+           if _skill_grant_of(invocation) else {}),
+        **({"VEXA_SKILL_TOOLS": str((invocation.get("context") or {}).get("skill_tools"))}
+           if (invocation.get("context") or {}).get("skill_tools") else {}),
+        **({"VEXA_SKILL_ACT_URL": settings.skill_act_url} if settings.skill_act_url else {}),
         "VEXA_WORKSPACE_STORE_URL": settings.workspace_store_url,
         "REDIS_URL": settings.redis_url,
     }
@@ -337,7 +484,14 @@ def build_unit_env(settings: Settings, invocation: dict, *, unit_id: str, token:
 # DIFFERENT tenant on the same link) can never clobber/read another meeting's data. ``native_id`` is
 # the human-readable Meet code carried for DISPLAY only (the kg doc name / title); the routing
 # ``meeting_id`` is the row id. Both are agent-api internal — the sealed MeetingRef forbids them.
-_INTERNAL_MEETING_HINTS = frozenset({"transcript_start_id", "numeric_meeting_id", "native_id"})
+_INTERNAL_MEETING_HINTS = frozenset({"transcript_start_id", "numeric_meeting_id", "native_id",
+                                     "skill_grant"})
+
+#: Internal CONTEXT hints — carried on the in-memory dispatch for ``build_unit_env`` to read, and
+#: stripped before the contract check like every other hint here. ``unit.v1``'s context is
+#: additionalProperties:false, and a sealed contract is not something to widen for a routing value:
+#: a new field would also make every worker older than the control plane reject its own config.
+_INTERNAL_CONTEXT_HINTS = frozenset({"session", "skill_grant", "skill_tools"})
 
 
 def _without_chat_session(invocation: dict) -> dict:
@@ -351,7 +505,8 @@ def _without_chat_session(invocation: dict) -> dict:
     ctx_dict = ctx if isinstance(ctx, dict) else None
     meeting = ctx_dict.get("meeting") if ctx_dict and ctx_dict.get("kind") == "meeting" else None
     needs_clean = has_principal or (ctx_dict is not None and (
-        "session" in ctx_dict or (isinstance(meeting, dict) and bool(_INTERNAL_MEETING_HINTS & meeting.keys()))
+        bool(_INTERNAL_CONTEXT_HINTS & ctx_dict.keys())
+        or (isinstance(meeting, dict) and bool(_INTERNAL_MEETING_HINTS & meeting.keys()))
     ))
     if not needs_clean:
         return invocation
@@ -359,7 +514,7 @@ def _without_chat_session(invocation: dict) -> dict:
     if has_principal:
         clean["identity"] = {k: v for k, v in identity.items() if k != "principal"}
     if ctx_dict is not None:
-        clean_ctx = {k: v for k, v in ctx_dict.items() if k != "session"}
+        clean_ctx = {k: v for k, v in ctx_dict.items() if k not in _INTERNAL_CONTEXT_HINTS}
         if isinstance(meeting, dict) and (_INTERNAL_MEETING_HINTS & meeting.keys()):
             clean_ctx["meeting"] = {k: v for k, v in meeting.items() if k not in _INTERNAL_MEETING_HINTS}
         clean["context"] = clean_ctx

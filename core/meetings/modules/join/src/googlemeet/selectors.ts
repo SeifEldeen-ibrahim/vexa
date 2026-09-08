@@ -83,6 +83,28 @@ export const googleConsentPromptIndicators: string[] = [
   '[role="alertdialog"]:has-text("taking notes")',
 ];
 
+/** The button that ACCEPTS Google's Gemini note-taking consent, inside that dialog.
+ *
+ *  Scoped to the dialog on purpose. A bare `button:has-text("Join now")` would match the ordinary
+ *  pre-join button and click the bot into a call it was not consenting to; the whole point of this
+ *  list is that it only ever fires on the consent gate. Ordered most- to least-specific, and the
+ *  caller stops at the first VISIBLE one.
+ */
+export const googleConsentAcceptButtons: string[] = [
+  '[role="dialog"] button:has-text("Got it")',
+  '[role="alertdialog"] button:has-text("Got it")',
+  '[role="dialog"] button:has-text("Accept")',
+  '[role="alertdialog"] button:has-text("Accept")',
+  '[role="dialog"] button:has-text("I agree")',
+  '[role="alertdialog"] button:has-text("I agree")',
+  '[role="dialog"] button:has-text("Continue")',
+  '[role="alertdialog"] button:has-text("Continue")',
+  '[role="dialog"] button:has-text("Join now")',
+  '[role="alertdialog"] button:has-text("Join now")',
+  '[role="dialog"] button:has-text("OK")',
+  '[role="alertdialog"] button:has-text("OK")',
+];
+
 export const googleRejectionIndicators: string[] = [
   // Waiting-room denial patterns. Google Meet can leave some lobby text in
   // the DOM after a host rejects the bot, so these must be checked before

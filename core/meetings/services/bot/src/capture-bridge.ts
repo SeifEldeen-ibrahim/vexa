@@ -689,9 +689,10 @@ export async function startCaptureBridge(
   inv: Invocation,
   pipeline: BotPipeline,
   telemetry?: TelemetrySink,
-  /** In-meeting chat sink (jitsi lane) — each captured chat message crosses here;
+  /** In-meeting chat sink (jitsi + google_meet lanes) — each captured chat message crosses here;
    *  the composition root publishes it as a transcript.v1 `source:'chat'` segment. */
-  onChat?: (sender: string, text: string) => void,
+  onChat?: (sender: string, text: string, senderEmail?: string, senderAmbiguous?: boolean,
+            senderNameUnique?: boolean) => void,
   /** Active-phase silence signal. It remains unavailable until page capture reports ready. */
   activity?: RemoteAudioActivityTap,
 ): Promise<() => Promise<void>> {
@@ -788,9 +789,11 @@ export async function startCaptureBridge(
   await page.exposeFunction('__vexaStreamPresence', (count: number): void => activity?.observeStreamPresence?.(count)).catch((e: Error) => {
     if (!String(e.message).includes('already registered')) throw e;
   });
-  // jitsi chat → the embedder's sink (a transcript.v1 `chat` segment at the composition root).
-  await page.exposeFunction('__vexaChatMessage', (sender: string, text: string): void => {
-    try { onChat?.(sender, text); } catch (e) { console.error(`[bot] chat sink rejected: ${String(e)}`); }
+  // in-meeting chat → the embedder's sink (a transcript.v1 `chat` segment at the composition root).
+  await page.exposeFunction('__vexaChatMessage', (sender: string, text: string, senderEmail?: string,
+                                                  senderAmbiguous?: boolean,
+                                                  senderNameUnique?: boolean): void => {
+    try { onChat?.(sender, text, senderEmail, senderAmbiguous, senderNameUnique); } catch (e) { console.error(`[bot] chat sink rejected: ${String(e)}`); }
   }).catch(() => { /* optional */ });
 
   // ── Start the page-side capture (VexaBrowserUtils preferred; production inline fallback). ──
@@ -1264,6 +1267,25 @@ export async function startCaptureBridge(
       // (Zoom's watcher lives in the per-track branch above — it feeds the resolver, not the mix.)
       return;
     }
+    // gmeet chat: the reader that turns typed messages into transcript.v1 `chat` segments, and the
+    // page-side half `chat_send` reaches. Independent of audio capture — it must survive a capture
+    // fault, and a meeting with no chat traffic simply never emits.
+    if (w.VexaBrowserUtils?.createGmeetChat && !w.__vexaGmeetChat) {
+      try {
+        w.__vexaGmeetChat = w.VexaBrowserUtils.createGmeetChat({
+          selfName: botName,
+          log: (m: string) => w.logBot?.('[GmeetChat] ' + m),
+          onMessage: (m: { sender: string; text: string; senderEmail?: string;
+                           senderAmbiguous?: boolean; senderNameUnique?: boolean }) =>
+            w.__vexaChatMessage?.(m.sender, m.text, m.senderEmail, m.senderAmbiguous, m.senderNameUnique),
+        });
+      } catch (e: any) {
+        w.__vexaGmeetChat = null;
+        w.logBot?.('[GmeetChat] init failed - continuing without chat: ' + String(e));
+      }
+    } else if (!w.VexaBrowserUtils?.createGmeetChat) {
+      w.logBot?.('[GmeetChat] not in the browser bundle - continuing without chat');
+    }
     // gmeet lane: per-channel capture + glow attribution (the SAME module the extension runs).
     if (w.VexaBrowserUtils?.createGmeetCapture && !w.__vexaGmeetCapture) {
       w.__vexaGmeetSpeakers = w.__vexaGmeetSpeakers
@@ -1474,6 +1496,87 @@ export function createSpeakController(page: Page, inv: Invocation): SpeakControl
       tts.stop();                                             // barge-in: kill playback + re-mute tts_sink
       await setMic(false);
       console.log('[bot] speak_stop');
+    },
+  };
+}
+
+/**
+ * Chat controller — the acts.v1 `chat_send` / `chat_read` half of the interactive family.
+ *
+ * Symmetric with SpeakController: gated on the SAME `inv.voiceAgentEnabled` (acts.v1 scopes the
+ * whole interactive family — speak, chat, screen, avatar — under that one flag), driven page-side,
+ * and never throwing into the act handler.
+ *
+ * Google Meet is the platform wired here. The send itself lives in @vexa/gmeet-capture's shared
+ * browser module (VexaBrowserUtils.sendGmeetChatMessage) so the extension and the bot use ONE
+ * implementation; this controller is the bot-only dispatch half that reaches it.
+ *
+ * ECHO: every sent message is remembered briefly, and the reader drops the bot's own lines by
+ * sender name. Both guards are needed — the name check fails on a Meet build that renders the local
+ * sender differently, and the text check fails if a human happens to repeat the bot verbatim.
+ */
+export interface ChatController {
+  /** Type `text` into the meeting chat. Resolves false when the composer was unreachable. */
+  send(text: string): Promise<boolean>;
+  /** The most recent messages the page-side reader has observed. */
+  read(): Promise<Array<{ sender: string; text: string }>>;
+  /** True while `text` matches something this bot sent moments ago (echo guard for the reader). */
+  isRecentlySent(text: string): boolean;
+}
+
+/** How long a sent message stays in the echo-suppression set. Long enough to cover Meet's own
+ *  render latency, short enough that a human repeating the bot minutes later is still heard. */
+const CHAT_ECHO_TTL_MS = 30_000;
+
+export function createChatController(page: Page, inv: Invocation): ChatController {
+  const enabled = !!inv.voiceAgentEnabled;
+  const sent = new Map<string, number>();
+
+  const remember = (text: string): void => {
+    const now = Date.now();
+    sent.set(text.trim(), now);
+    for (const [k, t] of sent) if (now - t > CHAT_ECHO_TTL_MS) sent.delete(k);
+  };
+
+  return {
+    async send(text: string): Promise<boolean> {
+      if (!enabled) { console.error('[bot] chat_send ignored: voiceAgentEnabled is false'); return false; }
+      const body = (text || '').trim();
+      if (!body) { console.error('[bot] chat_send ignored: empty text'); return false; }
+      if (inv.platform !== 'google_meet') {
+        console.error(`[bot] chat_send unsupported on platform '${inv.platform}'`);
+        return false;
+      }
+      remember(body);
+      const ok = await page.evaluate((msg: string) => {
+        const w = (globalThis as any) as Record<string, any>;
+        const send = w.VexaBrowserUtils?.sendGmeetChatMessage;
+        if (typeof send !== 'function') return false;
+        return !!send(msg);
+      }, body).catch((e: unknown) => {
+        console.error(`[bot] chat_send: page-side send failed: ${String(e)}`);
+        return false;
+      });
+      console.log(`[bot] chat_send ${ok ? 'delivered' : 'FAILED'}: "${body.slice(0, 60)}"`);
+      return ok;
+    },
+    async read(): Promise<Array<{ sender: string; text: string }>> {
+      if (!enabled) { console.error('[bot] chat_read ignored: voiceAgentEnabled is false'); return []; }
+      return page.evaluate(() => {
+        const w = (globalThis as any) as Record<string, any>;
+        const state = w.__vexaGmeetChat?.getState?.();
+        return (state?.recent ?? []) as Array<{ sender: string; text: string }>;
+      }).catch((e: unknown) => {
+        console.error(`[bot] chat_read failed: ${String(e)}`);
+        return [] as Array<{ sender: string; text: string }>;
+      });
+    },
+    isRecentlySent(text: string): boolean {
+      const k = (text || '').trim();
+      const at = sent.get(k);
+      if (at === undefined) return false;
+      if (Date.now() - at > CHAT_ECHO_TTL_MS) { sent.delete(k); return false; }
+      return true;
     },
   };
 }

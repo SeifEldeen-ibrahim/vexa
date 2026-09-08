@@ -39,7 +39,14 @@ ENV NEXT_PUBLIC_TERMINAL_MODE=$NEXT_PUBLIC_TERMINAL_MODE
 ARG NEXT_PUBLIC_DEFAULT_BOT_NAME=""
 ENV NEXT_PUBLIC_DEFAULT_BOT_NAME=$NEXT_PUBLIC_DEFAULT_BOT_NAME
 # Regular build (not standalone): produces .next served by the custom server in production.
-RUN npm run build
+#
+# `.next/cache` is deleted in the SAME layer that creates it. It is webpack's incremental-compile
+# cache and it is not part of the built app: the runtime serves `.next/server`, `.next/static` and
+# the manifests, and nothing in this image ever runs `next build` again. Measured by `docker history`
+# across a before/after build of this deployment's own terminal: the `COPY /app/.next` layer goes
+# 199 MB -> 6.89 MB, and the whole image 1084 MB -> 908 MB uncompressed. Same layer rather than a
+# later `RUN rm`, so the builder never materialises it either.
+RUN npm run build && rm -rf .next/cache
 
 # deps-prod: pruned production deps. typescript must ALSO be present — Next loads the TypeScript
 # next.config.ts at runtime and npm-installs its own at BOOT when it's absent. `npm i typescript`
@@ -65,6 +72,17 @@ ENV NODE_ENV=production \
     PORT=3000 \
     HOST=0.0.0.0 \
     NEXT_PUBLIC_TERMINAL_MODE=$NEXT_PUBLIC_TERMINAL_MODE
+# THE VARIANT, AS A FACT ON THE IMAGE. Every terminal variant comes out of this one Dockerfile and
+# differs only by the build arg above — all of them build, pass the suite and start, and the tag is
+# whatever the builder typed. Nothing else in the image says which variant the bytes are, so a
+# mistyped `--build-arg` ships the wrong surface under the right name and is only catchable by
+# grepping strings out of the client chunks.
+#
+# A LABEL rather than only the ENV: it survives `docker save`/`load` and a registry round-trip, it is
+# readable without starting the container (`docker image inspect`), and it cannot be shadowed at
+# `docker run -e` time the way an env var can. "default" is spelled out because an empty string reads
+# as "nobody set this" rather than "the full surface".
+LABEL ai.vexa.terminal.mode="${NEXT_PUBLIC_TERMINAL_MODE:-default}"
 WORKDIR /app
 COPY package.json package-lock.json ./
 # node_modules from the RUNTIME_DEPS-selected stage (prod = pruned + typescript; dev = full tree).

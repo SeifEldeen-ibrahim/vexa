@@ -18,6 +18,7 @@ from llm.ports import (
     CompletionResult,
     HarnessExec,
     HarnessPort,
+    close_event_stream,
     run_harness_turn,
 )
 from llm.registry import (
@@ -40,6 +41,7 @@ __all__ = [
     "CompletionResult",
     "HarnessExec",
     "HarnessPort",
+    "close_event_stream",
     "run_harness_turn",
     "COMPLETION_PROVIDERS",
     "HARNESS_RUNNERS",

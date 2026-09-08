@@ -6,13 +6,15 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import time
 from pathlib import Path
 
 import yaml
 
 from llm import run_harness_turn
-from llm.claude_code import ClaudeCodeHarness, build_argv, parse_stream_json
-from llm.ports import harness_subprocess_env
+from llm.claude_code import (ClaudeCodeHarness, _exec_subprocess, _reap, build_argv,
+                             parse_stream_json)
+from llm.ports import close_event_stream, harness_subprocess_env
 
 
 def _git(d: Path, *a: str) -> None:
@@ -353,3 +355,65 @@ def test_prepare_repoints_stale_symlink_and_is_idempotent(tmp_path: Path, monkey
     assert os.readlink(link) == target
     link = _prepare_with_home(monkeypatch, home, ws)  # second turn, already correct → no-op
     assert os.readlink(link) == target
+
+
+# --- the reap: a stream nobody is reading any more takes its CLI child with it -------------------
+
+def test_reap_kills_a_child_that_has_stopped_writing():
+    """A child that is idle (waiting on a model) never notices a closed pipe. Closing stdout is not
+    the kill; `_reap`'s timeout is, and without it `finally: proc.wait()` waits out the whole turn."""
+    proc = subprocess.Popen(["sleep", "60"])
+    t0 = time.monotonic()
+    _reap(proc, grace=0.2)
+    assert proc.poll() is not None, "the idle child survived the reap"
+    assert time.monotonic() - t0 < 5, "the reap waited on the child instead of killing it"
+
+
+def test_reap_lets_a_finished_child_exit_on_its_own():
+    """The normal path: stdout hits EOF because the CLI already exited, so the grace costs nothing
+    and the exit status is the child's own, not a kill."""
+    proc = subprocess.Popen(["true"])
+    _reap(proc, grace=5)
+    assert proc.returncode == 0
+
+
+def test_closing_the_event_stream_reaps_the_cli():
+    """THE WHOLE POINT (Vexa-ai/vexa#1434). A caller that stops reading mid-turn — an abandoned
+    dispatch, a break, a raise at the yield — must reach the subprocess. Every hop closes what it
+    wraps explicitly, because a `for` loop hands that last hop to refcount finalization, which is a
+    CPython implementation detail and not a guarantee."""
+    started: list[subprocess.Popen] = []
+    real_popen = subprocess.Popen
+
+    def _spy(argv, **kw):
+        p = real_popen(["sh", "-c", 'printf "%s\\n" "{}"; sleep 60'], **kw)
+        started.append(p)
+        return p
+
+    subprocess.Popen = _spy  # type: ignore[assignment]
+    try:
+        stream = _exec_subprocess(["ignored"], cwd=".")
+        next(stream)                       # child is live, mid-"turn"
+        assert started and started[0].poll() is None
+        os.environ["VEXA_HARNESS_REAP_GRACE_SEC"] = "0.2"
+        t0 = time.monotonic()
+        close_event_stream(stream)         # the caller walks away
+        elapsed = time.monotonic() - t0
+    finally:
+        subprocess.Popen = real_popen  # type: ignore[assignment]
+        os.environ.pop("VEXA_HARNESS_REAP_GRACE_SEC", None)
+    assert started[0].poll() is not None, "the abandoned turn left its CLI child running"
+    # BOUNDED, and this is the assertion that fails without the reap. A bare `finally: proc.wait()`
+    # also ends with a dead child — it just waits out the child's whole remaining life first (60 s
+    # here), which is the worker blocked inside a close(). Dead eventually is not the property.
+    assert elapsed < 5, f"close() blocked {elapsed:.1f}s waiting for the child instead of killing it"
+
+
+def test_close_event_stream_is_a_no_op_on_a_plain_iterable():
+    """It belongs in a `finally`, so it must be safe on a list, a test's fake, and a generator that
+    is already exhausted or already closed."""
+    close_event_stream([1, 2, 3])
+    g = (x for x in ())
+    list(g)
+    close_event_stream(g)
+    close_event_stream(g)

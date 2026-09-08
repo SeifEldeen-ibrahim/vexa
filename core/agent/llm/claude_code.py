@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Iterable, Iterator, Optional
 
 from llm.errors import looks_like_auth_failure, preflight_provider_guard
-from llm.ports import HarnessExec, harness_subprocess_env
+from llm.ports import HarnessExec, close_event_stream, harness_subprocess_env
 
 
 def _short(content: object, n: int = 80) -> str:
@@ -43,64 +43,72 @@ def parse_stream_json(lines: Iterable[str]) -> Iterator[dict]:
     (else the prose doubles). The ``result`` event still carries the full ``reply``.
     """
     streamed_partial = False  # saw any text_delta → don't re-emit the consolidated assistant text
-    for raw in lines:
-        raw = raw.strip()
-        if not raw:
-            continue
-        try:
-            obj = json.loads(raw)
-        except json.JSONDecodeError:
-            continue
-        t = obj.get("type")
-        if t == "stream_event":
-            event = obj.get("event", {}) or {}
-            if event.get("type") == "content_block_delta":
-                delta = event.get("delta", {}) or {}
-                if delta.get("type") == "text_delta" and delta.get("text"):
-                    streamed_partial = True
-                    yield {"type": "message-delta", "text": delta["text"]}
-        elif t == "assistant":
-            for block in obj.get("message", {}).get("content", []) or []:
-                bt = block.get("type")
-                if bt == "text" and block.get("text"):
-                    if not streamed_partial:  # no partials → emit the whole block (back-compat)
-                        yield {"type": "message-delta", "text": block["text"]}
-                elif bt == "tool_use":
-                    yield {
-                        "type": "tool-call",
-                        "tool": block.get("name", ""),
-                        "args": block.get("input", {}),
-                        "callId": block.get("id", ""),
-                    }
-        elif t == "user":
-            for block in obj.get("message", {}).get("content", []) or []:
-                if block.get("type") == "tool_result":
-                    yield {
-                        "type": "tool-result",
-                        "callId": block.get("tool_use_id", ""),
-                        "ok": not block.get("is_error", False),
-                        "summary": _short(block.get("content")),
-                    }
-        elif t == "result":
-            reply = obj.get("result", "")
-            done = {
-                "type": "done",
-                "reply": reply,
-                "sessionId": obj.get("session_id"),
-                "ok": obj.get("is_error") is not True and obj.get("subtype") != "error",
-            }
-            if not done["ok"] and looks_like_auth_failure(reply):
-                # The CLI's own auth text ("Not logged in · Please run /login") is an internal of
-                # THIS adapter — /login doesn't exist for an API consumer. Rewrite to the
-                # platform-actionable message; the raw text rides along in `detail` (additive).
-                done["detail"] = _short(reply, 200)
-                done["reply"] = (
-                    "Model credentials are missing or expired for this deployment. "
-                    "Set or refresh one of HOST_CLAUDE_CREDENTIALS, ANTHROPIC_API_KEY, "
-                    "ANTHROPIC_AUTH_TOKEN, CLAUDE_CODE_OAUTH_TOKEN or VEXA_LLM_API_KEY, "
-                    "or configure a model under Settings → Models."
-                )
-            yield done
+    try:
+        for raw in lines:
+            raw = raw.strip()
+            if not raw:
+                continue
+            try:
+                obj = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            t = obj.get("type")
+            if t == "stream_event":
+                event = obj.get("event", {}) or {}
+                if event.get("type") == "content_block_delta":
+                    delta = event.get("delta", {}) or {}
+                    if delta.get("type") == "text_delta" and delta.get("text"):
+                        streamed_partial = True
+                        yield {"type": "message-delta", "text": delta["text"]}
+            elif t == "assistant":
+                for block in obj.get("message", {}).get("content", []) or []:
+                    bt = block.get("type")
+                    if bt == "text" and block.get("text"):
+                        if not streamed_partial:  # no partials → emit the whole block (back-compat)
+                            yield {"type": "message-delta", "text": block["text"]}
+                    elif bt == "tool_use":
+                        yield {
+                            "type": "tool-call",
+                            "tool": block.get("name", ""),
+                            "args": block.get("input", {}),
+                            "callId": block.get("id", ""),
+                        }
+            elif t == "user":
+                for block in obj.get("message", {}).get("content", []) or []:
+                    if block.get("type") == "tool_result":
+                        yield {
+                            "type": "tool-result",
+                            "callId": block.get("tool_use_id", ""),
+                            "ok": not block.get("is_error", False),
+                            "summary": _short(block.get("content")),
+                        }
+            elif t == "result":
+                reply = obj.get("result", "")
+                done = {
+                    "type": "done",
+                    "reply": reply,
+                    "sessionId": obj.get("session_id"),
+                    "ok": obj.get("is_error") is not True and obj.get("subtype") != "error",
+                }
+                if not done["ok"] and looks_like_auth_failure(reply):
+                    # The CLI's own auth text ("Not logged in · Please run /login") is an internal of
+                    # THIS adapter — /login doesn't exist for an API consumer. Rewrite to the
+                    # platform-actionable message; the raw text rides along in `detail` (additive).
+                    done["detail"] = _short(reply, 200)
+                    done["reply"] = (
+                        "Model credentials are missing or expired for this deployment. "
+                        "Set or refresh one of HOST_CLAUDE_CREDENTIALS, ANTHROPIC_API_KEY, "
+                        "ANTHROPIC_AUTH_TOKEN, CLAUDE_CODE_OAUTH_TOKEN or VEXA_LLM_API_KEY, "
+                        "or configure a model under Settings → Models."
+                    )
+                yield done
+    finally:
+        # THE KILL HAPPENS HERE, on every interpreter. `lines` is `_exec_subprocess`'s generator and
+        # its `finally` is what reaps the CLI child; a `for` loop hands that last hop to refcount
+        # finalization, which on CPython 3.12.3 did not run it at all (Vexa-ai/vexa#1434) — the
+        # phase's budget then stopped READING the process without stopping it. Closing explicitly is
+        # what makes the budget's stop a kill rather than a hope.
+        close_event_stream(lines)
 
 
 def build_argv(
@@ -141,6 +149,41 @@ def build_argv(
     return argv
 
 
+def _reap_grace() -> float:
+    """How long a finished-with stdout is given to bring the CLI down on its own, before it is
+    killed. Tunable only so a test can prove the kill path in a fraction of a second."""
+    try:
+        return float(os.environ.get("VEXA_HARNESS_REAP_GRACE_SEC", "5"))
+    except ValueError:
+        return 5.0
+
+
+def _reap(proc, grace: "float | None" = None) -> None:
+    """Wait for the CLI, then KILL it if it will not go.
+
+    ⚠ `finally: proc.wait()` alone is a HANG waiting to happen, and it is reachable from any caller
+    that stops consuming early — closing the generator raises GeneratorExit at the yield and runs
+    that finally while the CLI is still mid-turn. A bare wait there blocks the worker on a process
+    nobody is reading any more, for as long as the abandoned turn feels like taking.
+
+    ⚠ AND CLOSING STDOUT IS NOT ENOUGH. A child that keeps writing dies of SIGPIPE the moment the
+    pipe closes, so a kill-less version of this looks fine under a chatty child. A child that has
+    stopped writing — which is what the CLI does for most of a turn, waiting on a model — never
+    notices, and sits there. The kill is for that one.
+
+    On the normal path the CLI has already exited by the time stdout hits EOF, so the grace costs
+    nothing."""
+    grace = _reap_grace() if grace is None else grace
+    try:
+        proc.wait(timeout=grace)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+    except TypeError:
+        # a Popen-shaped test double whose wait() takes no timeout — the seam, not the CLI
+        proc.wait()
+
+
 def _exec_subprocess(argv: list[str], cwd: str) -> Iterator[str]:
     # harness_subprocess_env: the model's Bash tool runs INSIDE this subprocess, so it must not inherit
     # the worker's data-plane secrets — ``REDIS_URL`` (which would let Bash reach the shared redis and
@@ -153,7 +196,11 @@ def _exec_subprocess(argv: list[str], cwd: str) -> Iterator[str]:
     try:
         yield from proc.stdout
     finally:
-        proc.wait()
+        try:
+            proc.stdout.close()
+        except Exception:  # noqa: BLE001
+            pass
+        _reap(proc)
 
 
 def _link_chat_into_workspace(work: Path) -> None:

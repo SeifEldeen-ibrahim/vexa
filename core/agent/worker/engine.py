@@ -29,6 +29,7 @@ from typing import Callable, Iterator, Protocol
 from llm import (
     HarnessPort,
     auth_error_event,
+    close_event_stream,
     harness_from_env,
     looks_like_auth_failure,
     preflight_provider_guard,
@@ -332,14 +333,24 @@ def run_turn_over_workspace(
     if resume and first is not None and first.get("type") == "done" and not first.get("ok", True):
         if sess_file.exists():
             sess_file.unlink()
+        # The refused-resume turn is ABANDONED here — reap its CLI now rather than leaving a second
+        # harness subprocess to whatever the interpreter does with an unreferenced generator.
+        close_event_stream(gen)
         gen = run_harness_turn(work, turn_prompt, harness, allowed_tools=allowed, session=None, model=model,
                                commit=commit, author=author, extra_mounts=extras)
         first = next(gen, None)
     captured: str | None = None
-    for ev in (gen if first is None else itertools.chain([first], gen)):
-        if ev.get("type") == "done" and ev.get("sessionId"):
-            captured = ev["sessionId"]
-        yield ev
+    try:
+        for ev in (gen if first is None else itertools.chain([first], gen)):
+            if ev.get("type") == "done" and ev.get("sessionId"):
+                captured = ev["sessionId"]
+            yield ev
+    finally:
+        # `itertools.chain` does not forward a close to what it chains, and neither does the `for`.
+        # A consumer that stops reading this turn — an abandoned dispatch, a caller that breaks out,
+        # a raise on the yield — must reach the CLI subprocess underneath, and only an explicit
+        # close does that on every interpreter. See `llm.ports.close_event_stream`.
+        close_event_stream(gen)
     if captured and session_continuity:
         sess_file.parent.mkdir(parents=True, exist_ok=True)
         sess_file.write_text(captured)

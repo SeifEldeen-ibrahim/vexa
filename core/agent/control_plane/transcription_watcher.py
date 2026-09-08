@@ -403,7 +403,7 @@ def _run_arm(redis_url: str, dispatcher, live, subject: str, keymap: dict, chat_
                 try:
                     r.xack(SRC, GROUP, msg_id)
                     _handle(r, dispatcher, live, subject, json.loads(fields.get("payload") or "{}"),
-                            last_arm, keymap, first_seen, chat_responder)
+                            last_arm, keymap, first_seen, chat_responder, mint_skill_grant)
                 except Exception:  # noqa: BLE001
                     logger.exception("bad transcription frame; skipping")
 

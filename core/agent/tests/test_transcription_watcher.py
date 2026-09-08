@@ -513,3 +513,52 @@ def test_with_no_minter_wired_the_copilot_arms_exactly_as_before(monkeypatch):
     r.set("proc:meeting:42:on", "1")
     w._handle(r, disp, live, "u_live", _payload("42"), *_fresh_state())
     assert disp.dispatched and "skill_grant" not in disp.dispatched[0]["context"]["meeting"]
+
+
+def test_the_ARM_LOOP_passes_the_minter_through_to_the_dispatch(monkeypatch):
+    """The tests above call `_handle` directly, so they proved the minter WORKS and said nothing
+    about whether the loop hands it over. It did not: the real call site spans two lines and the
+    edit that added the argument matched a one-line shape, so the copilot spawned with no grant and
+    could not learn what its products are — every check green, the thing still broken in the
+    deployment.
+
+    This drives the loop the way the daemon thread does, so a dropped argument is a red here."""
+    _reset_module_caches()
+    monkeypatch.setattr(w, "_resolve_native", lambda mid: ("aaa-aaaa-aaa", "google_meet"))
+
+    r, disp, live = _FakeRedis(), _FakeDispatcher(), _FakeLive()
+    r.set("proc:meeting:42:on", "1")
+    r.streams["transcription_segments"] = [{"payload": json.dumps(_payload("42"))}]
+    minted: list = []
+
+    class _OneShot(_FakeRedis):
+        """Serves the arm loop exactly one batch, then stops it."""
+        def __init__(self, inner):
+            self.__dict__.update(inner.__dict__)
+            self._served = False
+
+        def xreadgroup(self, *_a, **_kw):
+            if self._served:
+                raise KeyboardInterrupt          # ends the loop deterministically
+            self._served = True
+            return [("transcription_segments", [("1-1", {"payload": json.dumps(_payload("42"))})])]
+
+        def xgroup_create(self, *_a, **_kw):
+            return None
+
+        def xack(self, *_a, **_kw):
+            return None
+
+    fake = _OneShot(r)
+    monkeypatch.setattr(w, "_redis_client", lambda url: fake, raising=False)
+    import redis as _redislib
+    monkeypatch.setattr(_redislib, "from_url", lambda *a, **kw: fake)
+
+    try:
+        w._run_arm("redis://x", disp, live, "u_live", {}, None,
+                   lambda unit, subject, meeting: minted.append((unit, subject, meeting)) or "g")
+    except KeyboardInterrupt:
+        pass
+
+    assert minted, "the arm loop never handed the minter to _handle"
+    assert disp.dispatched[0]["context"]["meeting"]["skill_grant"] == "g"

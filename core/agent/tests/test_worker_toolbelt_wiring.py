@@ -96,15 +96,28 @@ if __name__ == "__main__":
 
 # ── the copilot's suggestion sink, as the container entrypoint builds it ───────────────────
 
-def _run_meeting_worker(monkeypatch, tmp_path) -> dict:
+def _run_meeting_worker(monkeypatch, tmp_path, enabled: "set | None" = None) -> dict:
     """Boot the worker's MEETING branch and capture the callbacks it hands `serve_meeting`."""
     import worker.meeting as meeting
 
     added: list = []
+    enabled_now = {"meetskills:meeting:36": set(enabled or ())}
+    # A workspace shaped like the real seed: `suggestion` is offered in the frontmatter and NARROWED
+    # away when no product is on, so its presence is a true read-out of what the copilot resolved.
+    ws = tmp_path / "ws"
+    (ws / "agents").mkdir(parents=True, exist_ok=True)
+    (ws / "agents" / "meeting.md").write_text(
+        "---\nenabled: true\ncard_kinds: [person, company, product, suggestion]\n---\nwatch things\n")
 
     class _Redis:
         def xadd(self, stream, fields):
             added.append((stream, fields))
+
+        def smembers(self, key):
+            # A WORKING store. The previous fake answered None to everything, so the copilot's
+            # skill lookup "degraded to no products" for the right reason and the test could not
+            # tell that apart from the lookup being broken — which it was, for a missing import.
+            return enabled_now.get(key, set())
 
         def __getattr__(self, _name):        # every other redis call is a no-op here
             return lambda *a, **kw: None
@@ -185,3 +198,53 @@ def test_the_copilots_card_turn_can_actually_BE_CALLED():
     assert seen.get("called"), "the card turn closure could not be called at all"
     for key in ("card_kinds", "steering", "polish_rules", "tag_rules"):
         assert key in seen, f"the card turn did not pass {key}"
+
+
+def test_the_copilot_can_actually_READ_the_enabled_skills():
+    """Shipped broken and invisible: a lost import made `_skills_now` raise a NameError, which its
+    own `except Exception` logged as "treating as none". So every beat of every meeting saw zero
+    products, no product knowledge reached the prompt, and nothing was ever proposed — while the
+    copilot went on tagging entities as if it were fine.
+
+    A fake that answers nothing cannot catch that, because "no products" is also what a healthy
+    lookup returns for a meeting with none enabled. This one answers with a product."""
+    import pytest as _pytest
+
+    import worker.meeting as meeting
+
+    seen: dict = {}
+    mp = _pytest.MonkeyPatch()
+    try:
+        import tempfile
+
+        mp.setattr(meeting, "meeting_card_turn",
+                   lambda work, segs, **kw: (seen.update(kw), iter(()))[1])
+        got = _run_meeting_worker(mp, pathlib.Path(tempfile.mkdtemp()), enabled={"partic"})
+        list(got["kwargs"]["card_turn"]([{"segment_id": "s", "speaker": "A", "text": "hi"}]))
+    finally:
+        mp.undo()
+
+    # The proof the lookup ran and resolved: `suggestion` is only a card kind when a product is on.
+    assert "suggestion" in seen.get("card_kinds", []), \
+        f"the copilot never saw the enabled product — card_kinds were {seen.get('card_kinds')}"
+
+
+def test_with_NO_product_enabled_the_copilot_cannot_propose():
+    """The other side of the same read, so the row above cannot pass by accident."""
+    import pytest as _pytest
+
+    import worker.meeting as meeting
+
+    seen: dict = {}
+    mp = _pytest.MonkeyPatch()
+    try:
+        import tempfile
+
+        mp.setattr(meeting, "meeting_card_turn",
+                   lambda work, segs, **kw: (seen.update(kw), iter(()))[1])
+        got = _run_meeting_worker(mp, pathlib.Path(tempfile.mkdtemp()), enabled=set())
+        list(got["kwargs"]["card_turn"]([{"segment_id": "s", "speaker": "A", "text": "hi"}]))
+    finally:
+        mp.undo()
+
+    assert "suggestion" not in seen.get("card_kinds", [])

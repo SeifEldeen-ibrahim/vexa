@@ -37,6 +37,7 @@ from llm import (
 )
 from llm.errors import _AUTH_SIGNATURE_RE  # noqa: F401 — re-exported for the worker.worker shim
 from shared.seeding import resolve_seed_dir, seed_workspace, validate_seed
+from shared import skills as skills_registry
 from shared.tools import ToolRegistry, attach_toolbelt
 
 log = logging.getLogger("agent_api.worker")
@@ -490,8 +491,17 @@ def main() -> None:  # pragma: no cover — the container entrypoint (wired in t
             try:
                 return skills_registry.known(
                     list(client.smembers(f"meetskills:meeting:{row_id}") or []))
-            except Exception:  # noqa: BLE001
+            except (OSError, ValueError, RuntimeError, ConnectionError):
+                # A store that is unreachable degrades to "no products", quietly and on purpose.
                 log.warning("could not read the enabled skills; treating as none", exc_info=True)
+                return []
+            except Exception:  # noqa: BLE001
+                # Anything else here is OUR bug, not the store's. Catching it as "no products" is
+                # how a missing import shipped: the copilot degraded to silence on every beat of
+                # every meeting, and the only trace was a warning nobody reads. Still degrade — a
+                # meeting must not stop — but say plainly that this is broken.
+                log.error("the enabled-skills lookup is BROKEN; no product will ever be proposed "
+                          "until this is fixed", exc_info=True)
                 return []
 
         def _skill_knowledge(enabled: list) -> str:

@@ -154,42 +154,66 @@
    "class": "defaulted",
    "default": "600000",
    "description": "active-phase remote-audio silence window before completed(left_alone); forwarded to spawned bots when set",
-   "targets": ["compose", "helm", "lite"]
+   "targets": [
+    "compose",
+    "helm",
+    "lite"
+   ]
   },
   {
    "key": "BOT_SPEAKER_MIN_AUDIO_SEC",
    "class": "defaulted",
    "default": "(unset — bot default)",
    "description": "minimum Google Meet speaker audio window before transcription submission; forwarded to spawned bots",
-   "targets": ["compose", "helm", "lite"]
+   "targets": [
+    "compose",
+    "helm",
+    "lite"
+   ]
   },
   {
    "key": "BOT_SPEAKER_SUBMIT_INTERVAL_SEC",
    "class": "defaulted",
    "default": "(unset — bot default)",
    "description": "Google Meet speaker-stream submission interval; forwarded to spawned bots",
-   "targets": ["compose", "helm", "lite"]
+   "targets": [
+    "compose",
+    "helm",
+    "lite"
+   ]
   },
   {
    "key": "BOT_SPEAKER_CONFIRM_THRESHOLD",
    "class": "defaulted",
    "default": "(unset — bot default)",
    "description": "consecutive transcription matches required to confirm a Google Meet segment; forwarded to spawned bots",
-   "targets": ["compose", "helm", "lite"]
+   "targets": [
+    "compose",
+    "helm",
+    "lite"
+   ]
   },
   {
    "key": "BOT_SPEAKER_MAX_BUFFER_SEC",
    "class": "defaulted",
    "default": "(unset — bot default)",
    "description": "maximum Google Meet speaker audio buffer before force flush; forwarded to spawned bots",
-   "targets": ["compose", "helm", "lite"]
+   "targets": [
+    "compose",
+    "helm",
+    "lite"
+   ]
   },
   {
    "key": "BOT_SPEAKER_IDLE_TIMEOUT_SEC",
    "class": "defaulted",
    "default": "(unset — bot default)",
    "description": "Google Meet speaker idle flush timeout; forwarded to spawned bots",
-   "targets": ["compose", "helm", "lite"]
+   "targets": [
+    "compose",
+    "helm",
+    "lite"
+   ]
   },
   {
    "key": "AGENT_IMAGE",
@@ -390,6 +414,14 @@
   {
    "key": "INTERNAL_API_SECRET",
    "reason": "set on the runtime by compose/helm/lite but never read by runtime code (the internal-call secret is a gateway↔admin-api↔meeting-api concern) — documented drift surfaced by gate:config-contract; candidate for a deploy-surface cleanup"
+  },
+  {
+   "key": "BOT_STT_VOCABULARY",
+   "reason": "set by compose ahead of the meeting-chat assistant, whose reader lives on the feat/meet-chat-assistant branch; no code on this line reads it"
+  },
+  {
+   "key": "BOT_GMEET_ACCEPT_GEMINI_CONSENT",
+   "reason": "set by compose ahead of the meeting-chat assistant, whose reader lives on the feat/meet-chat-assistant branch; no code on this line reads it"
   }
  ]
 }

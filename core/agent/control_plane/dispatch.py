@@ -207,6 +207,21 @@ def _worker_cwd(root: str, subject: str, mounts: list[dict]) -> str:
     return normal["path"] if normal else f"{root}/{subject}"
 
 
+def _skill_grant_of(invocation: dict) -> str:
+    """This turn's authority to ask what its meeting is about, from wherever it rides.
+
+    A chat turn carries it on `context`; the copilot carries it inside `context.meeting`, beside the
+    other internal meeting hints. Both are stripped before the contract check."""
+    ctx = invocation.get("context") or {}
+    if not isinstance(ctx, dict):
+        return ""
+    direct = ctx.get("skill_grant")
+    if direct:
+        return str(direct)
+    meeting = ctx.get("meeting")
+    return str((meeting or {}).get("skill_grant") or "") if isinstance(meeting, dict) else ""
+
+
 def _reachable(mounts: list[dict]) -> list[dict]:
     """Drop mounts whose directory is gone, LOUDLY.
 
@@ -360,8 +375,10 @@ def build_unit_env(settings: Settings, invocation: dict, *, unit_id: str, token:
         # resolved server-side — the worker carries a reference, never the GitHub credential itself
         # (the harness passes its whole env to the CLI and to the MCP server it spawns, and an
         # ordinary chat turn has Bash: a token here is a token the model can print).
-        **({"VEXA_SKILL_GRANT": str((invocation.get("context") or {}).get("skill_grant"))}
-           if (invocation.get("context") or {}).get("skill_grant") else {}),
+        # Carried either on the context (a chat turn) or inside the meeting ref (the copilot, whose
+        # context.kind is "meeting" and whose every other hint lives there too).
+        **({"VEXA_SKILL_GRANT": str(_skill_grant_of(invocation))}
+           if _skill_grant_of(invocation) else {}),
         **({"VEXA_SKILL_TOOLS": str((invocation.get("context") or {}).get("skill_tools"))}
            if (invocation.get("context") or {}).get("skill_tools") else {}),
         **({"VEXA_SKILL_ACT_URL": settings.skill_act_url} if settings.skill_act_url else {}),
@@ -467,7 +484,8 @@ def build_unit_env(settings: Settings, invocation: dict, *, unit_id: str, token:
 # DIFFERENT tenant on the same link) can never clobber/read another meeting's data. ``native_id`` is
 # the human-readable Meet code carried for DISPLAY only (the kg doc name / title); the routing
 # ``meeting_id`` is the row id. Both are agent-api internal — the sealed MeetingRef forbids them.
-_INTERNAL_MEETING_HINTS = frozenset({"transcript_start_id", "numeric_meeting_id", "native_id"})
+_INTERNAL_MEETING_HINTS = frozenset({"transcript_start_id", "numeric_meeting_id", "native_id",
+                                     "skill_grant"})
 
 #: Internal CONTEXT hints — carried on the in-memory dispatch for ``build_unit_env`` to read, and
 #: stripped before the contract check like every other hint here. ``unit.v1``'s context is

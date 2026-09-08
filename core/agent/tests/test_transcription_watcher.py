@@ -464,3 +464,52 @@ def test_the_copilot_turn_is_granted_NO_tools(monkeypatch):
     w._handle(r, disp, live, "u_live", _payload("42"), *_fresh_state())
 
     assert not disp.dispatched[0].get("tools")
+
+
+def test_the_copilot_is_given_a_grant_so_it_can_LEARN_what_its_products_are(monkeypatch):
+    """The copilot reads the enabled SET from redis itself, but the product PROSE lives with the
+    deployment and is served by the control plane. Without a grant it resolves the products
+    correctly and then has no idea what any of them IS — so it recognises nothing and proposes
+    nothing, while cleaning and tagging perfectly and looking healthy. Observed exactly that way in
+    a live meeting: partic enabled, processing on, and no proposal possible."""
+    _reset_module_caches()
+    monkeypatch.setattr(w, "_resolve_native", lambda mid: ("aaa-aaaa-aaa", "google_meet"))
+
+    r, disp, live = _FakeRedis(), _FakeDispatcher(), _FakeLive()
+    r.set("proc:meeting:42:on", "1")
+    minted: list = []
+
+    def mint(unit, subject, meeting):
+        minted.append((unit, subject, meeting))
+        return "grant-abc"
+
+    w._handle(r, disp, live, "u_live", _payload("42"), *_fresh_state(), None, mint)
+
+    assert minted == [("agent-meet-42", "u_live", "42")]
+    assert disp.dispatched[0]["context"]["meeting"]["skill_grant"] == "grant-abc"
+
+
+def test_a_failing_minter_still_arms_the_copilot(monkeypatch):
+    """A copilot with no product knowledge still cleans the transcript and tags entities. Losing
+    that is worse than losing proposals."""
+    _reset_module_caches()
+    monkeypatch.setattr(w, "_resolve_native", lambda mid: ("aaa-aaaa-aaa", "google_meet"))
+
+    def boom(*_a):
+        raise RuntimeError("redis gone")
+
+    r, disp, live = _FakeRedis(), _FakeDispatcher(), _FakeLive()
+    r.set("proc:meeting:42:on", "1")
+    w._handle(r, disp, live, "u_live", _payload("42"), *_fresh_state(), None, boom)
+
+    assert disp.dispatched, "a minting fault stopped the copilot arming at all"
+    assert "skill_grant" not in disp.dispatched[0]["context"]["meeting"]
+
+
+def test_with_no_minter_wired_the_copilot_arms_exactly_as_before(monkeypatch):
+    _reset_module_caches()
+    monkeypatch.setattr(w, "_resolve_native", lambda mid: ("aaa-aaaa-aaa", "google_meet"))
+    r, disp, live = _FakeRedis(), _FakeDispatcher(), _FakeLive()
+    r.set("proc:meeting:42:on", "1")
+    w._handle(r, disp, live, "u_live", _payload("42"), *_fresh_state())
+    assert disp.dispatched and "skill_grant" not in disp.dispatched[0]["context"]["meeting"]

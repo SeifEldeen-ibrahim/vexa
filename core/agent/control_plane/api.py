@@ -3207,6 +3207,7 @@ def create_app(
     app.state.meet_chat_remember = _meet_chat_remember
     app.state.meet_chat_already_proposed = _meet_chat_already_proposed
     app.state.meet_skills_for = _meet_skills_for
+    app.state.mint_skill_grant = _mint_skill_grant
 
     return app
 
@@ -3277,7 +3278,8 @@ def _build_production_app() -> FastAPI:
     # without one, so it never inherits that placeholder.
     from control_plane import transcription_watcher
     transcription_watcher.start(settings.redis_url, dispatcher, app.state.live_meetings,
-                                chat_responder=getattr(app.state, "meet_chat_responder", None))
+                                chat_responder=getattr(app.state, "meet_chat_responder", None),
+                                mint_skill_grant=getattr(app.state, "mint_skill_grant", None))
     # The copilot's proposals → the meeting's own chat. Its own thread, because delivering a
     # suggestion is an HTTP call and the arm loop is the sole re-arm/reap arbiter for every copilot
     # on the deployment — the same reason the chat responder does not run there either.

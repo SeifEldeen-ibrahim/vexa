@@ -350,7 +350,8 @@ def _deliver_suggestion(p: dict, post_reply, owner_for, remember=None, already_p
             logger.exception("meet-suggest: could not record the pending proposal for %s", key)
 
 
-def start(redis_url: str, dispatcher, live, *, subject: str = "u_live", chat_responder=None) -> threading.Thread:
+def start(redis_url: str, dispatcher, live, *, subject: str = "u_live", chat_responder=None,
+          mint_skill_grant=None) -> threading.Thread:
     """Spawn the watcher (the ARM daemon thread) and return it (tests/introspection). ``keymap``
     (numeric meeting_id → row-id routing key) is the arm thread's own state.
 
@@ -363,14 +364,16 @@ def start(redis_url: str, dispatcher, live, *, subject: str = "u_live", chat_res
     never inherits the placeholder above — and it must never block this thread (see ``offer``)."""
     keymap: dict[str, str] = {}
     t = threading.Thread(
-        target=_run_arm, args=(redis_url, dispatcher, live, subject, keymap, chat_responder),
+        target=_run_arm,
+        args=(redis_url, dispatcher, live, subject, keymap, chat_responder, mint_skill_grant),
         daemon=True, name="tx-watch",
     )
     t.start()
     return t
 
 
-def _run_arm(redis_url: str, dispatcher, live, subject: str, keymap: dict, chat_responder=None) -> None:
+def _run_arm(redis_url: str, dispatcher, live, subject: str, keymap: dict, chat_responder=None,
+             mint_skill_grant=None) -> None:
     """Inbound watch → key on the row id, register live, re-arm copilot, reap on session_end. Does NOT
     write the transcript carrier — meeting-api's collector owns ``tc:meeting:{row_id}`` (P23/P0)."""
     import redis as redislib
@@ -408,7 +411,8 @@ def _run_arm(redis_url: str, dispatcher, live, subject: str, keymap: dict, chat_
 RESOLVE_GRACE_SEC = 6.0  # how long to wait for a native id before falling back to the numeric key
 
 
-def _handle(r, dispatcher, live, subject, p, last_arm, keymap, first_seen, chat_responder=None) -> None:
+def _handle(r, dispatcher, live, subject, p, last_arm, keymap, first_seen, chat_responder=None,
+            mint_skill_grant=None) -> None:
     # P0 (cross-tenant leak fix): the TRANSCRIPT CARRIER + :on + :cursor + dispatch keys are the numeric
     # ROW id `mid` — NOT the native Meet code. The native id is NOT unique (it collides across DIFFERENT
     # users and across ONE user's re-sends of the same link), so keying transcript data by it leaked one
@@ -551,12 +555,14 @@ def _handle(r, dispatcher, live, subject, p, last_arm, keymap, first_seen, chat_
             r.expire(f"proc:meeting:{key}:on", PROC_FLAG_ROLLING_TTL_SEC)
         except Exception:  # noqa: BLE001 — refresh is hygiene; never block the arm
             pass
-        _arm(dispatcher, subject, key, platform, transcript_start_id=_resume_cursor(r, key),
+        _arm(dispatcher, subject, key, platform, mint_skill_grant=mint_skill_grant,
+             transcript_start_id=_resume_cursor(r, key),
              numeric_meeting_id=mid if mid.isdigit() else None, native_id=native)
 
 
 def _arm(dispatcher, subject: str, key: str, platform: str, *, transcript_start_id: str = "0-0",
-         numeric_meeting_id: str | None = None, native_id: str | None = None) -> None:
+         numeric_meeting_id: str | None = None, native_id: str | None = None,
+         mint_skill_grant=None) -> None:
     """Spawn-or-touch the meeting's copilot (keyed agent-meet-{key}, where key is the ROW id). Idempotent
     FOR REAL since ADR 0027: runtime.v1 create touches a running workload (returns its live status) and
     only spawns one that is absent/exited — before that, every re-arm force-replaced the live container
@@ -577,6 +583,20 @@ def _arm(dispatcher, subject: str, key: str, platform: str, *, transcript_start_
         # (proc:meeting:{numeric}) so a re-sent bot on the same native link never mixes/clobbers a
         # previous meeting's processed doc. An internal hint — stripped before the unit.v1 check.
         meeting_ref["numeric_meeting_id"] = str(numeric_meeting_id)
+    # The copilot's authority to fetch what its meeting is ABOUT. It reads the enabled SET from redis
+    # itself, but the product PROSE lives with the deployment and is served by the control plane —
+    # without a grant it resolves the products correctly and then has no idea what any of them IS, so
+    # it recognises nothing and proposes nothing. Observed exactly that way: the copilot healthy,
+    # tagging entities, and structurally unable to suggest.
+    #
+    # It rides inside the meeting ref, beside the other internal hints, and is stripped before the
+    # contract check like all of them.
+    if mint_skill_grant is not None:
+        try:
+            meeting_ref["skill_grant"] = mint_skill_grant(f"agent-meet-{key}", subject, key)
+        except Exception:  # noqa: BLE001 — a copilot with no product knowledge still cleans and tags
+            logger.exception("could not mint a skill grant for meeting %s", key)
+
     inv = units.make_dispatch(
         subject=subject, trigger="transcription",
         start=units.entrypoint(inline=_BRIEF),

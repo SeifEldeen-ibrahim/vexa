@@ -2,14 +2,16 @@
 /** Login gate. Polls /api/auth/me on mount; if unauthenticated, renders the sign-in card.
  *  Primary path is OAuth — Google / Microsoft buttons (next-auth/react `signIn`, which works without a
  *  SessionProvider). Enabled providers are discovered from NextAuth's /api/auth/providers so a deploy
- *  with no OAuth creds simply hides the buttons. The direct email form is kept as a DEBUG path (server
- *  restricts it to addresses containing "test"), tucked behind a toggle. Styled to match the terminal
- *  (CSS vars from globals.css); does not redesign the workbench.
+ *  with no OAuth creds simply hides the buttons. The direct email form is a DEBUG path, rendered only
+ *  when /api/auth/instance reports `direct_login` — the server gate (VEXA_ALLOW_DIRECT_LOGIN, off by
+ *  default) is authoritative, this just keeps a dead form off a public login page. Styled to match the
+ *  terminal (CSS vars from globals.css); does not redesign the workbench.
  *
  *  FIRST RUN: /api/auth/instance says whether an admin exists. On a fresh instance the card becomes
  *  the one-time "Set up your instance" claim screen — first sign-in becomes the admin — through
  *  whatever auth the deploy actually has: OAuth buttons when configured, otherwise the test-mode
- *  direct entry with an honest banner naming the OAuth upgrade path. */
+ *  direct entry with an honest banner naming the OAuth upgrade path. With neither OAuth nor direct
+ *  login the card says so plainly rather than showing a form that cannot succeed. */
 import { useEffect, useState, type FormEvent } from "react";
 import { signIn } from "next-auth/react";
 
@@ -20,6 +22,7 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
   const [status, setStatus] = useState<Status>("checking");
   const [providers, setProviders] = useState<Providers>({ google: false, microsoft: false });
   const [adminExists, setAdminExists] = useState(true); // fail-safe: plain sign-in until told otherwise
+  const [directLogin, setDirectLogin] = useState(false); // fail-safe: assume OFF until the probe says otherwise
   const [showDebug, setShowDebug] = useState(false);
   const [email, setEmail] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -38,8 +41,12 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
       .catch(() => undefined);
     // First-run probe — {admin_exists:false} flips the card into the admin-claim variant.
     fetch("/api/auth/instance", { cache: "no-store" })
-      .then((r) => (r.ok ? r.json() : { admin_exists: true }))
-      .then((d: { admin_exists?: boolean }) => active && setAdminExists(d.admin_exists !== false))
+      .then((r) => (r.ok ? r.json() : { admin_exists: true, direct_login: false }))
+      .then((d: { admin_exists?: boolean; direct_login?: boolean }) => {
+        if (!active) return;
+        setAdminExists(d.admin_exists !== false);
+        setDirectLogin(d.direct_login === true);
+      })
       .catch(() => undefined);
     return () => { active = false; };
   }, []);
@@ -109,9 +116,19 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
                   border: "1px solid var(--line2)", borderRadius: 8, padding: "9px 11px",
                 }}
               >
-                ⚠ Test mode — no OAuth configured. Sign-in is limited to emails containing &ldquo;test&rdquo;.
-                For real authentication, acquire Google or Microsoft OAuth credentials and add them to this
-                instance&rsquo;s environment (GOOGLE_CLIENT_ID/SECRET or MICROSOFT_CLIENT_ID/SECRET).
+                {directLogin ? (
+                  <>
+                    ⚠ Test mode — no OAuth configured. Sign-in is limited to emails containing &ldquo;test&rdquo;.
+                    For real authentication, acquire Google or Microsoft OAuth credentials and add them to this
+                    instance&rsquo;s environment (GOOGLE_CLIENT_ID/SECRET or MICROSOFT_CLIENT_ID/SECRET).
+                  </>
+                ) : (
+                  <>
+                    ⚠ No sign-in method is configured. Set GOOGLE_CLIENT_ID/SECRET (or
+                    MICROSOFT_CLIENT_ID/SECRET) to enable OAuth, or set VEXA_ALLOW_DIRECT_LOGIN=true to
+                    re-enable the test-account email form on a trusted network.
+                  </>
+                )}
               </div>
             )}
           </>
@@ -130,7 +147,7 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
           </button>
         )}
 
-        {hasOAuth && (
+        {hasOAuth && directLogin && (
           <button
             onClick={() => setShowDebug((v) => !v)}
             style={{ background: "none", border: "none", color: "var(--t3)", fontSize: 11, cursor: "pointer", padding: 0, alignSelf: "flex-start" }}
@@ -139,7 +156,7 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
           </button>
         )}
 
-        {(!hasOAuth || showDebug) && (
+        {directLogin && (!hasOAuth || showDebug) && (
           <form onSubmit={submit} style={{ display: "flex", flexDirection: "column", gap: 10 }}>
             <div style={{ fontSize: 11, color: "var(--t3)", lineHeight: 1.4 }}>
               {claiming && !hasOAuth

@@ -3,11 +3,37 @@
 # published images. Used by `make local` (deploy/compose/Makefile), never by `make all`.
 #
 # Rebuild a service after editing its source:
-#   IMAGE_TAG=local docker compose -p vexa-v012 build <service>
+#   IMAGE_TAG=meetchat docker compose -p vexa-v012 build <service>
 # The meeting bot is not a compose service — it is spawned by the runtime from BROWSER_IMAGE
-# in .env; rebuild it with `make -C deploy/compose bot BOT_IMAGE=vexa/vexa-bot:local`.
+# in .env; rebuild it with `make -C deploy/compose bot BOT_IMAGE=vexa/vexa-bot:meetchat`.
 services:
+  # The gateway carries the POST /bots/{platform}/{native}/chat forward — without pinning it here
+  # the published :v012 edge answers 405 and the send half is unreachable no matter what
+  # meeting-api serves.
+  gateway:
+    image: vexaai/v012-gateway:meetchat
+  # admin-api carries /internal/users/{id}/identity — the owner check the meeting-chat assistant
+  # needs, since Meet's chat gives a bot a display name and no account identity at all.
+  admin-api:
+    image: vexaai/v012-admin-api:meetchat
   meeting-api:
-    image: vexaai/v012-meeting-api:local
+    image: vexaai/v012-meeting-api:meetchat
   agent-api:
-    image: vexaai/v012-agent-api:local
+    image: vexaai/v012-agent-api:meetchat
+  # The per-dispatch worker is not started by compose — the runtime spawns it by name. Pinning the
+  # image here is only half of it: the name the runtime reaches for is baked into ITS environment,
+  # so both move together or the stack keeps running the published worker while every other service
+  # is the fork's.
+  agent-worker:
+    image: vexaai/v012-agent-worker:meetchat
+  # The runtime forwards the bot tuning knobs (BOT_STT_VOCABULARY among them) to every bot it
+  # spawns, so it carries source of its own — pinning the image is not optional here.
+  runtime:
+    image: vexaai/v012-runtime:meetchat
+    environment:
+      - AGENT_WORKER_IMAGE=vexaai/v012-agent-worker:meetchat
+  # The Terminal is the ONLY service exposed to the internet (nginx -> 127.0.0.1:13000), and it
+  # carries the auth changes: the debug email login is now opt-in via VEXA_ALLOW_DIRECT_LOGIN
+  # (off by default) rather than merely restricted to addresses containing "test".
+  terminal:
+    image: vexaai/v012-terminal:meetchat

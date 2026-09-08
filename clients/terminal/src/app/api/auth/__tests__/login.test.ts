@@ -21,11 +21,15 @@ beforeEach(() => {
   setCookies = [];
   process.env.VEXA_ADMIN_API_URL = "http://admin.test";
   process.env.VEXA_ADMIN_API_KEY = "admin-secret";
+  // The route is opt-in and OFF by default (see ../directLogin). Every case below exercises the
+  // ENABLED behaviour, so turn it on here; the disabled case sets it back explicitly.
+  process.env.VEXA_ALLOW_DIRECT_LOGIN = "true";
 });
 
 afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
+  delete process.env.VEXA_ALLOW_DIRECT_LOGIN;
 });
 
 describe("/api/auth/login — direct email login against a mocked admin-api", () => {
@@ -102,5 +106,36 @@ describe("/api/auth/login — direct email login against a mocked admin-api", ()
     const res = await login(makeReq({ email: "not-an-email" }));
     expect(res.status).toBe(400);
     expect(fetchSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe("/api/auth/login — the VEXA_ALLOW_DIRECT_LOGIN kill switch", () => {
+  it("is OFF when the variable is unset: 404, no admin-api call, no cookies", async () => {
+    delete process.env.VEXA_ALLOW_DIRECT_LOGIN;
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const res = await login(makeReq({ email: "test-a@b.com" }));
+
+    expect(res.status).toBe(404);
+    // The gate runs before the body is even parsed, so nothing downstream is touched.
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(setCookies).toHaveLength(0);
+  });
+
+  it("is OFF for any value other than \"true\"", async () => {
+    for (const value of ["1", "yes", "false", ""]) {
+      process.env.VEXA_ALLOW_DIRECT_LOGIN = value;
+      const res = await login(makeReq({ email: "test-a@b.com" }));
+      expect(res.status, `VEXA_ALLOW_DIRECT_LOGIN=${JSON.stringify(value)}`).toBe(404);
+    }
+  });
+
+  it("answers identically for a known and an unknown address, leaking no account existence", async () => {
+    delete process.env.VEXA_ALLOW_DIRECT_LOGIN;
+    const known = await login(makeReq({ email: "test-a@b.com" }));
+    const unknown = await login(makeReq({ email: "test-nobody@nowhere.example" }));
+    expect(known.status).toBe(unknown.status);
+    expect(await known.json()).toEqual(await unknown.json());
   });
 });

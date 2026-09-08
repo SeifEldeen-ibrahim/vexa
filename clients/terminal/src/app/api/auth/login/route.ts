@@ -3,10 +3,18 @@
  *
  *  Mirrors the dashboard's VEXA_ALLOW_DIRECT_LOGIN branch (without importing it). No email is ever sent.
  *  Must never be cached — a cached response would pin one identity for every subsequent login.
+ *
+ *  OFF BY DEFAULT. This route mints a full session from an email address and NOTHING else — no
+ *  password, no proof of ownership. That is only tolerable on a loopback dev box, so it now requires
+ *  an explicit VEXA_ALLOW_DIRECT_LOGIN=true opt-in; any internet-reachable deploy leaves it unset and
+ *  authenticates through OAuth (api/auth/[...nextauth]) instead. The old "email must contain test"
+ *  rule is kept as a second gate for when it IS enabled, but it was never a security boundary —
+ *  `test@attacker.com` satisfies it.
  */
 import { NextResponse, type NextRequest } from "next/server";
 import { cookies } from "next/headers";
 import { AUTH_COOKIE, USER_INFO_COOKIE, findOrCreateUserToken } from "../adminApi";
+import { directLoginEnabled } from "../directLogin";
 
 export const dynamic = "force-dynamic";
 export const fetchCache = "force-no-store";
@@ -23,6 +31,15 @@ function isSecureRequest(): boolean {
 }
 
 export async function POST(request: NextRequest) {
+  // Kill switch, checked before anything else so a disabled deploy reveals no behaviour
+  // difference between a known and an unknown address.
+  if (!directLoginEnabled()) {
+    return NextResponse.json(
+      { error: "Direct email login is disabled on this instance — use Google sign-in." },
+      { status: 404, headers: NO_STORE },
+    );
+  }
+
   let email: unknown;
   try {
     ({ email } = await request.json());

@@ -148,6 +148,17 @@ services:
       - BOT_SPEAKER_CONFIRM_THRESHOLD=${BOT_SPEAKER_CONFIRM_THRESHOLD:-}
       - BOT_SPEAKER_MAX_BUFFER_SEC=${BOT_SPEAKER_MAX_BUFFER_SEC:-}
       - BOT_SPEAKER_IDLE_TIMEOUT_SEC=${BOT_SPEAKER_IDLE_TIMEOUT_SEC:-}
+      # The names this deployment says out loud (comma-separated), sent with every STT window.
+      # Whisper biases decoding toward the words in its prompt, and a name it has never heard is
+      # the one error nothing downstream can undo: a live meeting produced "Baratik", "Paratic"
+      # and "Barathek Bible" for one spoken product, and "Claview" for Klaviyo. Empty = off.
+      - BOT_STT_VOCABULARY=${BOT_STT_VOCABULARY:-}
+      # Answer Google's Gemini "take notes" consent prompt on the bot's behalf. OFF by default:
+      # consent belongs to the account holder, and upstream will not click it for them. Set true
+      # only on a deployment whose bot account you own — the prompt renders inside the bot's own
+      # browser, so nobody in the meeting can accept it and the bot otherwise waits out its full
+      # admission window in the lobby.
+      - BOT_GMEET_ACCEPT_GEMINI_CONSENT=${BOT_GMEET_ACCEPT_GEMINI_CONSENT:-}
       - VEXA_AGENT_SRC_MOUNT=${VEXA_AGENT_SRC_MOUNT:-}
       - REDIS_URL=redis://redis:6379/0
       # The Runtime brokers model credentials into spawned agents. Subscription credentials may be
@@ -259,6 +270,28 @@ services:
       # 'Add bot from URL' (terminal): agent-api forwards POST /api/meeting/bot → the gateway POST /bots.
       - VEXA_GATEWAY_URL=http://gateway:8000
       - VEXA_BOT_API_KEY=${VEXA_BOT_API_KEY:-}
+      # The in-meeting chat assistant: a participant typing "@vexa <question>" in the meeting chat
+      # gets an answer THERE, in the same conversation thread the Assistant tab shows.
+      # OFF by default — it is an UNTRUSTED input surface: anyone in the room can address it, so its
+      # turns run with read-only workspace access and the prefix is a spam filter, not a permission.
+      # NOTE: replies are delivered with VEXA_BOT_API_KEY above, and POST /bots/{p}/{n}/chat is
+      # owner-scoped — so today the assistant can only answer in meetings owned by THAT key's user.
+      - VEXA_MEET_CHAT_ENABLED=${VEXA_MEET_CHAT_ENABLED:-false}
+      - VEXA_MEET_CHAT_PREFIX=${VEXA_MEET_CHAT_PREFIX:-@vexa}
+      - VEXA_MEET_CHAT_ALWAYS=${VEXA_MEET_CHAT_ALWAYS:-false}
+      # Answer every participant, not just the meeting owner. Off: the turn runs AS the
+      # owner and Meet chat has no private replies, so a stranger asking is a stranger
+      # getting the owner's agent to answer in front of the room.
+      - VEXA_MEET_CHAT_ANYONE=${VEXA_MEET_CHAT_ANYONE:-false}
+      - VEXA_MEET_CHAT_OWNER_NAMES=${VEXA_MEET_CHAT_OWNER_NAMES:-}
+      # Ask GOOGLE which account a meeting-chat sender is, instead of trusting a display name that
+      # two accounts can share. Needs the owner's one-time read-only grant at sign-in.
+      - VEXA_GOOGLE_MEET_IDENTITY=${VEXA_GOOGLE_MEET_IDENTITY:-false}
+      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID:-}
+      - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET:-}
+      - VEXA_MEET_CHAT_MIN_INTERVAL_S=${VEXA_MEET_CHAT_MIN_INTERVAL_S:-5}
+      # The name the responder answers to, alongside the prefix.
+      - DEFAULT_BOT_NAME=${DEFAULT_BOT_NAME:-Vexa}
     volumes:
       # The Workspace store backing (dev): the worker mounts the subject's subdir; agent-api reads the tree.
       - agent-workspaces:/workspaces
@@ -302,6 +335,10 @@ services:
       # The bot's display name in the meeting. The terminal omits bot_name on join, so this is what
       # participants see; set DEFAULT_BOT_NAME in .env and restart meeting-api (no terminal rebuild).
       - DEFAULT_BOT_NAME=${DEFAULT_BOT_NAME:-Vexa}
+      # Gates the acts.v1 INTERACTIVE family on every spawn (chat_send / chat_read, and speak once
+      # that is wired). OFF by default: a bot that can type into and speak in a customer's meeting is
+      # opt-in per deployment, and per request via `voice_agent_enabled` on POST /bots.
+      - VOICE_AGENT_ENABLED=${VOICE_AGENT_ENABLED:-false}
       # The background sweeps' internal lookups: auto-join fetches per-user spawn context
       # (/internal/users/{id}/bot-context) and calendar sync discovers connected ICS feeds
       # (/internal/calendar-configs). Unset -> calendar sync no-ops, auto-join spawns uncapped.
@@ -533,6 +570,10 @@ services:
       #   Microsoft → ${NEXTAUTH_URL}/api/auth/callback/microsoft
       - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID:-}
       - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET:-}
+      # When on, the Google sign-in also asks for the read-only Meet scope and keeps the refresh
+      # token, so the in-meeting assistant can ask Google WHICH ACCOUNT typed a chat message. Adds a
+      # line to the consent screen and forces prompt=consent, so it is opt-in.
+      - VEXA_GOOGLE_MEET_IDENTITY=${VEXA_GOOGLE_MEET_IDENTITY:-false}
       - MICROSOFT_CLIENT_ID=${MICROSOFT_CLIENT_ID:-}
       - MICROSOFT_CLIENT_SECRET=${MICROSOFT_CLIENT_SECRET:-}
       # Microsoft tenant: "common" = work/school + personal accounts; or a specific tenant id for org-only.

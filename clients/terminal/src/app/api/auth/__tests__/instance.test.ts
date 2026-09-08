@@ -67,25 +67,31 @@ describe("/api/auth/instance — the login surface's claim-screen switch", () =>
   it("no admin anywhere → admin_exists false (claim screen shows)", async () => {
     stubAdminApi({ adminExists: false });
     const res = await instanceRoute();
-    expect(await res.json()).toEqual({ admin_exists: false });
+    expect(await res.json()).toEqual({ admin_exists: false, direct_login: false });
   });
 
   it("a configured allowlist counts as an existing admin — internal probe not even called", async () => {
     process.env.VEXA_ADMIN_EMAILS = "dmitry@vexa.ai";
     const calls = stubAdminApi({ adminExists: false });
     const res = await instanceRoute();
-    expect(await res.json()).toEqual({ admin_exists: true });
+    expect(await res.json()).toEqual({ admin_exists: true, direct_login: false });
     expect(calls.length).toBe(0);
   });
 
   it("probe unreachable → FAIL-SAFE true (plain sign-in, never a dangling claim screen)", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => { throw new Error("ECONNREFUSED"); }));
     const res = await instanceRoute();
-    expect(await res.json()).toEqual({ admin_exists: true });
+    expect(await res.json()).toEqual({ admin_exists: true, direct_login: false });
   });
 });
 
 describe("first sign-in claims the admin role", () => {
+  // These two drive the login route, which is opt-in and OFF by default (../directLogin). The claim
+  // mechanism itself is auth-method-agnostic — OAuth reaches it through the same findOrCreateUserToken
+  // — but the email route is the one this suite can call directly, so enable it here only.
+  beforeEach(() => { process.env.VEXA_ALLOW_DIRECT_LOGIN = "true"; });
+  afterEach(() => { delete process.env.VEXA_ALLOW_DIRECT_LOGIN; });
+
   it("login on a fresh instance POSTs the bootstrap claim with the user's id", async () => {
     const calls = stubAdminApi({ adminExists: false });
     const res = await loginRoute(req({ email: "new-test@vexa.ai" }));

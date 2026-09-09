@@ -14,7 +14,12 @@ COMPOSE  = docker compose -p $(PROJECT) -f docker-compose.yml
 REPO_ROOT := $(abspath ../..)
 BOT_IMAGE ?= vexa/vexa-bot:dev
 
-LOCAL = $(COMPOSE) -f docker-compose.local.yml
+# `local` used to layer a docker-compose.local.yml that pinned the handful of services this
+# checkout built, back when the rest came from published bytes. Every service is built here
+# now (IMAGE_TAG in .env selects the tag), so the overlay was a second place to say the same
+# thing — and it rotted: it still named images that had been deleted, and `make local` failed
+# on all eight while the base file resolved every one of them correctly.
+LOCAL = $(COMPOSE)
 
 .PHONY: stack-test stack-test-bot stack-test-mock stack-test-v010 dashboard-harness provision-token up dev local digest-audit down build ps logs bot _preflight _bot_check _creds_check _access
 

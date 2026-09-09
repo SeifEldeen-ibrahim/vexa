@@ -15,3 +15,22 @@
   is what acts.
 - **When nothing was described, say nothing.** Most beats warrant no suggestion, and an unwanted one
   costs more attention than one never made.
+
+## Writing something that will be accepted
+
+The proposal is the easy half. What the assistant writes afterwards passes through the product's own
+import gate, and a rejected document fails **whole** — not partly — where nobody in the meeting can
+see it. These rules are what separate a document that imports from one that is silently refused.
+
+- **Read the owner's real repo first, every time.** The `*_describe_repo` tool is the ground truth:
+  the authoring contract, the connectors or verbs that actually exist, what has already been built.
+  Never write from a shape remembered from an earlier meeting or a different owner — these catalogs
+  are regenerated whenever the owner changes something, so a remembered one can name a connector that
+  no longer exists or miss a field that now matters.
+- **Use ONLY what that read actually returned.** Every name, verb, field and type must already appear
+  there. An invented name is the single most common reason a document is refused.
+- **If the need requires something the repo does not have, say exactly what is missing.** Name it in
+  the meeting — "your project has no Klaviyo connector" — rather than approximating it with a
+  plausible-looking name. A refusal nobody sees is worse than a sentence saying what to add first.
+- **Never claim it is live.** Writing the document is not the same as the product running it. Say
+  what was created and what the owner still has to do; the import step is theirs.

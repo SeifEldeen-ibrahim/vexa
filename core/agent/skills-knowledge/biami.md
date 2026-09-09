@@ -26,8 +26,27 @@ to touch.
 per stage, stage 0 naming the process). Vexa runs BIAMI's own importer over it, so the process is
 registered in the database — never RUN. Importing and running are different BIAMI commands.
 
-**Before writing, read:** `biami_describe_repo` — the owner's own repo: its authoring contract, the connectors
-or verbs that really exist there, and what has already been built. The import gate rejects anything
-that does not already match, and an invented name is the usual reason, so this is not optional
-context — it is what makes the difference between a document that imports and one that is silently
-refused where nobody in the meeting can see it.
+**Before writing, read:** `biami_describe_repo` — the owner's own repo: its instructions, the existing
+process definitions, the plugin inventory, and above all the live `script` table. This is not
+optional context; it is the whole difference between a process that imports and one that is silently
+refused.
+
+**What the import gate enforces:**
+
+- **Use only scripts that this repo's `script` table actually contains.** Read it every time — any
+  baseline list of verbs is a starting point, never a guarantee that a given verb or plugin exists
+  in THIS deployment.
+- **Look at a verb's real plugin context and example before filling its parameters.** A verb's name
+  does not tell you its parameter contract, and guessed parameter names are a common refusal.
+- **The TSV shape is exact:** a header, then stage 0 naming the process and its defaults, then
+  contiguous integer stages 1..N. Every parameter is its own tab-delimited `key=value` field. No
+  embedded tabs or newlines inside a field — the file is split on literal tabs, not CSV-quoted.
+- **Import once per process.** Re-importing the same definition creates a SECOND process with the
+  same name rather than updating the first; updating an existing one is a deliberate replacement,
+  never a re-run and never deleting everything with a similar name.
+- **Never invent a credential to make an import pass.** Existing `temp/env/` files are opaque and may
+  hold real secrets: do not read them back, copy their values into the TSV, or echo them anywhere.
+
+**Importing is not running.** Vexa runs BIAMI's own importer, so the process is registered in the
+database — it is never executed. Deploying it is the owner's own step in Matrix (Configure repo, or
+Resync for an existing binding), so report what was registered and leave that to them.

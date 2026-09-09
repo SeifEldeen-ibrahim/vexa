@@ -24,8 +24,33 @@ today, or an integration they wish existed.
 
 **Tool (after they agree):** `partic_create_pipeline`
 
-**Before writing, read:** `partic_describe_repo` — the owner's own repo: its authoring contract, the connectors
-or verbs that really exist there, and what has already been built. The import gate rejects anything
-that does not already match, and an invented name is the usual reason, so this is not optional
-context — it is what makes the difference between a document that imports and one that is silently
-refused where nobody in the meeting can see it.
+**Before writing, read:** `partic_describe_repo` — the owner's own repo: its `AUTHORING_CONTRACT.md`
+and the real `connectors/*.json`. This is not optional context; it is the whole difference between a
+document that imports and one that is silently refused.
+
+**What the import gate enforces.** Any one of these fails the WHOLE document, not the offending part:
+
+- **A connector reference is an invented short name, never a UUID.** Each
+  `connector_bindings[].ref` must match `^[a-z][a-z0-9_]{0,63}$` — `source_api`, `dest_db`. The
+  connector files are *named* by the connector's real database id, but that id is for keeping the
+  file in sync and never appears in the document body; a UUID in a `ref` is rejected `invalid_ref`.
+- **A binding is exactly `{ref, connector_type_id, name_hint}`.** There is no `connector_id` field.
+  The project resolves a ref by matching `connector_type_id` against its own connectors.
+- **`name_hint` is the connector's exact `name`, and is REQUIRED when more than one connector shares
+  that `connector_type_id`** (two `csv` connectors, one source one destination). Missing or
+  non-matching then, the import fails as ambiguous. Names are not unique either — if two connectors
+  share both type and name, say so rather than guessing which was meant.
+- **`format` is exactly `partic.pipeline/v1`, and at most 25 connector bindings.**
+- **A connector with `configured: false` has no usable schema** — do not bind one.
+- **Shape it as a minimal variation on the contract's own worked example.** Same top-level keys, same
+  `run_config` keys, same `on_node_failure` handling. Do not free-hand a novel shape.
+- **`union` stacks, it does not widen.** A `fields[].target` must already exist on the FIRST schema in
+  `input_schema_ids`; the server validates targets against that scope alone. Union is for branches
+  that already share target names (five feeds all producing `title`/`link`), never for adding a
+  column that exists only on a later branch. If the need requires such a column, union cannot carry
+  it — say so instead of writing a field that will be rejected.
+
+**After it is written:** the owner imports it themselves in the Partic UI (Settings → GitHub → Sync).
+Import is import-or-skip with no update path: a pipeline already imported under the same name comes
+back `skipped`, which is not a failure. Never rename a pipeline to dodge that — a rename imports a
+second pipeline instead of updating the first.

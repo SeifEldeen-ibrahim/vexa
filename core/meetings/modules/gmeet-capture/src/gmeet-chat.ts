@@ -430,6 +430,36 @@ export function ensureGmeetPeopleOpen(): boolean {
   return true;
 }
 
+/** A message row's text, one fragment per run of prose in it.
+ *
+ *  A fragment is an element that either has no child elements at all, or carries prose of its own in
+ *  a direct text node. That second half is the whole point: Meet renders a message containing a link
+ *  as `<div>pull <a>https://…</a> and return the number</div>`, so a zero-children walk skips the div
+ *  and collects only the anchor — the body arrives as the bare URL with every word around it gone.
+ *  Live evidence (meeting 60): "simple one just pull <url> and return the number you will see" was
+ *  stored as `https://webhook.site/f71bce63-…` and nothing else, which made the request it carried
+ *  unreadable; the same shape silently truncates any message someone pastes a link into.
+ *
+ *  A container of element children with NO text of its own is deliberately NOT a fragment. That is
+ *  the `<span>Ada</span><span>hello</span>` shape, where gluing yields "Adahello" and hands the
+ *  sender fallback a name that is half the message. Direct text is exactly what separates one
+ *  sentence with inline markup from two separate things sitting side by side — the same reason
+ *  `scrapeGmeetParticipantEmails` refuses to concatenate a row.
+ *
+ *  `nodeType === 3` rather than `Node.TEXT_NODE`: this function is serialized into the page, where a
+ *  `Node` global exists, and into a jsdom test, where it does not. */
+function textFragments(node: Element): Array<{ el: Element; text: string }> {
+  const out: Array<{ el: Element; text: string }> = [];
+  for (const el of Array.from(node.querySelectorAll('*'))) {
+    const carriesOwnProse = Array.from(el.childNodes)
+      .some((n) => n.nodeType === 3 && (n.textContent || '').trim().length > 0);
+    if (el.childElementCount > 0 && !carriesOwnProse) continue;
+    const text = (el.textContent || '').trim();
+    if (text.length > 0) out.push({ el, text });
+  }
+  return out;
+}
+
 export function createGmeetChat(opts: GmeetChatOptions): GmeetChat {
   const log = opts.log || (() => {});
   const autoOpen = opts.autoOpen !== false;
@@ -475,23 +505,26 @@ export function createGmeetChat(opts: GmeetChatOptions): GmeetChat {
       }
     }
     if (!sender) sender = senderFromHeader(node);
-    // Leaf-text fallbacks. These run INDEPENDENTLY: the sender fallback used to be nested inside
+    // Text fallbacks. These run INDEPENDENTLY: the sender fallback used to be nested inside
     // `if (!text)`, so a row whose BODY matched a selector never got its sender recovered — every
     // message came back "Unknown". (Found live; the unit fixtures all had data-sender-name.)
-    const frags = (!text || !sender)
-      ? Array.from(node.querySelectorAll('*'))
-          .map((e) => (e.childElementCount === 0 ? (e.textContent || '').trim() : ''))
-          .filter((t) => t.length > 0)
-      : [];
+    const frags = (!text || !sender) ? textFragments(node) : [];
+    let bodyEl: Element | null = null;
     if (!text) {
       if (!frags.length) return null;
-      text = frags.reduce((a, b) => (b.length > a.length ? b : a), '');
+      const body = frags.reduce((a, b) => (b.text.length > a.text.length ? b : a));
+      text = body.text;
+      bodyEl = body.el;
     }
     if (!sender) {
       const body = text;
+      // A fragment INSIDE the body is part of the message, never its author — the anchor of
+      // "pull <a>https://…</a> now" is not a name. Excluded by ELEMENT rather than by string, so a
+      // sender the body happens to repeat ("Ada" / "Ada, see this") is still found.
       sender = frags.find((f) =>
-        f !== body && f.length <= 40 && !isChromeLabel(f)
-        && !/^\d{1,2}:\d{2}/.test(f) && /[A-Za-z]/.test(f)) || '';
+        !(bodyEl && (f.el === bodyEl || bodyEl.contains(f.el)))
+        && f.text !== body && f.text.length <= 40 && !isChromeLabel(f.text)
+        && !/^\d{1,2}:\d{2}/.test(f.text) && /[A-Za-z]/.test(f.text))?.text || '';
     }
     // Meet appends a timestamp to the sender row ("Ada 10:42").
     sender = (sender || '').replace(/\s*\d{1,2}:\d{2}\s*(AM|PM)?\s*$/i, '').trim() || 'Unknown';

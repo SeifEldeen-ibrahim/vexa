@@ -155,6 +155,48 @@ console.log('gmeet-chat: live-found defects');
 }
 
 {
+  // Live (meeting 60): a message carrying a link arrived as the BARE URL — every word around it was
+  // gone, and the request it carried ("pull this and return the number") was unreadable. Meet renders
+  // such a message as prose in direct text nodes with an <a> in the middle, so the row's only
+  // zero-children descendant is the anchor.
+  mount(panel(
+    '<div data-message-id="1"><div jsname="dTKtvb">simple one just pull '
+    + '<a href="https://webhook.site/f71bce63">https://webhook.site/f71bce63</a>'
+    + ' and return the number you see</div></div>',
+  ));
+  const seen: GmeetChatMessage[] = [];
+  const chat = createGmeetChat({ onMessage: (m) => seen.push(m), autoOpen: false });
+  check('keeps the prose around a link',
+    seen[0]?.text === 'simple one just pull https://webhook.site/f71bce63 and return the number you see');
+  check('does not mistake the link for the author', seen[0]?.sender !== 'https://webhook.site/f71bce63');
+  chat.destroy();
+}
+
+{
+  // The other half of the same rule: a container of element children with no prose of its own is TWO
+  // things side by side, not one sentence. Gluing it would make the body "Adahello" and hand the
+  // sender fallback a name that is half the message.
+  mount(panel('<div data-message-id="1"><span>Ada</span><span>hello there</span></div>'));
+  const seen: GmeetChatMessage[] = [];
+  const chat = createGmeetChat({ onMessage: (m) => seen.push(m), autoOpen: false });
+  check('does not glue sibling spans into one body', seen[0]?.text === 'hello there');
+  check('still recovers the sender from a sibling span', seen[0]?.sender === 'Ada');
+  chat.destroy();
+}
+
+{
+  // A link is not always the whole message OR the whole story: a sender that legitimately reappears
+  // inside the body must still be found, which is why the body's own descendants are excluded by
+  // ELEMENT and not by string match.
+  mount(panel('<div data-message-id="1"><span>Ada</span><div jsname="dTKtvb">Ada, see <a href="#">this</a></div></div>'));
+  const seen: GmeetChatMessage[] = [];
+  const chat = createGmeetChat({ onMessage: (m) => seen.push(m), autoOpen: false });
+  check('keeps a body whose text repeats the sender', seen[0]?.text === 'Ada, see this');
+  check('still attributes it to the sender', seen[0]?.sender === 'Ada');
+  chat.destroy();
+}
+
+{
   // ECHO: Meet gave the bot's own reply no resolvable author, so the NAME guard let it read itself
   // back. The text guard is the one that has to hold.
   const { document } = mount(

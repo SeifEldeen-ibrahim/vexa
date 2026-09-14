@@ -50,7 +50,7 @@ to an unmounted surface returns `404` on every deployment.
   transcript segments, attributed to their sender, alongside speech.
 
 - **Let the assistant answer in the meeting chat.** With `VEXA_MEET_CHAT_ENABLED=true`, a participant
-  typing `@vexa <question>` gets an answer in that chat, grounded in the live transcript. The
+  typing `@nexus <question>` gets an answer in that chat, grounded in the live transcript. The
   exchange appears in the Terminal's Assistant tab as a normal conversation thread, so anyone can
   carry it on there. `VEXA_MEET_CHAT_PREFIX` changes the address.
 
@@ -58,7 +58,7 @@ to an unmounted surface returns `404` on every deployment.
   or the transcript API.
 
 <Warning>
-**By default only you are answered.** Anyone in the room can type `@vexa`, but the assistant replies
+**By default only you are answered.** Anyone in the room can type `@nexus`, but the assistant replies
 only to the meeting's owner and ignores everyone else. The turn runs under your identity, so whatever
 it can read it could read **aloud into a room you do not control** — the owner check is what stops a
 guest driving it.
@@ -104,18 +104,18 @@ assistant refuses, and **says so in the chat** rather than going quiet:
 > meeting owner. Google Meet has no private replies, so I won't guess.
 
 An email settles it where Meet exposes one — two people can share a name, not an address. Otherwise:
-rename one account, or flip **`@vexa: anyone can ask`** for that meeting, which removes the privilege
+rename one account, or flip **`@nexus: anyone can ask`** for that meeting, which removes the privilege
 there is to steal.
 
 ### Letting anyone in the room ask
 
-The meeting toolbar's **`@vexa: only me`** ⇄ **`@vexa: anyone can ask`** decides who is answered.
+The meeting toolbar's **`@nexus: only me`** ⇄ **`@nexus: anyone can ask`** decides who is answered.
 Opened up, every participant is answered — still as you, still to the whole room. Use it when
 everyone present is someone you would hand your assistant to.
 
 ### Letting it see more than the meeting
 
-On a live meeting the Terminal shows a toggle: **`@vexa: transcript only`** ⇄ **`@vexa: workspace`**.
+On a live meeting the Terminal shows a toggle: **`@nexus: transcript only`** ⇄ **`@nexus: workspace`**.
 
 Granting `workspace` lets that meeting's assistant also read your workspace, read-only, and use the
 web — which includes **past meetings' notes**, since the copilot writes those regardless of this

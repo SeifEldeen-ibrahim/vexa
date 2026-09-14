@@ -31,6 +31,7 @@ import time
 import urllib.error
 import urllib.request
 
+from control_plane.meeting_chat_responder import meet_chat_prefix
 from shared import units
 
 logger = logging.getLogger("agent_api.tx_watch")
@@ -333,7 +334,9 @@ def _deliver_suggestion(p: dict, post_reply, owner_for, remember=None, already_p
     text = body or title
     if not text.rstrip().endswith("?"):
         text = f"{text.rstrip().rstrip('.')}?"
-    text = f"{text} — reply \"@vexa yes\" and I'll do it."
+    # The token comes from the one place that names it: a hint must quote what the gate accepts, or
+    # the room is told to type a phrase the assistant then ignores.
+    text = f"{text} — reply \"{meet_chat_prefix()} yes\" and I'll do it."
     try:
         ok = post_reply(str(owner), platform, native, text)
         logger.info("meet-suggest: %s for %s/%s — %r",

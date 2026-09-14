@@ -284,14 +284,14 @@ services:
       # 'Add bot from URL' (terminal): agent-api forwards POST /api/meeting/bot → the gateway POST /bots.
       - VEXA_GATEWAY_URL=http://gateway:8000
       - VEXA_BOT_API_KEY=${VEXA_BOT_API_KEY:-}
-      # The in-meeting chat assistant: a participant typing "@vexa <question>" in the meeting chat
+      # The in-meeting chat assistant: a participant typing "@nexus <question>" in the meeting chat
       # gets an answer THERE, in the same conversation thread the Assistant tab shows.
       # OFF by default — it is an UNTRUSTED input surface: anyone in the room can address it, so its
       # turns run with read-only workspace access and the prefix is a spam filter, not a permission.
       # NOTE: replies are delivered with VEXA_BOT_API_KEY above, and POST /bots/{p}/{n}/chat is
       # owner-scoped — so today the assistant can only answer in meetings owned by THAT key's user.
       - VEXA_MEET_CHAT_ENABLED=${VEXA_MEET_CHAT_ENABLED:-false}
-      - VEXA_MEET_CHAT_PREFIX=${VEXA_MEET_CHAT_PREFIX:-@vexa}
+      - VEXA_MEET_CHAT_PREFIX=${VEXA_MEET_CHAT_PREFIX:-@nexus}
       - VEXA_MEET_CHAT_ALWAYS=${VEXA_MEET_CHAT_ALWAYS:-false}
       # Answer every participant, not just the meeting owner. Off: the turn runs AS the
       # owner and Meet chat has no private replies, so a stranger asking is a stranger
@@ -305,7 +305,7 @@ services:
       - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET:-}
       - VEXA_MEET_CHAT_MIN_INTERVAL_S=${VEXA_MEET_CHAT_MIN_INTERVAL_S:-5}
       # The name the responder answers to, alongside the prefix.
-      - DEFAULT_BOT_NAME=${DEFAULT_BOT_NAME:-Vexa}
+      - DEFAULT_BOT_NAME=${DEFAULT_BOT_NAME:-Nexus}
     volumes:
       # The Workspace store backing (dev): the worker mounts the subject's subdir; agent-api reads the tree.
       - agent-workspaces:/workspaces
@@ -348,7 +348,7 @@ services:
       - INTERNAL_API_SECRET=${INTERNAL_API_SECRET}
       # The bot's display name in the meeting. The terminal omits bot_name on join, so this is what
       # participants see; set DEFAULT_BOT_NAME in .env and restart meeting-api (no terminal rebuild).
-      - DEFAULT_BOT_NAME=${DEFAULT_BOT_NAME:-Vexa}
+      - DEFAULT_BOT_NAME=${DEFAULT_BOT_NAME:-Nexus}
       # Gates the acts.v1 INTERACTIVE family on every spawn (chat_send / chat_read, and speak once
       # that is wired). OFF by default: a bot that can type into and speak in a customer's meeting is
       # opt-in per deployment, and per request via `voice_agent_enabled` on POST /bots.
@@ -1017,7 +1017,7 @@ services:
       - JWT_SECRET=${NEXTAUTH_SECRET:-dev-nextauth-secret}
       - ALLOW_REGISTRATIONS=${DASHBOARD_ALLOW_REGISTRATIONS:-true}
       - NEXT_PUBLIC_HOSTED_MODE=false
-      - DEFAULT_BOT_NAME=${DEFAULT_BOT_NAME:-Vexa}
+      - DEFAULT_BOT_NAME=${DEFAULT_BOT_NAME:-Nexus}
     healthcheck:
       test: ["CMD", "node", "-e", "require('http').get('http://localhost:3000/',r=>process.exit(r.statusCode<500?0:1)).on('error',()=>process.exit(1))"]
       interval: 10s

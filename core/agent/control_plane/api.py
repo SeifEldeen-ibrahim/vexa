@@ -38,7 +38,7 @@ from control_plane import meeting_steering
 from control_plane.meet_identity import MeetIdentityResolver
 from control_plane.meeting_chat_responder import (
     MeetingChatResponder, MEET_CHAT_WEB_TOOLS, MEET_CHAT_WORKSPACE_TOOLS,
-    SCOPE_TRANSCRIPT, SCOPE_WORKSPACE, is_same_proposal, meet_chat_tools,
+    SCOPE_TRANSCRIPT, SCOPE_WORKSPACE, is_same_proposal, meet_chat_prefix, meet_chat_tools,
 )
 from control_plane import schedule_digest as schedule_digest_mod
 from control_plane import routines as routines_mod
@@ -3188,8 +3188,8 @@ def create_app(
             run_turn=_meet_chat_turn,
             post_reply=_meet_chat_post,
             access=_meet_chat_access,
-            bot_name=os.environ.get("DEFAULT_BOT_NAME", "Vexa"),
-            prefix=os.environ.get("VEXA_MEET_CHAT_PREFIX", "@vexa"),
+            bot_name=os.environ.get("DEFAULT_BOT_NAME", "Nexus"),
+            prefix=meet_chat_prefix(),
             always=_env_flag("VEXA_MEET_CHAT_ALWAYS", default=False),
             # Default: only the meeting's OWNER is answered. Everyone else is read and ignored.
             anyone=_env_flag("VEXA_MEET_CHAT_ANYONE", default=False),

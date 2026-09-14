@@ -102,7 +102,7 @@ spec:
             - name: VEXA_MEET_CHAT_ENABLED
               value: {{ .Values.agentApi.meetChat.enabled | default false | quote }}
             - name: VEXA_MEET_CHAT_PREFIX
-              value: {{ .Values.agentApi.meetChat.prefix | default "@vexa" | quote }}
+              value: {{ .Values.agentApi.meetChat.prefix | default "@nexus" | quote }}
             - name: VEXA_MEET_CHAT_ALWAYS
               value: {{ .Values.agentApi.meetChat.always | default false | quote }}
             - name: VEXA_MEET_CHAT_ANYONE

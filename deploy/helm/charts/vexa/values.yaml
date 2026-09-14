@@ -194,7 +194,7 @@ meetingApi:
   service:
     type: ClusterIP
     port: 8080
-  defaultBotName: "Vexa"    # the bot's display name; the terminal omits bot_name so this is what
+  defaultBotName: "Nexus"    # the bot's display name; the terminal omits bot_name so this is what
                             # participants see. Blank it to get the service's VexaBot-{random}.
   transcriptionServiceUrl: ""   # STT endpoint the spawned bot transcribes against (empty ⇒ capture only)
   # Optional service-authority.v1 adapter JSON. Empty preserves stock OSS allow-all. A configured
@@ -306,13 +306,13 @@ runtime:
 # Agent control plane — /invocations dispatch + /api/chat SSE (compose: agent-api → :8100).
 agentApi:
   enabled: true
-  # The in-meeting chat assistant: a participant typing "@vexa <question>" in a meeting's own chat
+  # The in-meeting chat assistant: a participant typing "@nexus <question>" in a meeting's own chat
   # gets an answer there, in the same thread the Assistant tab shows. OFF by default because ANY
   # participant — including an external guest — can address it; its turns run read-only, and the
   # prefix is a spam filter rather than a permission check.
   meetChat:
     enabled: false
-    prefix: "@vexa"
+    prefix: "@nexus"
     always: false               # true = treat EVERY chat line as addressed; a dedicated room only
     anyone: false               # true = answer every participant, not just the meeting owner
     ownerNames: ""              # extra Meet display names that count as the owner (comma separated)

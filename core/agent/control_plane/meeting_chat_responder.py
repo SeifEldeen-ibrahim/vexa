@@ -1,6 +1,6 @@
 """meeting_chat_responder — the assistant, reachable from inside the meeting's own chat.
 
-A participant types ``@vexa what did we decide about pricing?`` into the Google Meet chat; the
+A participant types ``@nexus what did we decide about pricing?`` into the Google Meet chat; the
 answer arrives in that same chat, from the same agent, in the same conversation thread the Terminal's
 Assistant tab shows. One assistant, two transports.
 
@@ -28,7 +28,7 @@ THREE RULES THIS MODULE EXISTS TO ENFORCE, each because the obvious implementati
    assumption does not hold here, so the dispatch pins ``ro`` explicitly rather than inheriting it.
 
 WHO MAY ASK. By default only the meeting's OWNER is answered; everyone else is read and ignored.
-That is the real permission check — the ``@vexa`` prefix is only a spam and cost filter, and anyone
+That is the real permission check — the ``@nexus`` prefix is only a spam and cost filter, and anyone
 in the room can type it.
 
 Identity is required IN PROPORTION TO WHAT IS REACHABLE, because a display name is not an identity:
@@ -65,7 +65,7 @@ Identity, in order of strength — and the top rung is the reason this module ex
 GROUNDING SCOPE — and why the default is the narrow one. The turn runs as the meeting's OWNER, so
 whatever it can read, it can read ALOUD into a room the owner does not control. Read-only mounts stop
 an untrusted participant CHANGING the workspace; they do nothing about a guest typing
-"@vexa what do my notes say about salaries?" and getting the answer printed into the chat. Access is
+"@nexus what do my notes say about salaries?" and getting the answer printed into the chat. Access is
 therefore:
 
 The axis is WHICH HISTORY is in reach — not whether the assistant is capable. Both scopes can search
@@ -84,6 +84,7 @@ the room you are in today.
 from __future__ import annotations
 
 import logging
+import os
 import re
 import threading
 import time
@@ -91,6 +92,22 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Callable, Optional
 
 logger = logging.getLogger("agent_api.meet_chat")
+
+#: The token that addresses the assistant in a meeting chat, when the deployment does not name one.
+DEFAULT_MEET_CHAT_PREFIX = "@nexus"
+
+
+def meet_chat_prefix(env: Optional[dict] = None) -> str:
+    """The token this deployment answers to in a meeting chat — ONE place names it.
+
+    Everything that TELLS a participant how to address the assistant has to say exactly what the gate
+    accepts, so no other module writes the literal. A hint that spelled its own copy drifted the
+    moment a deployment renamed the bot: the room was told to reply ``"@vexa yes"`` while the gate had
+    moved on and ignored it, which reads as the assistant ignoring a plain instruction it gave itself.
+    """
+    source = env if env is not None else os.environ
+    return (source.get("VEXA_MEET_CHAT_PREFIX") or "").strip() or DEFAULT_MEET_CHAT_PREFIX
+
 
 #: Meet's composer caps one message at 500 characters; meeting-api refuses more. Replies are chunked
 #: to just under that so a long answer arrives as several messages rather than a 422.
@@ -313,23 +330,23 @@ def address_to(reply: str, sender: str) -> str:
 def addressed_question(text: str, *, bot_name: str, prefix: str, always: bool = False) -> Optional[str]:
     """The question a chat line is asking the bot, or ``None`` when it is not addressed to it.
 
-    Recognised: the configured prefix (``@vexa …``), the bot's own display name with or without an
+    Recognised: the configured prefix (``@nexus …``), the bot's own display name with or without an
     ``@``, and — only when ``always`` is set — every line. Returns the message with the address
     stripped, so the agent sees the question rather than the salutation.
 
-    The address may sit ANYWHERE in the line, not only at the front. People write "welcome @vexa how
-    are you?" and "so @vexa, what did we decide?" — leading-only matching ignored both, silently, and
+    The address may sit ANYWHERE in the line, not only at the front. People write "welcome @nexus how
+    are you?" and "so @nexus, what did we decide?" — leading-only matching ignored both, silently, and
     a bot that ignores you when you have plainly addressed it reads as broken rather than as strict.
     The address is cut out and the rest is stitched back together, so the model sees the sentence the
     person wrote rather than a salutation it has to parse around.
 
-    A bare address with no question ("@vexa") returns None: there is nothing to answer, and replying
+    A bare address with no question ("@nexus") returns None: there is nothing to answer, and replying
     "yes?" into a meeting is noise."""
     body = (text or "").strip()
     if not body:
         return None
     lower = body.lower()
-    # Longest first: "@vexa" must win over "vexa", or the bare name would match inside the prefix
+    # Longest first: "@nexus" must win over "nexus", or the bare name would match inside the prefix
     # and leave a stray "@" at the head of the question.
     tokens = sorted({t.strip() for t in (prefix, f"@{bot_name}".strip(), bot_name.strip()) if t.strip()},
                     key=len, reverse=True)
@@ -373,7 +390,7 @@ class MeetingChatResponder:
         post_reply: Callable[[str, str, str, str], bool],
         access: Optional[Callable[[str], str]] = None,
         bot_name: str = "Vexa",
-        prefix: str = "@vexa",
+        prefix: Optional[str] = None,
         always: bool = False,
         anyone: bool = False,
         anyone_for: Optional[Callable[[str], bool]] = None,
@@ -391,7 +408,7 @@ class MeetingChatResponder:
         self._post_reply = post_reply
         self._access = access
         self._bot_name = bot_name
-        self._prefix = prefix
+        self._prefix = prefix or meet_chat_prefix()
         self._always = always
         self._anyone = anyone
         self._anyone_for = anyone_for
@@ -648,7 +665,7 @@ class MeetingChatResponder:
         """The proposal this meeting is waiting on, phrased for the prompt — or "" when there is none.
 
         The copilot's suggestion is posted into the room by the RELAY, not by an agent turn, so the
-        assistant has no memory of having offered anything. Without this, "@vexa yes" arrives as a
+        assistant has no memory of having offered anything. Without this, "@nexus yes" arrives as a
         word with no referent and the assistant asks what is meant — in a meeting, that reads as the
         bot having forgotten its own question ten seconds later.
 

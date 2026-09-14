@@ -9,6 +9,7 @@ proposal is posted at all.
 """
 from __future__ import annotations
 
+from control_plane.meeting_chat_responder import DEFAULT_MEET_CHAT_PREFIX, meet_chat_prefix
 from control_plane.transcription_watcher import _deliver_suggestion
 
 
@@ -45,7 +46,24 @@ def test_the_proposal_reads_as_a_QUESTION_and_says_how_to_accept():
     _deliver_suggestion(_payload(), post, lambda key: "6")
     text = post.posts[0]["text"]
     assert "?" in text
-    assert '@vexa yes' in text
+    assert f'{DEFAULT_MEET_CHAT_PREFIX} yes' in text
+
+
+def test_the_accept_hint_quotes_the_token_the_GATE_accepts(monkeypatch):
+    """The hint and the gate read one setting. When they did not, a renamed deployment told the room
+    to reply "@vexa yes" while the gate had moved on — the assistant ignoring its own instruction."""
+    monkeypatch.setenv("VEXA_MEET_CHAT_PREFIX", "@somethingelse")
+    post = _Poster()
+    _deliver_suggestion(_payload(), post, lambda key: "6")
+    assert '@somethingelse yes' in post.posts[0]["text"]
+    assert '@nexus yes' not in post.posts[0]["text"]
+
+
+def test_an_unset_or_blank_setting_falls_back_to_the_shipped_token(monkeypatch):
+    monkeypatch.setenv("VEXA_MEET_CHAT_PREFIX", "   ")
+    assert meet_chat_prefix() == DEFAULT_MEET_CHAT_PREFIX
+    monkeypatch.delenv("VEXA_MEET_CHAT_PREFIX", raising=False)
+    assert meet_chat_prefix() == "@nexus"
 
 
 def test_a_body_that_is_already_a_question_is_not_double_punctuated():

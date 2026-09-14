@@ -195,7 +195,7 @@ function MeetingCanvasBody({ meetingId }: { meetingId?: string }) {
               }}
             >
               <span style={{ width: 7, height: 7, borderRadius: "50%", background: chatAnyone ? "var(--on-accent)" : "var(--t3)", flex: "none" }} />
-              {chatAnyone ? "@vexa: anyone can ask" : "@vexa: only me"}
+              {chatAnyone ? "@nexus: anyone can ask" : "@nexus: only me"}
             </button>
             <button
               type="button"
@@ -215,11 +215,11 @@ function MeetingCanvasBody({ meetingId }: { meetingId?: string }) {
               }}
             >
               <span style={{ width: 7, height: 7, borderRadius: "50%", background: chatWorkspace ? "var(--on-accent)" : "var(--t3)", flex: "none" }} />
-              {chatWorkspace ? "@vexa: workspace" : "@vexa: transcript only"}
+              {chatWorkspace ? "@nexus: workspace" : "@nexus: transcript only"}
             </button>
             {/* What this meeting is ABOUT — a third axis, orthogonal to the two grants beside it.
                 `anyone` decides who may ask; `workspace` decides how much history is in reach;
-                this decides which products @vexa has ever heard of. All three compose: a
+                this decides which products @nexus has ever heard of. All three compose: a
                 transcript-only meeting with a product on can still propose and still build. */}
             <MeetingSkills meetingId={meetingId} nativeId={nativeId} />
           </>

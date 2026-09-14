@@ -50,7 +50,7 @@ export ADMIN_API_TOKEN="${ADMIN_API_TOKEN:-${ADMIN_TOKEN:-$(python3 -c "import s
 # internal tier (F95). A random per-boot value keeps the one-command quickstart working and is
 # nobody's to guess; set INTERNAL_API_SECRET explicitly when something outside talks in.
 export INTERNAL_API_SECRET="${INTERNAL_API_SECRET:-$(python3 -c "import secrets; print(secrets.token_hex(32))")}"
-export DEFAULT_BOT_NAME="${DEFAULT_BOT_NAME:-Vexa}"
+export DEFAULT_BOT_NAME="${DEFAULT_BOT_NAME:-Nexus}"
 
 # Optional Google Meet speaker-stream tuning. Empty values preserve bot defaults; the runtime
 # profile forwards configured values to every spawned bot process.
@@ -99,10 +99,10 @@ export AGENT_WORKER_COMMAND="${AGENT_WORKER_COMMAND:-/usr/local/bin/vexa-agent-w
 export VEXA_AGENT_DEFAULT_SUBJECT="${VEXA_AGENT_DEFAULT_SUBJECT:-u_live}"
 export VEXA_DISPATCH_SIGNING_KEY="${VEXA_DISPATCH_SIGNING_KEY:-dev-dispatch-signing-key}"
 export VEXA_BOT_API_KEY="${VEXA_BOT_API_KEY:-}"
-# The in-meeting chat assistant ("@vexa <question>" typed in a meeting's own chat). Off by default:
+# The in-meeting chat assistant ("@nexus <question>" typed in a meeting's own chat). Off by default:
 # any participant can address it, so it is an untrusted-input surface.
 export VEXA_MEET_CHAT_ENABLED="${VEXA_MEET_CHAT_ENABLED:-false}"
-export VEXA_MEET_CHAT_PREFIX="${VEXA_MEET_CHAT_PREFIX:-@vexa}"
+export VEXA_MEET_CHAT_PREFIX="${VEXA_MEET_CHAT_PREFIX:-@nexus}"
 export VEXA_MEET_CHAT_ALWAYS="${VEXA_MEET_CHAT_ALWAYS:-false}"
 export VEXA_MEET_CHAT_ANYONE="${VEXA_MEET_CHAT_ANYONE:-false}"
 export VEXA_MEET_CHAT_OWNER_NAMES="${VEXA_MEET_CHAT_OWNER_NAMES:-}"

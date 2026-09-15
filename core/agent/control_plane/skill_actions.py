@@ -287,16 +287,55 @@ def partic_describe(repo: Path) -> dict:
                     fields = [str(x.get("name")) for x in (r.get("fields") or [])
                               if isinstance(x, dict) and x.get("name")]
                     resources.append({"name": str(r["name"]), "fields": fields[:40]})
+            response_schema = (data.get("config") or {}).get("response_schema")
             connectors.append({
                 "name": str(data.get("name") or ""),
                 "connector_type_id": str(data.get("connector_type_id") or ""),
                 "status": str(data.get("status") or ""),
                 "resources": resources,
+                # An enrich/web_search step contributes NO fields unless it repeats this array
+                # itself, so every later reference into its namespace fails `unknown_field_ref` —
+                # far from where the key is missing. It is field names, like the rest of the schema.
+                "response_schema": response_schema[:60] if isinstance(response_schema, list) else [],
             })
-    existing = sorted(p.name for p in (Path(repo) / PARTIC_DIR).glob("*.json")) \
-        if (Path(repo) / PARTIC_DIR).is_dir() else []
+    pdir = Path(repo) / PARTIC_DIR
+    existing = sorted(p.name for p in pdir.glob("*.json")) if pdir.is_dir() else []
     return {"authoring_contract": contract, "connectors": connectors,
-            "existing_pipelines": existing[:50]}
+            "existing_pipelines": existing[:50],
+            "pipeline_versions": partic_versions(repo)}
+
+
+def partic_versions(repo: Path) -> list:
+    """The pipelines Partic has already exported, and the versions each one has.
+
+    This is what makes UPDATING one possible. A document carrying `source.pipeline_id` adds a
+    version to that pipeline instead of creating another; without the id it can only ever create.
+    There is no lookup to ask — but Partic exports each version to `pipelines/<pipeline_id>/<tag>.json`,
+    so the id is sitting in the repo as a directory name, next to the display name the meeting will
+    actually say out loud.
+
+    Sync itself never reads these folders (its scan lists one level and skips directories), which is
+    why our own documents are written flat and this is a read-only convenience."""
+    d = Path(repo) / PARTIC_DIR
+    if not d.is_dir():
+        return []
+    out = []
+    for sub in sorted(x for x in d.iterdir() if x.is_dir()):
+        tags, name = [], ""
+        # by TAG, not by file name: "v1.1.json" sorts before "v1.json" and the model reads this
+        # list to pick the NEXT tag.
+        for f in sorted(sub.glob("*.json"), key=lambda x: x.stem):
+            tags.append(f.stem)
+            if not name:
+                try:
+                    data = json.loads(f.read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    continue
+                if isinstance(data, dict):
+                    name = str((data.get("metadata") or {}).get("name") or "")
+        if tags:
+            out.append({"pipeline_id": sub.name, "name": name, "versions": tags[:20]})
+    return out[:50]
 
 
 def biami_describe(repo: Path) -> dict:

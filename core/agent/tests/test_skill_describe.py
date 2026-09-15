@@ -34,8 +34,16 @@ def _partic_repo(tmp_path):
         "id": "uuid-2", "name": "dest", "connector_type_id": "csv", "status": "connected",
         "config": {"schema": {"resources": [{"name": "rows", "fields": []}]}},
     }))
+    (d / "c.json").write_text(json.dumps({
+        "id": "uuid-3", "name": "enricher", "connector_type_id": "http_api", "status": "connected",
+        "config": {"response_schema": ["content", "metadata.lang"]},
+    }))
     (tmp_path / "pipelines").mkdir()
     (tmp_path / "pipelines" / "existing.json").write_text("{}")
+    v = tmp_path / "pipelines" / "8f0e-uuid"
+    v.mkdir()
+    (v / "v1.json").write_text(json.dumps({"metadata": {"name": "Klaviyo to CSV"}}))
+    (v / "v1.1.json").write_text(json.dumps({"metadata": {"name": "Klaviyo to CSV"}}))
     return tmp_path
 
 
@@ -52,7 +60,7 @@ def test_the_REAL_connectors_are_listed_with_their_types_and_fields(tmp_path):
     really exists in THIS project, so without the list it guesses, and a guess is a rejection."""
     got = skill_actions.partic_describe(_partic_repo(tmp_path))
     by_name = {c["name"]: c for c in got["connectors"]}
-    assert set(by_name) == {"klavyio", "dest"}
+    assert set(by_name) == {"klavyio", "dest", "enricher"}
     assert by_name["klavyio"]["connector_type_id"] == "klaviyo"
     assert by_name["klavyio"]["resources"][0]["fields"] == ["email", "phone_number"]
 
@@ -62,16 +70,38 @@ def test_it_says_what_already_EXISTS(tmp_path):
     assert skill_actions.partic_describe(_partic_repo(tmp_path))["existing_pipelines"] == ["existing.json"]
 
 
+def test_an_enrich_connectors_RESPONSE_SCHEMA_travels_with_it(tmp_path):
+    """An `enrich_api`/`web_search` operation contributes no fields unless it repeats this array on
+    itself — and then every downstream reference into its namespace fails `unknown_field_ref`, far
+    from the step that is actually missing the key. The model can only repeat what it was shown."""
+    got = skill_actions.partic_describe(_partic_repo(tmp_path))
+    by_name = {c["name"]: c for c in got["connectors"]}
+    assert by_name["enricher"]["response_schema"] == ["content", "metadata.lang"]
+    assert by_name["dest"]["response_schema"] == []
+
+
+def test_the_EXPORTED_versions_carry_the_pipeline_id_that_makes_an_update_possible(tmp_path):
+    """Without `source.pipeline_id` a document can only ever create another pipeline. There is no
+    lookup to ask for that id — but Partic exports each version under `pipelines/<pipeline_id>/`,
+    so the id is a directory name, next to the display name the meeting will say out loud."""
+    got = skill_actions.partic_describe(_partic_repo(tmp_path))
+    assert got["pipeline_versions"] == [
+        {"pipeline_id": "8f0e-uuid", "name": "Klaviyo to CSV", "versions": ["v1", "v1.1"]}]
+    # and the flat file stays where Sync can actually see it — a version folder is not a pipeline
+    assert got["existing_pipelines"] == ["existing.json"]
+
+
 def test_a_bare_repo_describes_as_EMPTY_rather_than_raising(tmp_path):
     """A wrong repo pinned must degrade to "I can see nothing here", never to a failed turn."""
     got = skill_actions.partic_describe(tmp_path)
-    assert got == {"authoring_contract": "", "connectors": [], "existing_pipelines": []}
+    assert got == {"authoring_contract": "", "connectors": [], "existing_pipelines": [],
+                   "pipeline_versions": []}
 
 
 def test_an_unreadable_connector_file_is_skipped(tmp_path):
     repo = _partic_repo(tmp_path)
     (repo / "connectors" / "broken.json").write_text("{not json")
-    assert len(skill_actions.partic_describe(repo)["connectors"]) == 2
+    assert len(skill_actions.partic_describe(repo)["connectors"]) == 3
 
 
 def test_a_huge_contract_is_capped(tmp_path):

@@ -24,6 +24,11 @@ def _copy_sources() -> list[str]:
         line = line.strip()
         if not line.startswith("COPY"):
             continue
+        # `COPY --from=<image|stage> <src>` reads <src> out of THAT image's filesystem — the repo
+        # has nothing at that path and never will (the JRE comes from eclipse-temurin this way).
+        # Only a context-relative COPY is a claim about this repo's layout, which is what is pinned.
+        if any(t.startswith("--from=") for t in line.split()):
+            continue
         parts = [p for p in line.split()[1:] if not p.startswith("--")]
         sources.extend(parts[:-1])           # last token is the destination
     return sources

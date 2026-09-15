@@ -839,7 +839,11 @@ function gateDataflow() {
   // (a2) completeness — the model covers EVERY real service/module/contract/client (no drift), and no
   // node points at a path that no longer exists (no phantom). This is the anti-drift guard: add a module
   // without registering it here and CI goes red.
-  const lsdirs = (p) => existsSync(join(ROOT, p)) ? readdirSync(join(ROOT, p)).filter((n) => { try { return statSync(join(ROOT, p, n)).isDirectory(); } catch { return false; } }) : [];
+  // A generated directory is not a module. `__pycache__` under core/<dom>/src is the one that bites:
+  // this suite runs the Python gate BEFORE arch-report re-runs this one, so the suite creates the very
+  // directory it then reports as an unregistered module — red on the second half of its own run.
+  const GENERATED = (n) => n.startsWith(".") || n === "__pycache__" || n === "node_modules" || n.endsWith(".egg-info");
+  const lsdirs = (p) => existsSync(join(ROOT, p)) ? readdirSync(join(ROOT, p)).filter((n) => { if (GENERATED(n)) return false; try { return statSync(join(ROOT, p, n)).isDirectory(); } catch { return false; } }) : [];
   const required = new Set();
   const modelPaths = new Set(nodes.flatMap((n) => (n.metadata || []).map((m) => m.path).filter(Boolean)));
   for (const dom of lsdirs("core")) {

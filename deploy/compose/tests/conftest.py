@@ -59,6 +59,8 @@ MCP_HOST_PORT = _host_port("MCP_HOST_PORT", "18010")
 POSTGRES_HOST_PORT = _host_port("POSTGRES_HOST_PORT", "5458")
 MINIO_HOST_PORT = _host_port("MINIO_HOST_PORT", "9000")
 MINIO_CONSOLE_HOST_PORT = _host_port("MINIO_CONSOLE_HOST_PORT", "9001")
+FLOWS_API_HOST_PORT = _host_port("FLOWS_API_HOST_PORT", "18200")
+DASHBOARD_HOST_PORT = _host_port("DASHBOARD_PORT", "13001")
 GATEWAY_URL = f"http://127.0.0.1:{GATEWAY_PORT}"
 ADMIN_API_URL = f"http://127.0.0.1:{ADMIN_API_HOST_PORT}"
 MEETING_API_URL = f"http://127.0.0.1:{MEETING_API_HOST_PORT}"
@@ -67,6 +69,11 @@ RUNTIME_URL = f"http://127.0.0.1:{RUNTIME_HOST_PORT}"
 # Env the stack boots with — pinned so the test knows the secrets it must present.
 ADMIN_TOKEN = "gate-admin-token"
 INTERNAL_API_SECRET = "gate-internal-secret"
+# flows-api fail-closes on an unset key (F95: no default, because a weak one makes an unconfigured
+# deployment look configured). The gate has to MINT one like the two above — a worktree has no
+# `deploy/compose/.env` to fall through to, so without this flows-api exits at boot, goes unhealthy,
+# and every service that depends_on it fails `up` with "dependency failed to start".
+FLOWS_API_KEY = "gate-flows-api-key"
 MINIO_BUCKET = "vexa"
 
 SERVICES = ["redis", "postgres", "minio", "admin-api", "runtime", "meeting-api", "gateway"]
@@ -133,6 +140,7 @@ def _stack_env() -> dict:
         "ADMIN_TOKEN": ADMIN_TOKEN,
         "INTERNAL_API_SECRET": INTERNAL_API_SECRET,
         "MINIO_BUCKET": MINIO_BUCKET,
+        "VEXA_FLOWS_API_KEY": FLOWS_API_KEY,
         "BROWSER_IMAGE": os.getenv("BROWSER_IMAGE", "vexaai/vexa-bot:v012"),
         "API_GATEWAY_HOST_PORT": GATEWAY_PORT,
         "ADMIN_API_PORT": ADMIN_API_HOST_PORT,
@@ -146,6 +154,8 @@ def _stack_env() -> dict:
         "POSTGRES_HOST_PORT": POSTGRES_HOST_PORT,
         "MINIO_HOST_PORT": MINIO_HOST_PORT,
         "MINIO_CONSOLE_HOST_PORT": MINIO_CONSOLE_HOST_PORT,
+        "FLOWS_API_HOST_PORT": FLOWS_API_HOST_PORT,
+        "DASHBOARD_PORT": DASHBOARD_HOST_PORT,
         # Docker-Desktop / Linux root socket → group 0 is fine for the mounted socket.
         "DOCKER_GID": os.getenv("DOCKER_GID", "0"),
         "LOG_LEVEL": os.getenv("LOG_LEVEL", "info"),

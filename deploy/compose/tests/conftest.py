@@ -75,6 +75,13 @@ INTERNAL_API_SECRET = "gate-internal-secret"
 # and every service that depends_on it fails `up` with "dependency failed to start".
 FLOWS_API_KEY = "gate-flows-api-key"
 MINIO_BUCKET = "vexa"
+# The gate READS minio back with these (``Stack.minio_ls``), so the stack has to BOOT with them.
+# They are credentials, not ports, but they fall through to `deploy/compose/.env` exactly like a
+# port does — and the failure is quieter: minio comes up on the developer's real keys, `mc` is
+# refused, and an empty listing reads as "the object was never stored" rather than "we could not
+# look". That sends you hunting a storage bug that does not exist.
+MINIO_ACCESS_KEY = "vexa-access-key"
+MINIO_SECRET_KEY = "vexa-secret-key"
 
 SERVICES = ["redis", "postgres", "minio", "admin-api", "runtime", "meeting-api", "gateway"]
 HEALTHCHECKED = ["redis", "postgres", "minio", "admin-api", "runtime", "meeting-api", "gateway"]
@@ -140,6 +147,16 @@ def _stack_env() -> dict:
         "ADMIN_TOKEN": ADMIN_TOKEN,
         "INTERNAL_API_SECRET": INTERNAL_API_SECRET,
         "MINIO_BUCKET": MINIO_BUCKET,
+        "MINIO_ACCESS_KEY": MINIO_ACCESS_KEY,
+        "MINIO_SECRET_KEY": MINIO_SECRET_KEY,
+        # EMPTY on purpose: a fresh install has no transcription backend, and that is the state
+        # `wizard_stt_flow_test` proves the typed 503 from. The compose file already defaults both to
+        # empty; only `deploy/compose/.env` puts a real backend here, so leaving them unpinned made
+        # the gate inherit the developer's. Configured-but-unreachable is the worst version of that —
+        # the spawn still 503s, so the test's "skip when configured" guard (which watches for a 201)
+        # never fires, and the RED leg fails on a reason that was never about the code.
+        "TRANSCRIPTION_SERVICE_URL": "",
+        "TRANSCRIPTION_SERVICE_TOKEN": "",
         "VEXA_FLOWS_API_KEY": FLOWS_API_KEY,
         "BROWSER_IMAGE": os.getenv("BROWSER_IMAGE", "vexaai/vexa-bot:v012"),
         "API_GATEWAY_HOST_PORT": GATEWAY_PORT,
@@ -228,11 +245,18 @@ class Stack:
         return "\n".join(rows).strip()
 
     def minio_ls(self, prefix: str) -> list[str]:
-        """List minio object keys under a prefix via the mc client baked into the minio image."""
-        # alias is set lazily; ignore the error if it already exists.
+        """List minio object keys under a prefix via the mc client baked into the minio image.
+
+        A FAILED listing raises. It used to be swallowed (`check=False`) and returned `[]`, which is
+        indistinguishable from an empty bucket at the call site — so a caller asserting an object had
+        landed reported "chunk object not in minio: []" when the truth was that `mc` had been refused
+        and nothing had been looked at. "I could not look" and "it is not there" are different
+        answers and only one of them is about the code under test."""
+        # The alias is set lazily and re-setting an existing one is fine, so only this step tolerates
+        # a non-zero exit.
         self.exec("minio", "mc", "alias", "set", "local", "http://localhost:9000",
-                  "vexa-access-key", "vexa-secret-key", check=False)
-        out = self.exec("minio", "mc", "ls", "--recursive", f"local/{self.bucket}/{prefix}", check=False)
+                  MINIO_ACCESS_KEY, MINIO_SECRET_KEY, check=False)
+        out = self.exec("minio", "mc", "ls", "--recursive", f"local/{self.bucket}/{prefix}")
         keys = []
         for line in out.splitlines():
             parts = line.split()

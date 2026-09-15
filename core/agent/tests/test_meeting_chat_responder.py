@@ -930,6 +930,32 @@ def test_the_assistant_is_not_told_to_PARSE_the_approval():
     assert "refusal" in prompt and "do nothing" in prompt
 
 
+def test_a_COPYABLE_line_is_told_to_stand_alone():
+    """Matrix's tool returns a line somebody copies and sends to Matrix's own agent. "Say what came
+    back in one line" is right for a product that ACTED and wrong here: anything the assistant adds
+    to that message gets copied with it, and the agent is then sent a sentence nobody meant to
+    write. The prompt has to say: post it exactly, by itself."""
+    rec = _Recorder()
+    r = _responder(rec, pending_suggestion=lambda key: "Want the text to send to the Matrix agent?")
+    _offer(r, "@vexa yes")
+    _settle(rec)
+    prompt = rec.turns[0][3].lower()
+    assert "`prompt`" in prompt
+    assert "exactly" in prompt and "by itself" in prompt
+
+
+def test_the_clause_does_not_name_ONE_tools_argument():
+    """Five tools, three argument shapes — a document, a description, an action. Naming one in the
+    instruction sends the model to a tool with the wrong key in hand."""
+    rec = _Recorder()
+    r = _responder(rec, pending_suggestion=lambda key: "Shall I create a Partic pipeline")
+    _offer(r, "@vexa yes")
+    _settle(rec)
+    prompt = rec.turns[0][3]
+    assert "with a description built from" not in prompt
+    assert "schema" in prompt
+
+
 # ── who the assistant serves, when the owner has opened the room ──────────────────────────
 
 def test_a_guest_the_owner_ADMITTED_is_answered_directly():

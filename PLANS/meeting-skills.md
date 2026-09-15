@@ -47,12 +47,17 @@ A small registry (`core/agent/shared/skills.py`) names them and says which are r
 | --- | --- | --- | --- |
 | `partic` | `skills/partic.md` | yes | `partic_create_pipeline` |
 | `biami` | `skills/biami.md` | yes | `biami_create_process` |
-| `matrix` | `skills/matrix.md` | no (stub) | `matrix_create_task` |
+| `matrix` | `skills/matrix.md` | no (handoff) | `matrix_agent_prompt` |
 | `contentmorph` | `skills/contentmorph.md` | no (stub) | `contentmorph_transform` |
 | `tenx` | `skills/tenx.md` | no (stub) | `tenx_request` |
 
-`matrix`, `contentmorph` and `tenx` keep today's stub behaviour verbatim — knowledge + a tool that
-reports what it would have done. Only `partic` and `biami` get repos.
+`contentmorph` and `tenx` keep today's stub behaviour verbatim — knowledge + a tool that reports
+what it would have done. Only `partic` and `biami` get repos.
+
+`matrix` is the third shape: its own chat agent is already in the meeting's Google Chat space,
+signed in as the person who paired it, so nothing here acts. `matrix_agent_prompt` renders the line
+somebody sends to that agent, bounded by what the agent actually accepts — no endpoint, no
+credential, no write reach.
 
 ### D2 — Enablement is per meeting, and off by default
 

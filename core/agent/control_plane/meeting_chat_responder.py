@@ -684,9 +684,12 @@ class MeetingChatResponder:
         return (
             f"CONTEXT: you recently offered in this chat: \"{pending}\" and nobody has answered yet. "
             "If what they just said is AGREEMENT to that, carry it out now — call the matching "
-            "product-actions tool with a description built from what was proposed, and say what came "
-            "back in one line. If it is a refusal, acknowledge it in a few words and do nothing "
-            "else. If it is neither, ignore this paragraph and answer their question.\n\n"
+            "product-actions tool, built from what was proposed and taking the arguments that "
+            "tool's own schema asks for. Then: if the result carries a `prompt`, post THAT LINE "
+            "EXACTLY and by itself, with no words before or after it in the same message, because "
+            "somebody is about to copy it; otherwise say what came back in one line. If it is a "
+            "refusal, acknowledge it in a few words and do nothing else. If it is neither, ignore "
+            "this paragraph and answer their question.\n\n"
         )
 
     def _meeting_allows_anyone(self, meeting_key: str) -> bool:

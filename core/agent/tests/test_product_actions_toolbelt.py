@@ -116,6 +116,13 @@ def _act(tool: str, document: str, env=None) -> dict:
     return json.loads(out[0]["result"]["content"][0]["text"])
 
 
+def _prompt(action: str, detail: str = "", env=None) -> dict:
+    out = _rpc({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {"name": "matrix_agent_prompt",
+                           "arguments": {"action": action, "detail": detail}}}, env=env)
+    return json.loads(out[0]["result"]["content"][0]["text"])
+
+
 def _call(tool: str, description: str, env=None) -> dict:
     out = _rpc({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
                 "params": {"name": tool, "arguments": {"description": description}}}, env=env)
@@ -125,7 +132,7 @@ def _call(tool: str, description: str, env=None) -> dict:
 def test_the_server_advertises_the_five_products():
     out = _rpc({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
     names = {t["name"] for t in out[0]["result"]["tools"]}
-    assert {"partic_create_pipeline", "biami_create_process", "matrix_create_task",
+    assert {"partic_create_pipeline", "biami_create_process", "matrix_agent_prompt",
             "contentmorph_transform", "tenx_request"} <= names
 
 
@@ -146,15 +153,20 @@ def test_a_product_with_no_repo_has_nothing_to_describe():
 
 
 def test_every_advertised_tool_takes_exactly_what_it_needs():
-    """A repo-backed product is built from a COMPLETE document the model writes; the rest are
-    described. The argument shape says which kind a tool is."""
+    """A repo-backed product is built from a COMPLETE document the model writes, a handoff is
+    rendered from a NAMED action, and the rest are described. The argument shape says which kind a
+    tool is."""
     out = _rpc({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
     for t in out[0]["result"]["tools"]:
         if t["name"].endswith("_describe_repo"):
             assert t["inputSchema"].get("properties") == {}, t["name"]   # reads, takes nothing
             continue
-        want = ["document"] if t["name"] in ("partic_create_pipeline", "biami_create_process") \
-            else ["description"]
+        if t["name"] == "matrix_agent_prompt":
+            want = ["action"]
+        elif t["name"] in ("partic_create_pipeline", "biami_create_process"):
+            want = ["document"]
+        else:
+            want = ["description"]
         assert t["inputSchema"]["required"] == want, t["name"]
 
 
@@ -170,7 +182,7 @@ def test_a_product_with_no_endpoint_says_UNAVAILABLE_never_accepted():
     """This used to answer `accepted` with "is being executed" — which the assistant turns into
     "it's happening" in front of a customer, for a thing that will never happen. A product this
     deployment cannot reach must not read as success."""
-    got = _call("matrix_create_task", "pull the Q3 churn breakdown")
+    got = _call("contentmorph_transform", "turn the launch post into a thread")
     assert got["status"] == "unavailable"
     assert "nothing was created" in got["message"].lower()
     assert "executed" not in got["message"].lower()
@@ -186,8 +198,8 @@ def test_an_unreachable_endpoint_REPORTS_failure_rather_than_raising(monkeypatch
     """A tool that throws inside a turn reads to the model as a broken tool rather than a service
     that is down — and it will then tell the meeting something confident and wrong."""
     import os
-    env = dict(os.environ, **ALL_ON, MATRIX_ENDPOINT="http://127.0.0.1:9/never")
-    got = _call("matrix_create_task", "anything", env=env)
+    env = dict(os.environ, **ALL_ON, CONTENTMORPH_ENDPOINT="http://127.0.0.1:9/never")
+    got = _call("contentmorph_transform", "anything", env=env)
     assert got["status"] == "failed" and "could not reach" in got["message"]
 
 
@@ -224,7 +236,7 @@ def test_calling_a_tool_the_meeting_did_not_enable_is_refused():
     """Listing is not a control on its own — a model can name a tool it was never shown."""
     import os
     env = dict(os.environ, VEXA_SKILL_TOOLS="partic")
-    got = _call("matrix_create_task", "anything", env=env)
+    got = _prompt("create_chat", "anything", env=env)
     assert got["status"] == "unavailable" and "turned on for this meeting" in got["message"]
 
 
@@ -303,7 +315,7 @@ def test_no_skills_enabled_refuses_every_product_CALL_too():
     """Listing is not the only surface — a model can name a tool it was never shown."""
     import os
     env = {k: v for k, v in os.environ.items() if not k.startswith("VEXA_SKILL")}
-    for tool in ("partic_create_pipeline", "matrix_create_task"):
+    for tool in ("partic_create_pipeline", "matrix_agent_prompt"):
         got = _call(tool, "anything", env=env)
         assert got["status"] == "unavailable", tool
 
@@ -327,6 +339,103 @@ def test_both_scopes_still_act_and_differ_only_by_history():
     t, w = meet_chat_tools("transcript"), meet_chat_tools("workspace")
     assert "product-actions" in t and "product-actions" in w
     assert set(w) - set(t) == {"Read", "Glob", "Grep"}
+
+
+# ── the handoff: a line for a person to send, not a call ──────────────────────────────────
+
+def test_a_handoff_RENDERS_a_line_and_creates_nothing():
+    """Matrix's own agent is in the room and already signed in as the person. So this tool's whole
+    output is the sentence they send it — and it must never read as success, because nothing has
+    happened and nothing will until somebody relays it."""
+    got = _prompt("create_chat", "Q4 pricing")
+    assert got["status"] == "ready"
+    assert got["prompt"] == '@matrix agent create a chat called "Q4 pricing"'
+    assert "nothing was created" in got["message"].lower()
+    assert got["status"] != "accepted"
+
+
+def test_the_line_carries_the_MEETINGS_OWN_words():
+    """A generic line is worthless: the person copying it has to see their own ask in it, or they
+    cannot tell what they are about to send."""
+    got = _prompt("task", "pull the Q3 churn breakdown by segment")
+    assert "Q3 churn breakdown by segment" in got["prompt"]
+
+
+def test_asking_for_a_TASK_promises_a_draft_and_not_a_task():
+    """Matrix has no way to create a task directly — asking produces a draft somebody approves
+    there. "I've created the task" is the sentence this prevents, said to a room, about a thing
+    that is sitting unapproved."""
+    got = _prompt("task", "chase the renewals list")
+    assert "draft" in got["note"].lower()
+
+
+def test_an_action_MATRIX_CANNOT_DO_is_refused_before_anyone_copies_it():
+    """The failure this exists to stop is silent: a plausible line gets pasted, the agent does
+    nothing with it, and the room concludes the integration is broken. Creating a space is the one
+    everybody assumes — spaces are listed and selected, never made."""
+    got = _prompt("create_space", "10X DEV")
+    assert got["status"] == "invalid"
+    assert "no way to create a" in got["message"] and "space" in got["message"]
+    assert "create_chat" in got["message"]          # says what to do instead
+
+
+def test_the_advertised_ACTIONS_are_the_whole_vocabulary():
+    """The enum is what the model picks from, so it is the real boundary — not the prose."""
+    out = _rpc({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+    tool = next(t for t in out[0]["result"]["tools"] if t["name"] == "matrix_agent_prompt")
+    actions = set(tool["inputSchema"]["properties"]["action"]["enum"])
+    assert "create_chat" in actions and "task" in actions
+    assert not {a for a in actions if "space" in a and "create" in a}
+
+
+def test_a_line_too_long_to_COPY_AS_ONE_MESSAGE_is_refused():
+    """Google Meet's composer stops at 500 characters. A line split across two messages cannot be
+    copied as one, and half an instruction sent to an agent is worse than none."""
+    got = _prompt("task", "x" * 500)
+    assert got["status"] == "invalid" and "one message" in got["message"]
+
+
+def test_someone_elses_words_cannot_turn_into_a_ROOM_BROADCAST():
+    """The description comes from a transcript of a room the owner does not control, and the line
+    is posted into a chat where handles are live. `@everyone` reaching the space is a page sent to
+    every member by something nobody in the meeting typed."""
+    got = _prompt("task", "tell @everyone and @here about the date")
+    assert "@everyone" not in got["prompt"] and "@here" not in got["prompt"]
+    assert "everyone" in got["prompt"]              # the ask itself survives
+    assert got["prompt"].count("@") == 1            # only the agent is addressed
+
+
+def test_neutralising_a_broadcast_does_not_reach_into_a_REAL_value():
+    """`@all` sits inside `bob@allstate.com`. Rewriting a handle must stop at a word boundary, or
+    the line carries an address that no longer resolves and somebody has to debug why."""
+    got = _prompt("task", "send the deck to bob@allstate.com and cc @all")
+    assert "bob@allstate.com" in got["prompt"]
+    assert "@all " not in got["prompt"] and not got["prompt"].endswith("@all")
+
+
+def test_the_line_survives_being_copied_as_ONE_line():
+    got = _prompt("create_chat", "Q4\npricing\t review")
+    assert "\n" not in got["prompt"] and "\t" not in got["prompt"]
+    assert got["prompt"] == '@matrix agent create a chat called "Q4 pricing review"'
+
+
+def test_the_agents_handle_is_CONFIGURATION_not_a_constant(monkeypatch):
+    """The app's display name is chosen when it is installed into the space, so a deployment whose
+    agent is called something else must still render a line that addresses it."""
+    import os
+    env = dict(os.environ, **ALL_ON, MATRIX_AGENT_HANDLE="@Nexus Ops")
+    got = _prompt("list_spaces", env=env)
+    assert got["prompt"] == "@Nexus Ops list spaces"
+
+
+def test_the_handoff_needs_NO_endpoint_to_work():
+    """This is the point of the shape. The other products wait on a URL this deployment does not
+    have; Matrix is reached by a human who is already in the room, so it works today."""
+    import os
+    env = {k: v for k, v in os.environ.items() if not k.endswith("_ENDPOINT")}
+    env.update(ALL_ON)
+    got = _prompt("ask", "what is our MRR this quarter?", env=env)
+    assert got["status"] == "ready"
 
 
 # ── a read tool must not fall through to the write path ───────────────────────────────────

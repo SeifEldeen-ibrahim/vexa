@@ -68,7 +68,7 @@ SKILLS: tuple = (
           pin_hint="the repo Partic syncs pipelines from"),
     Skill("biami", "BIAMI", "biami_create_process", repo_backed=True,
           pin_hint="your BIAMI Dev checkout"),
-    Skill("matrix", "Matrix", "matrix_create_task"),
+    Skill("matrix", "Matrix", "matrix_agent_prompt"),
     Skill("contentmorph", "ContentMorph", "contentmorph_transform"),
     Skill("tenx", "10x Factory", "tenx_request"),
 )

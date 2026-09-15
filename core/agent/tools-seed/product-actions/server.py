@@ -2,12 +2,18 @@
 """product-actions — the tools the in-meeting assistant uses to ACT on a copilot suggestion.
 
 The loop this closes: someone talks, the copilot recognises the topic and asks "shall I create a
-Partic pipeline that does X?", the person answers "@vexa yes", and the assistant calls one of these.
+Partic pipeline that does X?", the person answers "@nexus yes", and the assistant calls one of these.
 
-Each tool is an HTTP POST and nothing else. Creating the thing is not this codebase's job — the
-endpoint owns that. Point a tool at its real service by setting its endpoint variable; with none set
-it reports that it would have called, which is what makes the whole loop demonstrable before any of
-the five services has an endpoint to call.
+Three kinds of tool, because the products are reached in three different ways:
+
+  REPO      Partic and BIAMI read from a git repo, so authoring is a commit. The tool hands a
+            complete document to the control plane, which owns the token and the push.
+  ENDPOINT  an HTTP POST and nothing else. Creating the thing is not this codebase's job — the
+            endpoint owns that. Point a tool at its real service by setting its endpoint variable.
+  HANDOFF   Matrix is reached through its own chat agent, which is already in the room and already
+            authenticated as the person. The tool calls nothing: it renders the exact line for
+            someone to send to that agent. The human is the executor, which is why this path needs
+            no endpoint, no credential and no write reach of its own.
 
 The stub answer is deliberately shaped like the real one (same JSON, same fields), so swapping in a
 URL changes where the work happens and nothing about what the assistant does with the answer.
@@ -20,6 +26,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import urllib.error
 import urllib.request
@@ -80,11 +87,13 @@ DESCRIBE_SKILL = {
 TOOL_SKILL = {
     "partic_create_pipeline": "partic",
     "biami_create_process": "biami",
-    "matrix_create_task": "matrix",
+    "matrix_agent_prompt": "matrix",
     "contentmorph_transform": "contentmorph",
     "tenx_request": "tenx",
 }
 REPO_BACKED = {"partic", "biami"}
+#: Tools that render a line for a person to relay, rather than calling anything.
+HANDOFF = {"matrix_agent_prompt"}
 
 #: tool name → (env var holding its endpoint, human label, the argument it takes)
 TOOLS = {
@@ -96,9 +105,9 @@ TOOLS = {
         "BIAMI_ENDPOINT", "BIAMI process",
         "The business process to automate, in the words it was described in.",
     ),
-    "matrix_create_task": (
-        "MATRIX_ENDPOINT", "Matrix task",
-        "The task or plan for Matrix to execute, and against which data.",
+    "matrix_agent_prompt": (
+        "", "Matrix",
+        "What was asked for, in the words the meeting used.",
     ),
     "contentmorph_transform": (
         "CONTENTMORPH_ENDPOINT", "ContentMorph transform",
@@ -195,6 +204,98 @@ def _describe(skill: str) -> dict:
         return {"status": "failed", "message": "I couldn't read that product's repo just now."}
 
 
+#: How the Matrix agent is addressed in the room. The app's display name is chosen per deployment
+#: when it is installed into the space, so the handle is configuration rather than a constant.
+MATRIX_HANDLE = (os.environ.get("MATRIX_AGENT_HANDLE") or "@matrix agent").strip()
+
+#: Google Meet's composer refuses anything past 500 characters and the assistant's replies are
+#: chunked below that. A line someone has to copy as ONE message must fit in one, so a request that
+#: would not fit is refused here with the cap named rather than split into two halves that are
+#: useless apart.
+MAX_PROMPT_CHARS = 400
+
+#: What the Matrix agent can actually be told to do — its own typed vocabulary, written the way a
+#: person would say it.
+#:
+#: Everything outside this map is something the agent will not do, and a line it cannot act on is
+#: worse than no line at all: the person pastes it, nothing happens, and they conclude the whole
+#: integration is broken. Two absences drive most of the map's shape, because both are natural to
+#: assume and neither is true — a space can be listed and selected but never CREATED, and a task is
+#: never created directly: asking for one produces a draft that somebody approves in Matrix.
+#:
+#: action → (how it is said, whether it needs their words, what to expect afterwards)
+MATRIX_ACTIONS = {
+    "create_chat": ('create a chat called "{d}"', True,
+                    "Matrix opens the chat."),
+    "ask": ("{d}", True,
+            "Matrix answers in the chat it currently has selected."),
+    "task": ("create a task to {d}", True,
+             "Matrix drafts the task and someone approves the draft there — the draft alone runs "
+             "nothing."),
+    "schedule": ("schedule {d}", True,
+                 "Matrix drafts a schedule for someone to approve."),
+    "task_status": ("what is the status of {d}", True,
+                    "Matrix reports where that task stands."),
+    "list_tasks": ("list my tasks", False,
+                   "Matrix lists the tasks it can see."),
+    "list_spaces": ("list spaces", False,
+                    "Matrix lists the spaces the person can reach."),
+    "select_space": ('switch to the "{d}" space', True,
+                     "Matrix moves its context there; later lines act inside it."),
+    "find_chat": ('search chats for "{d}"', True,
+                  "Matrix lists the chats that match."),
+}
+
+#: Handles that address a ROOM rather than the agent. Their words are relayed verbatim into a chat
+#: where handles are live, so one arriving inside a description must not become a page sent to every
+#: member by something nobody in the meeting typed.
+#:
+#: Only the leading ``@`` is dropped — the word itself is usually part of the sentence ("tell
+#: everyone the date"), and removing it would change what was asked for. The trailing boundary is
+#: what keeps this from reaching into a real value: without it ``@all`` matches inside
+#: ``bob@allstate.com`` and quietly rewrites an address somebody has to read.
+_BROADCAST_RE = re.compile(r"@(everyone|here|all|channel|space)\b", re.IGNORECASE)
+
+
+def _one_line(text: str) -> str:
+    """Their words, reduced to something that survives being copied as a single message."""
+    # Anything unprintable BECOMES a space rather than being dropped: a line break between two
+    # words is a word boundary, and deleting it welds them into one that nobody said.
+    cleaned = "".join(ch if ch == " " or ch.isprintable() else " " for ch in (text or ""))
+    cleaned = _BROADCAST_RE.sub(r"\1", cleaned)
+    return " ".join(cleaned.split()).strip(" \"'")
+
+
+def _handoff(detail: str, action: str) -> dict:
+    """Render the line someone sends to the Matrix agent. Calls nothing and creates nothing.
+
+    The whole value is that the line is TRUE — an instruction the agent accepts, carrying the words
+    the meeting actually used. So every refusal here names what to do instead, because the model is
+    about to say something to a room either way."""
+    spec = MATRIX_ACTIONS.get(action)
+    if spec is None:
+        return {"status": "invalid", "service": "Matrix",
+                "message": f"Matrix has no {action!r} action. It can do: "
+                           f"{', '.join(sorted(MATRIX_ACTIONS))}. There is no way to create a "
+                           f"space, and a task is reached with 'task' — Matrix drafts it.",
+                "actions": sorted(MATRIX_ACTIONS)}
+    template, needs_detail, note = spec
+    detail = _one_line(detail)
+    if needs_detail and not detail:
+        return {"status": "invalid", "service": "Matrix",
+                "message": f"'{action}' needs what was asked for, in the meeting's own words."}
+    prompt = f"{MATRIX_HANDLE} {template.format(d=detail)}".strip()
+    if len(prompt) > MAX_PROMPT_CHARS:
+        return {"status": "invalid", "service": "Matrix",
+                "message": f"That line is {len(prompt)} characters and has to be copied as one "
+                           f"message, so it has to fit in {MAX_PROMPT_CHARS}. Say the same thing "
+                           f"shorter — the agent can be asked for the detail afterwards."}
+    return {"status": "ready", "service": "Matrix", "prompt": prompt,
+            "mention": MATRIX_HANDLE, "instruction": template.format(d=detail), "note": note,
+            "message": "Nothing was created. Post `prompt` into the meeting chat exactly as it is, "
+                       "for someone to send to the Matrix agent."}
+
+
 def _tool_list(enabled: "list | None" = None) -> list:
     """The tools this turn may call — narrowed to the products the meeting enabled.
 
@@ -222,6 +323,28 @@ def _tool_list(enabled: "list | None" = None) -> list:
     for name, (_env, label, arg_help) in TOOLS.items():
         skill = TOOL_SKILL.get(name, "")
         if skill not in ENABLED:
+            continue
+        if name in HANDOFF:
+            out.append({
+                "name": name,
+                "description": f"Write the line someone sends to the {label} agent in this "
+                               f"meeting's chat. It CREATES NOTHING and calls nothing — {label} "
+                               f"acts when a person relays the line. Call this ONLY after someone "
+                               f"has agreed, then post the `prompt` it returns into the chat "
+                               f"exactly as it comes back, on its own, so it can be copied.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "action": {"type": "string", "enum": sorted(MATRIX_ACTIONS),
+                                   "description":
+                                       "What the agent is being asked to do. This list is "
+                                       "everything it can do: it cannot create a space, and "
+                                       "'task' asks for a task that it DRAFTS for approval."},
+                        "detail": {"type": "string", "description": arg_help},
+                    },
+                    "required": ["action"],
+                },
+            })
             continue
         if skill in REPO_BACKED:
             out.append({
@@ -290,6 +413,8 @@ def _handle(msg: dict) -> "dict | None":
         if skill not in enabled:
             result = {"status": "unavailable",
                       "message": f"{TOOLS[name][1]} isn't turned on for this meeting."}
+        elif name in HANDOFF:
+            result = _handoff(str(args.get("detail") or ""), str(args.get("action") or "").strip())
         elif skill in REPO_BACKED:
             result = _act(skill, str(args.get("document") or ""), str(args.get("name") or ""))
         else:

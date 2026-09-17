@@ -1,3 +1,19 @@
+# Nexus by BIAMI
+
+Our meeting intelligence application, based on the Apache-2.0 Vexa codebase.
+Live deployment: **https://nexus.biami.io**.
+
+Work in `/home/biami/vexa` on `main`, using normal `git pull`, `git commit`, and
+`git push`. `origin` points to **SeifEldeen-ibrahim/vexa**. There are no required
+worktrees, PRs, contribution declarations, Git hooks, or CI/CD. GitHub Actions is
+disabled. See [CONTRIBUTING.md](CONTRIBUTING.md) for the simple workflow and
+[CLAUDE.md](CLAUDE.md) for the source layout and manual deployment commands.
+
+The Vexa documentation below is retained for technical background. Its upstream
+roadmap, hosting offers, governance, and contribution process do not govern Nexus.
+
+---
+
 <div align="center">
 
 <img src="assets/logodark.svg" alt="Vexa logo" width="72"/>
@@ -463,22 +479,10 @@ Honest state of the **0.12** line (mirrors the [status page](https://docs.vexa.a
 
 ---
 
-## 🤝 Community & contributing
+## Development
 
-- **Docs** — [docs.vexa.ai](https://docs.vexa.ai)
-- **Discord** — [discord.gg/Ga9duGkVz9](https://discord.gg/Ga9duGkVz9)
-- **Roadmap** — the [board](https://github.com/orgs/Vexa-ai/projects/2), grouped by contributor
-  lane, with [milestones](https://github.com/Vexa-ai/vexa/milestones) as the version gates.
-- **Contributing** — [how delivery works](https://docs.vexa.ai/governance/delivery): prepared issues
-  with acceptance tables that *guarantee* merge, and human validation credited as a first-class
-  contribution (one page, law and how-to together).
-- **Contributor rights** — [one rights choice plus DCO](CONTRIBUTOR_RIGHTS.md) for individuals;
-  private, head-bound authorization when an employer or client owns the work.
-- **Issues & PRs** — welcome. See [`SECURITY.md`](SECURITY.md) to report vulnerabilities.
-- **Obsidian**: [obsidian-vexa-bridge](https://github.com/rennf93/obsidian-vexa-bridge) turns completed meetings into Obsidian notes or a knowledge graph, a third-party adapter; see [the docs](https://docs.vexa.ai/obsidian).
-
-Vexa is built in the open. If you self-host it, extend it, or run it air-gapped somewhere interesting,
-we'd love to hear about it.
+See [CONTRIBUTING.md](CONTRIBUTING.md). Architecture and upstream documentation are
+reference material; checks and deployment are run manually for this repository.
 
 ---
 

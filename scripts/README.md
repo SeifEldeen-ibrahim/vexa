@@ -1,3 +1,5 @@
-# scripts — repo tooling — the gate suite (gates.mjs) and helpers
+# Optional repository tools
 
-_Governed by `docs/docs/governance/architecture.mdx` (P1–P12). This folder owns one concern; its public surface is its `index`/contract; it may depend only on what the dependency-rules allow._
+Architecture visualization, schema helpers, diagnostics, and legacy checks. Nothing
+in this directory runs automatically on commit or push. Use individual tools when
+helpful; the upstream gate suite is not a required development or release process.

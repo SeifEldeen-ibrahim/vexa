@@ -1,9 +1,25 @@
-@AGENTS.md
+# Nexus development notes
 
-## Claude Code specifics
+This is BIAMI's Nexus application, based on Vexa. Work directly in the existing
+checkout on `main`. Use ordinary `git add`, `git commit`, `git pull`, and `git push`.
+No worktrees, required pull requests, contribution declarations, sign-off ceremony,
+Git hooks, or CI/CD. Run relevant checks manually for the change being made.
 
-Layout: pnpm + turbo monorepo — `core/` (gateway, agent, runtime, identity, meetings),
-`clients/terminal` (Next.js 15, port 3000, `npm run dev`), `docs/docs` (Mintlify site — the
-published law), `calm/` (FINOS CALM model). Licensing is FINOS-gated: new deps must be
-Category A (MIT/BSD/Apache); weak-copyleft needs an entry in `license-exceptions.json`
-(ADR-0004) — never add GPL/AGPL.
+`origin` is `https://github.com/SeifEldeen-ibrahim/vexa.git`.
+The working deployment is https://nexus.biami.io, from `/home/biami/vexa`.
+
+Layout: pnpm + turbo monorepo; `core/` contains backend services and agents,
+`clients/terminal/` is the Next.js UI, and `deploy/compose/` runs the deployment.
+Source changes go live only when the affected service image is rebuilt and restarted.
+
+For terminal-only changes, from `deploy/compose/`:
+
+```sh
+docker compose -p vexa-v012 -f docker-compose.yml build terminal
+docker compose -p vexa-v012 -f docker-compose.yml up -d --no-deps --no-build terminal
+```
+
+Keep secrets out of Git and preserve other uncommitted work. Existing architecture,
+ADRs, and governance documents are historical technical references, not a required
+contribution or release process. Application workspace-seed CLAUDE.md files configure
+the meeting agents; they are part of the product.

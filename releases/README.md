@@ -1,3 +1,11 @@
+# Historical upstream release records
+
+These receipts and the process described below are retained as history. Nexus has no
+CI/CD, release approval gates, or required witness receipts. Builds and deployments
+are manual. See [CONTRIBUTING.md](../CONTRIBUTING.md).
+
+---
+
 # `releases/` — the witness receipts
 
 Each stable release carries **one witness receipt** at `releases/<version>/witness.json` — the

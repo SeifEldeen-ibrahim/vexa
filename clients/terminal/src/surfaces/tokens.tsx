@@ -335,9 +335,9 @@ export function SkillReposCard({ reloadKey = 0 }: { reloadKey?: number } = {}) {
     <div style={{ margin: "4px 4px 14px", padding: 10, borderRadius: 8, border: "1px solid var(--line)" }}>
       <div style={{ fontSize: 12.5, color: "var(--t1)", marginBottom: 3 }}>Product repos</div>
       <div style={{ fontSize: 11, color: "var(--t3)", lineHeight: 1.45, marginBottom: 9 }}>
-        Where @vexa writes when a meeting asks it to build something. Each product reads from a repo
+        Where @nexus writes when a meeting asks it to build something. Each product reads from a repo
         you own — pinning one clones it here; nothing is ever run, only written and pushed.
-        Turn a product on per meeting from that meeting&rsquo;s @vexa control.
+        Turn a product on per meeting from that meeting&rsquo;s @nexus control.
       </div>
       {error && <div role="alert" style={{ fontSize: 11.5, color: "var(--danger)", marginBottom: 8 }}>⚠ {error}</div>}
       {!state.token_set && (

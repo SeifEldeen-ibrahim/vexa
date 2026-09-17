@@ -31,6 +31,16 @@ type SkillsState = {
   missing_repo: string[];
 };
 
+// Products exposed by the picker. Uncomment an entry to show it again; the server
+// retains every product and its saved meeting settings independently of this list.
+const PICKER_PRODUCTS = new Set([
+  "partic",
+  "biami",
+  "matrix",
+  // "contentmorph",
+  // "tenx",
+]);
+
 const EMPTY: SkillsState = { available: [], enabled: [], missing_repo: [] };
 
 export function MeetingSkills({ meetingId, nativeId }: { meetingId: string; nativeId?: string }) {
@@ -77,9 +87,10 @@ export function MeetingSkills({ meetingId, nativeId }: { meetingId: string; nati
       .finally(() => setBusy(null));
   };
 
-  if (!state.available.length) return null;
+  const available = state.available.filter((s) => PICKER_PRODUCTS.has(s.id));
+  if (!available.length) return null;
 
-  const on = state.available.filter((s) => state.enabled.includes(s.id));
+  const on = available.filter((s) => state.enabled.includes(s.id));
   const summary = on.length === 0 ? "no products"
     : on.length <= 2 ? on.map((s) => s.label).join(" · ")
     : `${on.length} products`;
@@ -91,8 +102,8 @@ export function MeetingSkills({ meetingId, nativeId }: { meetingId: string; nati
         onClick={() => setOpen((v) => !v)}
         aria-expanded={open}
         title={on.length
-          ? `@vexa can recognise and offer to build: ${on.map((s) => s.label).join(", ")}`
-          : "@vexa knows about no products in this meeting, so it will not offer to build anything."}
+          ? `@nexus can recognise and offer to build: ${on.map((s) => s.label).join(", ")}`
+          : "@nexus knows about no products in this meeting, so it will not offer to build anything."}
         style={{
           display: "flex", alignItems: "center", gap: 7, cursor: "pointer",
           background: on.length ? "var(--accent)" : "transparent",
@@ -102,7 +113,7 @@ export function MeetingSkills({ meetingId, nativeId }: { meetingId: string; nati
         }}
       >
         <span style={{ width: 7, height: 7, borderRadius: "50%", background: on.length ? "var(--on-accent)" : "var(--t3)", flex: "none" }} />
-        {`@vexa: ${summary}`}
+        {`@nexus: ${summary}`}
       </button>
 
       {open && (
@@ -114,10 +125,10 @@ export function MeetingSkills({ meetingId, nativeId }: { meetingId: string; nati
           }}
         >
           <div style={{ fontSize: 11.5, color: "var(--t3)", marginBottom: 8, lineHeight: 1.45 }}>
-            What @vexa can recognise and offer to build in this meeting. Off by default — it knows
+            What @nexus can recognise and offer to build in this meeting. Off by default — it knows
             nothing about a product until you turn it on here.
           </div>
-          {state.available.map((sk) => {
+          {available.map((sk) => {
             const enabled = state.enabled.includes(sk.id);
             const needsRepo = enabled && state.missing_repo.includes(sk.id);
             return (

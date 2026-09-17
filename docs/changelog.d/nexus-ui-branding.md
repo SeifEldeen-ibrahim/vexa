@@ -1,0 +1,2 @@
+- **Nexus branding in the terminal.** The sidebar, sign-in screen, and browser title display Nexus. The sidebar and sign-in screen use the BIAMI logo, and meeting product controls and product repository guidance refer to `@nexus`.
+- **Focused product picker.** ContentMorph and 10x Factory are hidden from the meeting product picker; their UI entries are commented out while backend support and saved settings remain intact.

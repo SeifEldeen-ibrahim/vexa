@@ -181,10 +181,10 @@ function LeftPane() {
   const seg = (on: boolean): CSSProperties => ({ display: "flex", alignItems: "center", gap: 6, padding: "5px 9px", borderRadius: 7, fontSize: 12.5, cursor: "pointer", border: "none", color: on ? "var(--t1)" : "var(--t2)", background: on ? "var(--panel2)" : "transparent", flex: "none", whiteSpace: "nowrap" });
   return (
     <div style={{ height: "100%", display: "flex", flexDirection: "column", background: "var(--sidebar)", borderRight: "1px solid var(--line)", minHeight: 0 }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 9, padding: "12px 14px 8px", flex: "none" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "12px 14px 8px", flex: "none" }}>
         {/* eslint-disable-next-line @next/next/no-img-element */}
-        <img src="/vexa-logo.svg" alt="Vexa" width={24} height={24} style={{ borderRadius: 7, display: "block", flex: "none" }} />
-        <span style={{ fontSize: 13, fontWeight: 500, color: "var(--t1)" }}>Vexa <span style={{ fontWeight: 400, color: "var(--t3)" }}>terminal</span></span>
+        <img src="/biami-logo.png" alt="BIAMI.io" width={100} height={28} style={{ background: "var(--brand-logo-bg)", borderRadius: 4, padding: 4, boxSizing: "content-box", display: "block", flex: "none" }} />
+        <span style={{ fontSize: 13, fontWeight: 500, color: "var(--t1)" }}>Nexus</span>
       </div>
       {/* stacked vertically — every list is visible at any sidebar width (no horizontal
           overflow/scroll), matching the file-tree rows below */}

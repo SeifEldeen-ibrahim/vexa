@@ -3,9 +3,9 @@ import "./globals.css";
 import { Analytics } from "./AnalyticsScript";
 
 export const metadata: Metadata = {
-  title: "Vexa Terminal",
+  title: "Nexus",
   description:
-    "AI-first knowledge-worker terminal — Claude Code × Outlook on Vexa's meeting-bot + agentic-runtime backend.",
+    "Nexus by BIAMI — meeting intelligence and AI-powered collaboration.",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

@@ -89,15 +89,15 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
       >
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
           {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img src="/vexa-logo.svg" alt="Vexa" width={28} height={28} style={{ borderRadius: 8, display: "block", flex: "none" }} />
+          <img src="/biami-logo.png" alt="BIAMI.io" width={100} height={28} style={{ background: "var(--brand-logo-bg)", borderRadius: 4, padding: 4, boxSizing: "content-box", display: "block", flex: "none" }} />
           <div style={{ fontSize: 15, fontWeight: 600, color: "var(--t1)" }}>
-            {claiming ? "Set up your instance" : "Vexa Terminal"}
+            {claiming ? "Set up your instance" : "Nexus"}
           </div>
         </div>
         {claiming ? (
           <>
             <div style={{ fontSize: 12, color: "var(--t3)", lineHeight: 1.5 }}>
-              This Vexa instance has no administrator yet. The first sign-in becomes the admin and can
+              This Nexus instance has no administrator yet. The first sign-in becomes the admin and can
               configure models, transcription, and other users.
             </div>
             <div

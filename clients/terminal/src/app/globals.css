@@ -6,6 +6,8 @@
  */
 :root {
   color-scheme: dark;
+  /* White BIAMI artwork needs a dark backing in both themes. */
+  --brand-logo-bg: #171717;
   /* Contrast model (Dmitry 2026-07-03): the CENTER (tabs/canvas) is the dark well; BOTH
    * sidebars (left + chat rail) sit on the same LIGHTER tone so they read as one frame
    * around the work area. Panels/cards lift a step above whatever they sit on; borders

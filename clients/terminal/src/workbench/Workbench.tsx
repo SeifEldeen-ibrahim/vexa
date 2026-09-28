@@ -184,7 +184,7 @@ function LeftPane() {
       <div style={{ display: "flex", alignItems: "center", gap: 9, padding: "12px 14px 8px", flex: "none" }}>
         {/* eslint-disable-next-line @next/next/no-img-element */}
         <img src="/biami-mark.png" alt="BIAMI.io" width={24} height={24} style={{ background: "var(--brand-logo-bg)", borderRadius: 6, padding: 4, boxSizing: "content-box", display: "block", flex: "none" }} />
-        <span style={{ fontSize: 13, fontWeight: 500, color: "var(--t1)" }}>Nexus <span style={{ fontWeight: 400, color: "var(--t3)" }}>live meetings</span></span>
+        <span style={{ fontSize: 13, fontWeight: 500, color: "var(--t1)" }}>Nexus live meetings</span>
       </div>
       {/* stacked vertically — every list is visible at any sidebar width (no horizontal
           overflow/scroll), matching the file-tree rows below */}

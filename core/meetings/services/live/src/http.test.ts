@@ -8,6 +8,7 @@ import { createApi, normalizePath } from './http.js';
 import type { MeetingRow, MeetingsClient } from './meetings-client.js';
 import { createRegistry } from './registry.js';
 import type { LiveSession, StartRequest } from './session.js';
+import type { AgendaTemplate, TemplatesClient } from './templates-client.js';
 
 let passed = 0;
 const test = async (name: string, fn: () => Promise<void> | void) => {
@@ -55,6 +56,30 @@ const meetings = (rows: MeetingRow[] = []): MeetingsClient => ({
   async listSessions() { return { ok: true, value: rows }; },
 });
 
+/** A templates store that records the token it was handed: the route's job is to forward the
+ *  CALLER'S key, and nothing else proves it does. */
+const templates = (seed: AgendaTemplate[] = []): TemplatesClient & {
+  tokens: string[]; saved: unknown[]; removed: string[];
+} => {
+  const self = {
+    tokens: [] as string[],
+    saved: [] as unknown[],
+    removed: [] as string[],
+    async list(token: string) { self.tokens.push(token); return { ok: true as const, value: seed }; },
+    async save(token: string, template: unknown) {
+      self.tokens.push(token);
+      self.saved.push(template);
+      return { ok: true as const, value: seed };
+    },
+    async remove(token: string, id: string) {
+      self.tokens.push(token);
+      self.removed.push(id);
+      return { ok: true as const, value: seed };
+    },
+  };
+  return self;
+};
+
 /** A session stub — the pipeline itself is proved in its own suite. */
 const fakeSession = (uid: string, userId = 7, agenda: Agenda = buildAgenda(['Budget'])): LiveSession & {
   endCalls: string[]; ticks: number; frameAt: number | null;
@@ -83,19 +108,22 @@ const apiOver = (opts: {
   identity?: typeof ME;
   start?: ApiStart;
   registry?: ReturnType<typeof createRegistry>;
+  templates?: ReturnType<typeof templates>;
   now?: () => number;
 }) => {
   const registry = opts.registry ?? createRegistry();
+  const store = opts.templates ?? templates();
   const api = createApi({
     cfg,
     auth: auth(opts.identity),
     meetings: meetings(opts.rows ?? []),
+    templates: store,
     registry,
     startSession: opts.start ?? (async (_r, uid) => ({ ok: true, session: fakeSession(uid) })),
     newSessionUid: () => 'nx-new',
     now: opts.now,
   });
-  return { api, registry };
+  return { api, registry, store };
 };
 type ApiStart = (r: StartRequest, uid: string) =>
   Promise<{ ok: true; session: LiveSession } | { ok: false; status: number; error: string }>;
@@ -253,6 +281,76 @@ await test('a call that is still being heard is ticked, not ended', async () => 
   await api.sweep();
   assert.deepEqual(s.endCalls, []);
   assert.equal(s.ticks, 1);
+});
+
+
+// ── saved agenda templates ─────────────────────────────────────────────────────────────────
+// This service stores none of this. The property each test below protects is that the route
+// forwards the CALLER'S OWN key, because that is what keeps one user's templates out of
+// another user's reach without this service having any privilege at all.
+await test('listing templates forwards the caller\'s own key, never a privileged one', async () => {
+  const store = templates([{ id: 't-standup', name: 'Weekly standup', items: ['Blockers'] }]);
+  const { api } = apiOver({ templates: store });
+  const r = await api.handle(GET('/templates', 'theirs'));
+  assert.equal(r.status, 200);
+  assert.deepEqual((r.body as { templates: unknown[] }).templates, [
+    { id: 't-standup', name: 'Weekly standup', items: ['Blockers'] },
+  ]);
+  assert.deepEqual(store.tokens, ['theirs']);
+});
+
+await test('a template saves whether it arrives wrapped or bare', async () => {
+  const store = templates();
+  const { api } = apiOver({ templates: store });
+  assert.equal((await api.handle(POST('/templates', { template: { name: 'A', items: ['x'] } }))).status, 200);
+  assert.equal((await api.handle(POST('/templates', { name: 'B', items: ['y'] }))).status, 200);
+  assert.deepEqual(store.saved, [
+    { name: 'A', items: ['x'] },
+    { name: 'B', items: ['y'], id: undefined },
+  ]);
+});
+
+await test('PUT saves too, since the extension does not know if it is new', async () => {
+  const store = templates();
+  const { api } = apiOver({ templates: store });
+  const r = await api.handle({
+    method: 'PUT', path: '/templates', query: {}, headers: { 'x-api-key': 'mine' },
+    body: { template: { id: 't-a', name: 'A', items: ['x'] } },
+  });
+  assert.equal(r.status, 200);
+  assert.equal(store.saved.length, 1);
+});
+
+await test('saving nothing is refused rather than stored as an empty template', async () => {
+  const { api, store } = apiOver({});
+  const r = await api.handle(POST('/templates', {}));
+  assert.equal(r.status, 400);
+  assert.deepEqual(store.saved, []);
+});
+
+await test('deleting names the template in the path and forwards the key', async () => {
+  const store = templates();
+  const { api } = apiOver({ templates: store });
+  const r = await api.handle({
+    method: 'DELETE', path: '/live/templates/t-weekly%20standup', query: {},
+    headers: { 'x-api-key': 'mine' }, body: null,
+  });
+  assert.equal(r.status, 200);
+  assert.deepEqual(store.removed, ['t-weekly standup']);
+});
+
+await test('templates are refused without a key, like everything else that is the caller\'s own', async () => {
+  const { api, store } = apiOver({});
+  assert.equal((await api.handle(GET('/templates', 'nope'))).status, 401);
+  assert.deepEqual(store.tokens, []);
+});
+
+await test('an unsupported method on /templates says so instead of 404', async () => {
+  const { api } = apiOver({});
+  const r = await api.handle({
+    method: 'PATCH', path: '/templates', query: {}, headers: { 'x-api-key': 'mine' }, body: {},
+  });
+  assert.equal(r.status, 405);
 });
 
 console.log(`\n${passed} passed`);

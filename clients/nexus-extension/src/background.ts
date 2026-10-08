@@ -412,6 +412,28 @@ chrome.runtime.onMessage.addListener((msg, _sender, respond) => {
         respond(client ? await client.checklists() : { ok: false, status: 401, error: 'Connect to Nexus first' });
         return;
       }
+      case 'templates': {
+        const client = await api();
+        respond(client ? await client.templates() : { ok: false, status: 401, error: 'Connect to Nexus first' });
+        return;
+      }
+      case 'save-template': {
+        const client = await api();
+        if (!client) { respond({ ok: false, status: 401, error: 'Connect to Nexus first' }); return; }
+        respond(await client.saveTemplate({
+          id: typeof msg.id === 'string' ? msg.id : undefined,
+          name: String(msg.name ?? ''),
+          items: (msg.items as string[]) ?? [],
+        }));
+        return;
+      }
+      case 'delete-template': {
+        const client = await api();
+        respond(client
+          ? await client.deleteTemplate(String(msg.id ?? ''))
+          : { ok: false, status: 401, error: 'Connect to Nexus first' });
+        return;
+      }
       case 'transcript': {
         const client = await api();
         respond(client && live ? await client.transcript(live.uid) : { ok: false, status: 404, error: 'No live call' });

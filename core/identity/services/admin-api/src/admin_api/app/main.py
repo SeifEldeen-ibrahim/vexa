@@ -870,6 +870,52 @@ def create_app() -> FastAPI:
             "token": _mask_secret(prefs.get("token")),
         }
 
+    # --- user tier: meeting-agenda templates (writes to user.data JSONB, like webhook) ---
+    # A template is the agenda a user keeps for a KIND of meeting ("weekly standup"), so it
+    # belongs to the person, not to a meeting: it has to outlive any one call, follow them to
+    # another machine, and survive reinstalling the Chrome extension. Reached by the extension
+    # through the live lane, which forwards the caller's own API key — so ownership is decided
+    # HERE, by the token, and the live service needs no privilege of its own.
+    from .live_templates import (remove_template, store_templates, templates_from_data,
+                                 upsert_template)
+
+    async def _save_templates(user: User, db: AsyncSession, templates: list[dict]) -> None:
+        from sqlalchemy.orm import attributes
+        user.data = store_templates(dict(user.data or {}), templates)
+        attributes.flag_modified(user, "data")
+        db.add(user)
+        await db.commit()
+
+    @app.get("/user/live-templates")
+    async def list_live_templates(user: User = Depends(get_current_user)):
+        return {"templates": templates_from_data(user.data if isinstance(user.data, dict) else {})}
+
+    @app.put("/user/live-templates")
+    async def save_live_template(
+        payload: dict = Body(...),
+        user: User = Depends(get_current_user_for_update),
+        db: AsyncSession = Depends(get_db),
+    ):
+        """Create a template, or replace the one with the same id. The row is taken under
+        `FOR UPDATE` (via get_current_user_for_update) because two tabs saving at once would
+        otherwise last-write-wins away one of the two templates."""
+        current = templates_from_data(user.data if isinstance(user.data, dict) else {})
+        updated = upsert_template(current, payload.get("template"))
+        await _save_templates(user, db, updated)
+        return {"templates": updated}
+
+    @app.delete("/user/live-templates/{template_id}")
+    async def delete_live_template(
+        template_id: str,
+        user: User = Depends(get_current_user_for_update),
+        db: AsyncSession = Depends(get_db),
+    ):
+        current = templates_from_data(user.data if isinstance(user.data, dict) else {})
+        updated = remove_template(current, template_id)
+        if len(updated) != len(current):
+            await _save_templates(user, db, updated)
+        return {"templates": updated}
+
     # --- internal tier: the gateway's authz oracle (FAIL-CLOSED) ---
     @app.post("/internal/validate", include_in_schema=False)
     async def validate_token(request: Request, payload: dict, db: AsyncSession = Depends(get_db)):

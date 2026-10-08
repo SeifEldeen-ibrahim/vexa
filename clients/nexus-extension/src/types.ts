@@ -70,6 +70,16 @@ export interface SavedChecklist {
   lastCovered: number;
 }
 
+/** A named agenda the user keeps for a KIND of meeting. Stored against their Nexus account, so
+ *  it survives reinstalling this extension and follows them to another machine. */
+export interface AgendaTemplate {
+  id: string;
+  name: string;
+  items: string[];
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
 export interface Me {
   user_id: number;
   email: string;

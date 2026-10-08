@@ -12,6 +12,7 @@ import { agendaProgress } from './agenda.js';
 import type { Authenticator } from './auth.js';
 import { capabilities, type LiveConfig } from './config.js';
 import { agendaOf, checklistsFromRows, titleOf } from './checklists.js';
+import type { TemplatesClient } from './templates-client.js';
 import { log } from './log.js';
 import type { MeetingRow, MeetingsClient } from './meetings-client.js';
 import type { SessionRegistry } from './registry.js';
@@ -35,6 +36,8 @@ export interface ApiDeps {
   cfg: LiveConfig;
   auth: Authenticator;
   meetings: MeetingsClient;
+  /** The user's saved agenda templates, which admin-api owns (see templates-client.ts). */
+  templates: TemplatesClient;
   registry: SessionRegistry;
   /** Injected so the HTTP layer never imports the pipeline (and the suite can fake a session). */
   startSession: (req: StartRequest, sessionUid: string) =>
@@ -103,6 +106,9 @@ export function createApi(deps: ApiDeps) {
     const authed = await deps.auth.validate(token);
     if (!authed.ok) return fail(authed.status, authed.error);
     const me = authed.identity;
+    // Non-null past this point — validate() refuses an absent token. The `?? ''` keeps the type
+    // honest without an unreachable branch, and the templates client answers 401 on an empty key.
+    const callerToken = token ?? '';
 
     if (method === 'GET' && path === '/me') {
       const live = deps.registry.liveForUser(me.userId);
@@ -201,6 +207,36 @@ export function createApi(deps: ApiDeps) {
       const rows = await deps.meetings.listSessions(me.userId, 60);
       if (!rows.ok) return fail(rows.status, rows.error);
       return json(200, { checklists: checklistsFromRows(rows.value) });
+    }
+
+    // ── saved agenda templates ──
+    // These are the named agendas a user keeps for a KIND of meeting, and they are NOT derived
+    // from past calls the way /checklists is: the user writes them deliberately and edits them.
+    // We hold none of it — each call forwards the caller's own token to admin-api, which owns
+    // the user document (see templates-client.ts for why that matters).
+    if (path === '/templates') {
+      if (method === 'GET') {
+        const listed = await deps.templates.list(callerToken);
+        return listed.ok ? json(200, { templates: listed.value }) : fail(listed.status, listed.error);
+      }
+      // POST and PUT both mean "save this one", because the extension does not care whether the
+      // template already existed — admin-api replaces by id and creates otherwise.
+      if (method === 'PUT' || method === 'POST') {
+        const body = (req.body ?? {}) as { template?: unknown; name?: unknown; items?: unknown };
+        // Accept the template either wrapped or bare, so a caller can POST {name, items}.
+        const template = body.template ?? (body.name === undefined ? null : { name: body.name, items: body.items, id: (body as { id?: unknown }).id });
+        if (!template) return fail(400, 'a template is required');
+        const saved = await deps.templates.save(callerToken, template);
+        return saved.ok ? json(200, { templates: saved.value }) : fail(saved.status, saved.error);
+      }
+      return fail(405, 'method not allowed');
+    }
+
+    if (method === 'DELETE' && path.startsWith('/templates/')) {
+      const id = decodeURIComponent(path.slice('/templates/'.length));
+      if (!id) return fail(400, 'a template id is required');
+      const removed = await deps.templates.remove(callerToken, id);
+      return removed.ok ? json(200, { templates: removed.value }) : fail(removed.status, removed.error);
     }
 
     return fail(404, 'no such route');

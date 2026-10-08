@@ -27,6 +27,7 @@ import { createApi, normalizePath } from './http.js';
 import { createHttpCompletion, noCompletion } from './llm.js';
 import { log, setLogLevel } from './log.js';
 import { createMeetingsClient } from './meetings-client.js';
+import { createTemplatesClient } from './templates-client.js';
 import { createRegistry } from './registry.js';
 import { startSession, type SessionDeps } from './session.js';
 
@@ -91,6 +92,9 @@ export async function main(): Promise<void> {
     baseUrl: cfg.meetingApiUrl,
     internalSecret: cfg.internalSecret,
   });
+  // Saved agenda templates live in admin-api's user document. No secret here on purpose: each
+  // call carries the caller's own API key (see templates-client.ts).
+  const templates = createTemplatesClient({ baseUrl: cfg.adminApiUrl });
   const completion = caps.coverage
     ? createHttpCompletion({
         url: cfg.llm.url,
@@ -120,6 +124,7 @@ export async function main(): Promise<void> {
     cfg,
     auth,
     meetings,
+    templates,
     registry,
     startSession: (req, uid) => startSession(sessionDeps, req, uid),
     // The session uid is the meeting's native id. Opaque and unguessable: it names a meeting in

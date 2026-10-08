@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Nexus live meetings</title>
+  <title>Nexus live meetings agenda</title>
   <link rel="stylesheet" href="panel.css">
 </head>
 <body>
@@ -11,13 +11,14 @@
     <img class="mark" src="assets/icons/icon32.png" alt="">
     <div class="brand">
       <div class="brand-name">Nexus</div>
-      <div class="brand-sub" id="account">live meetings</div>
+      <div class="brand-sub" id="account">live meetings agenda</div>
     </div>
     <button class="ghost" id="account-btn" hidden>Sign out</button>
   </header>
 
   <nav class="tabs" id="tabs" hidden>
     <button class="tab is-active" data-tab="call">New call</button>
+    <button class="tab" data-tab="templates">Templates</button>
     <button class="tab" data-tab="history">History</button>
   </nav>
 
@@ -39,6 +40,11 @@
         <span class="label">What is this meeting?</span>
         <input id="title" type="text" placeholder="e.g. Weekly standup" maxlength="120">
       </label>
+
+      <div class="field" id="tpl-pick-wrap" hidden>
+        <span class="label">Start from a template</span>
+        <div class="saved" id="tpl-pick"></div>
+      </div>
 
       <div class="field" id="saved-wrap" hidden>
         <span class="label">Start from a list you've used</span>
@@ -90,6 +96,29 @@
       </div>
       <ul class="checklist" id="done-checklist"></ul>
       <button class="primary" id="new-call">New call</button>
+    </section>
+
+    <!-- templates: named agendas the user keeps for a kind of meeting -->
+    <section class="view" id="view-templates" hidden>
+      <p class="muted small">
+        A template is the agenda for a kind of meeting — a standup, a client review — saved once
+        and reused. Picking one fills the checklist, and you can still add or change lines before
+        you start.
+      </p>
+
+      <div class="tpl-list" id="tpl-list"></div>
+
+      <div class="field tpl-form" id="tpl-form">
+        <span class="label" id="tpl-form-title">New template</span>
+        <input id="tpl-name" type="text" placeholder="Name it, e.g. Weekly standup" maxlength="80">
+        <textarea id="tpl-items" rows="6" placeholder="One agenda point per line:&#10;Blockers since Friday&#10;What ships this week&#10;Anything to escalate"></textarea>
+        <span class="hint" id="tpl-count">0 points</span>
+        <div class="row">
+          <button class="primary" id="tpl-save">Save template</button>
+          <button class="ghost" id="tpl-cancel" hidden>Cancel</button>
+        </div>
+        <p class="muted small" id="tpl-error" hidden></p>
+      </div>
     </section>
 
     <!-- history -->

@@ -10,7 +10,7 @@
  */
 import { LIVE_PREFIX } from './config.js';
 import type {
-  HistoryRow, Me, SavedChecklist, SessionSnapshot, StartedSession,
+  AgendaTemplate, HistoryRow, Me, SavedChecklist, SessionSnapshot, StartedSession,
 } from './types.js';
 
 export type ApiResult<T> =
@@ -115,5 +115,23 @@ export class NexusApi {
   async checklists(): Promise<ApiResult<SavedChecklist[]>> {
     const r = await this.call<{ checklists?: SavedChecklist[] }>('GET', '/checklists');
     return r.ok ? { ok: true, value: r.value?.checklists ?? [] } : r;
+  }
+
+  // ── templates: the user's own named agendas ──
+  // Every one of these answers with the FULL list, so the panel never has to guess what the
+  // store now holds after an edit.
+  async templates(): Promise<ApiResult<AgendaTemplate[]>> {
+    const r = await this.call<{ templates?: AgendaTemplate[] }>('GET', '/templates');
+    return r.ok ? { ok: true, value: r.value?.templates ?? [] } : r;
+  }
+
+  async saveTemplate(template: { id?: string; name: string; items: string[] }): Promise<ApiResult<AgendaTemplate[]>> {
+    const r = await this.call<{ templates?: AgendaTemplate[] }>('PUT', '/templates', { template });
+    return r.ok ? { ok: true, value: r.value?.templates ?? [] } : r;
+  }
+
+  async deleteTemplate(id: string): Promise<ApiResult<AgendaTemplate[]>> {
+    const r = await this.call<{ templates?: AgendaTemplate[] }>('DELETE', `/templates/${encodeURIComponent(id)}`);
+    return r.ok ? { ok: true, value: r.value?.templates ?? [] } : r;
   }
 }

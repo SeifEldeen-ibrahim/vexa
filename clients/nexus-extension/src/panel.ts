@@ -9,7 +9,7 @@ import {
   audioHealth, clock, historyWhen, progressLine, sortForDisplay, whenCovered,
 } from './agenda-view.js';
 import type {
-  ExtensionState, HistoryRow, SavedChecklist, SessionSnapshot,
+  AgendaTemplate, ExtensionState, HistoryRow, SavedChecklist, SessionSnapshot,
 } from './types.js';
 
 const $ = <T extends HTMLElement>(id: string): T => document.getElementById(id) as T;
@@ -23,6 +23,7 @@ const el = {
     new: $('view-new'),
     live: $('view-live'),
     done: $('view-done'),
+    templates: $('view-templates'),
     history: $('view-history'),
   },
   signin: $<HTMLButtonElement>('signin'),
@@ -32,6 +33,16 @@ const el = {
   agendaCount: $('agenda-count'),
   savedWrap: $('saved-wrap'),
   saved: $('saved'),
+  tplPickWrap: $('tpl-pick-wrap'),
+  tplPick: $('tpl-pick'),
+  tplList: $('tpl-list'),
+  tplFormTitle: $('tpl-form-title'),
+  tplName: $<HTMLInputElement>('tpl-name'),
+  tplItems: $<HTMLTextAreaElement>('tpl-items'),
+  tplCount: $('tpl-count'),
+  tplSave: $<HTMLButtonElement>('tpl-save'),
+  tplCancel: $<HTMLButtonElement>('tpl-cancel'),
+  tplError: $('tpl-error'),
   start: $<HTMLButtonElement>('start'),
   startError: $('start-error'),
   micNote: $('mic-note'),
@@ -53,8 +64,17 @@ const el = {
   notice: $('notice'),
 };
 
-type Tab = 'call' | 'history';
+type Tab = 'call' | 'templates' | 'history';
 let tab: Tab = 'call';
+
+/** Switch tabs from anywhere — the tab bar, or "Use for a call" jumping to the filled checklist. */
+function selectTab(next: Tab): void {
+  tab = next;
+  for (const button of document.querySelectorAll<HTMLButtonElement>('.tab')) {
+    button.classList.toggle('is-active', button.dataset.tab === next);
+  }
+  if (current) render(current);
+}
 let current: ExtensionState | null = null;
 /** Shown after Stop until the user starts something else. */
 let showingFinished = false;
@@ -127,13 +147,19 @@ function render(state: ExtensionState): void {
   current = state;
   el.tabs.hidden = !state.connected;
   el.accountBtn.hidden = !state.connected;
-  el.account.textContent = state.connected ? (state.email ?? 'signed in') : 'live meetings';
+  el.account.textContent = state.connected ? (state.email ?? 'signed in') : 'live meetings agenda';
   el.notice.textContent = state.notices.join(' ');
   el.notice.hidden = !state.notices.length;
 
   if (!state.connected) {
     show('signin');
     setError(el.signinError, state.error);
+    return;
+  }
+
+  if (tab === 'templates') {
+    show('templates');
+    void loadTemplates();
     return;
   }
 
@@ -176,6 +202,7 @@ function render(state: ExtensionState): void {
   setError(el.startError, state.error);
   el.micNote.hidden = state.micPermission !== 'denied';
   void loadChecklists();
+  void loadTemplates();
 }
 
 function countItems(): number {
@@ -217,6 +244,140 @@ async function loadChecklists(): Promise<void> {
     el.saved.append(button);
   }
   el.savedWrap.hidden = false;
+}
+
+// ── templates: the user's own named agendas ─────────────────────────────────────────────────
+// Held in memory only as a render cache. Every mutation answers with the full list, so the panel
+// never has to reason about what the store holds after an edit.
+let templates: AgendaTemplate[] = [];
+let templatesLoaded = false;
+/** Set while editing an existing template, so Save replaces it instead of adding a near-copy. */
+let editingId: string | null = null;
+
+function countTemplateItems(): number {
+  return el.tplItems.value.split(/\r?\n/).map((l) => l.trim()).filter(Boolean).length;
+}
+
+function resetTemplateForm(): void {
+  editingId = null;
+  el.tplName.value = '';
+  el.tplItems.value = '';
+  el.tplCount.textContent = '0 points';
+  el.tplFormTitle.textContent = 'New template';
+  el.tplCancel.hidden = true;
+  setError(el.tplError, null);
+}
+
+/** Put a template into the New call checklist and go there. Deliberately NOT a one-click start:
+ *  filling the box is what makes "template plus a line or two for today" the normal case. */
+function useTemplate(template: AgendaTemplate): void {
+  el.agenda.value = template.items.join('\n');
+  if (!el.title.value.trim()) el.title.value = template.name;
+  el.agendaCount.textContent = `${countItems()} items`;
+  selectTab('call');
+  el.agenda.focus();
+}
+
+function renderTemplates(): void {
+  // The picker on the New call screen.
+  el.tplPick.replaceChildren();
+  for (const template of templates.slice(0, 8)) {
+    const button = document.createElement('button');
+    button.className = 'saved-item';
+    button.type = 'button';
+    const name = document.createElement('b');
+    name.textContent = template.name;
+    const sub = document.createElement('span');
+    sub.textContent = `${template.items.length} point${template.items.length === 1 ? '' : 's'}`;
+    button.append(name, sub);
+    button.addEventListener('click', () => useTemplate(template));
+    el.tplPick.append(button);
+  }
+  el.tplPickWrap.hidden = !templates.length;
+
+  // The Templates tab.
+  el.tplList.replaceChildren();
+  if (!templates.length) {
+    const empty = document.createElement('p');
+    empty.className = 'empty';
+    empty.textContent = 'No templates yet. Name one below and list what it has to cover.';
+    el.tplList.append(empty);
+    return;
+  }
+  for (const template of templates) {
+    const wrap = document.createElement('div');
+    wrap.className = 'tpl-item';
+
+    const top = document.createElement('div');
+    top.className = 'tpl-top';
+    const name = document.createElement('span');
+    name.className = 'tpl-name';
+    name.textContent = template.name;
+    const count = document.createElement('span');
+    count.className = 'tpl-count';
+    count.textContent = `${template.items.length} point${template.items.length === 1 ? '' : 's'}`;
+    top.append(name, count);
+
+    const points = document.createElement('div');
+    points.className = 'tpl-points';
+    points.textContent = template.items.join(' · ');
+
+    const actions = document.createElement('div');
+    actions.className = 'tpl-actions';
+    const use = document.createElement('button');
+    use.className = 'primary';
+    use.type = 'button';
+    use.textContent = 'Use for a call';
+    use.addEventListener('click', () => useTemplate(template));
+    const edit = document.createElement('button');
+    edit.className = 'ghost';
+    edit.type = 'button';
+    edit.textContent = 'Edit';
+    edit.addEventListener('click', () => {
+      editingId = template.id;
+      el.tplName.value = template.name;
+      el.tplItems.value = template.items.join('\n');
+      el.tplCount.textContent = `${countTemplateItems()} points`;
+      el.tplFormTitle.textContent = `Editing “${template.name}”`;
+      el.tplCancel.hidden = false;
+      el.tplName.focus();
+    });
+    const remove = document.createElement('button');
+    remove.className = 'ghost';
+    remove.type = 'button';
+    remove.textContent = 'Delete';
+    remove.addEventListener('click', async () => {
+      remove.disabled = true;
+      const res = await ask<{ ok: boolean; value?: AgendaTemplate[]; error?: string }>(
+        { type: 'delete-template', id: template.id },
+      );
+      remove.disabled = false;
+      if (!res?.ok) { setError(el.tplError, res?.error ?? 'Could not delete that template'); return; }
+      templates = res.value ?? [];
+      if (editingId === template.id) resetTemplateForm();
+      renderTemplates();
+    });
+    actions.append(use, edit, remove);
+
+    wrap.append(top, points, actions);
+    el.tplList.append(wrap);
+  }
+}
+
+async function loadTemplates(force = false): Promise<void> {
+  if (templatesLoaded && !force) {
+    renderTemplates();
+    return;
+  }
+  templatesLoaded = true;
+  const res = await ask<{ ok: boolean; value?: AgendaTemplate[]; error?: string }>({ type: 'templates' });
+  if (!res?.ok) {
+    templatesLoaded = false; // so opening the tab again retries rather than showing nothing
+    setError(el.tplError, res?.error ?? 'Could not load your templates');
+    return;
+  }
+  templates = res.value ?? [];
+  renderTemplates();
 }
 
 async function loadHistory(): Promise<void> {
@@ -297,6 +458,8 @@ el.signin.addEventListener('click', async () => {
 el.accountBtn.addEventListener('click', async () => {
   await ask({ type: 'disconnect' });
   checklistsLoaded = false;
+  templatesLoaded = false;
+  templates = [];
   await refresh();
 });
 
@@ -337,18 +500,45 @@ el.newCall.addEventListener('click', async () => {
   el.agenda.value = '';
   el.agendaCount.textContent = '0 items';
   checklistsLoaded = false;
+  templatesLoaded = false;
+  templates = [];
   await refresh();
 });
 
 el.grantMic.addEventListener('click', () => void ask({ type: 'grant-mic' }));
 
 for (const button of document.querySelectorAll<HTMLButtonElement>('.tab')) {
-  button.addEventListener('click', () => {
-    tab = (button.dataset.tab as Tab) ?? 'call';
-    for (const other of document.querySelectorAll('.tab')) other.classList.toggle('is-active', other === button);
-    if (current) render(current);
-  });
+  button.addEventListener('click', () => selectTab((button.dataset.tab as Tab) ?? 'call'));
 }
+
+// ── template form ──────────────────────────────────────────────────────────────────────────
+el.tplItems.addEventListener('input', () => {
+  el.tplCount.textContent = `${countTemplateItems()} points`;
+});
+
+el.tplCancel.addEventListener('click', () => resetTemplateForm());
+
+el.tplSave.addEventListener('click', async () => {
+  const name = el.tplName.value.trim();
+  const items = el.tplItems.value.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  if (!name) { setError(el.tplError, 'Give the template a name, so you can recognise it later'); return; }
+  if (!items.length) { setError(el.tplError, 'List at least one thing it has to cover'); return; }
+  setError(el.tplError, null);
+  el.tplSave.disabled = true;
+  el.tplSave.textContent = 'Saving…';
+  try {
+    const res = await ask<{ ok: boolean; value?: AgendaTemplate[]; error?: string }>(
+      { type: 'save-template', id: editingId ?? undefined, name, items },
+    );
+    if (!res?.ok) { setError(el.tplError, res?.error ?? 'Could not save that template'); return; }
+    templates = res.value ?? [];
+    resetTemplateForm();
+    renderTemplates();
+  } finally {
+    el.tplSave.disabled = false;
+    el.tplSave.textContent = 'Save template';
+  }
+});
 
 // ── the loop ───────────────────────────────────────────────────────────────────────────────
 async function refresh(): Promise<void> {

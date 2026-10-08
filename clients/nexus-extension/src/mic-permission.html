@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Allow the microphone</title>
+  <style>
+    :root { color-scheme: dark light; }
+    body { font-family: system-ui, -apple-system, Segoe UI, sans-serif; margin: 0; padding: 32px;
+           background: #0b0d10; color: #e6e8ea; }
+    main { max-width: 28rem; margin: 0 auto; }
+    h1 { font-size: 17px; margin: 0 0 10px; }
+    p { font-size: 13.5px; line-height: 1.55; color: #9aa1a9; }
+    button { margin-top: 18px; padding: 10px 16px; font-size: 14px; font-weight: 600; border-radius: 8px;
+             border: 1px solid #23262b; background: #2d6cdf; color: #fff; cursor: pointer; }
+    #done { margin-top: 16px; font-size: 13.5px; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Let Nexus hear the room</h1>
+    <p>
+      Nexus records in-person meetings through your microphone. Chrome asks for this permission
+      once, here — after that, starting a call just works. Nothing is recorded until you press
+      Start on a call.
+    </p>
+    <button id="grant">Allow the microphone</button>
+    <p id="done"></p>
+  </main>
+  <script type="module" src="mic-permission.js"></script>
+</body>
+</html>

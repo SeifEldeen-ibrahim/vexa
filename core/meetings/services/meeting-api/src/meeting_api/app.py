@@ -37,6 +37,7 @@ from fastapi.responses import JSONResponse
 from . import bot_spawn as _bot_spawn
 from . import events as _flows_events
 from . import recordings as _recordings
+from . import live_sessions as _live_sessions
 from .collector.app import build_router as _build_collector_router
 from .collector.ports import RedisBus, TranscriptStore
 from .lifecycle.machine import LifecycleSink, MeetingStore
@@ -183,6 +184,9 @@ def create_app(
     # calendar-sync user edges (async callables from the composition root; None → routes 503)
     calendar_sync_now: Optional["object"] = None,
     calendar_sync_status: Optional["object"] = None,
+    # in-person lane (Nexus extension): the store that owns `in_person` meeting rows. The capture
+    # host creates/ends them over the internal tier; None → in-memory fake like every other port.
+    live_session_store: Optional["_live_sessions.LiveSessionStore"] = None,
 ) -> FastAPI:
     """Build the unified meeting-api app from the injected ports.
 
@@ -298,6 +302,11 @@ def create_app(
 
     # --- webhooks: GET /webhooks/deliveries — the per-user delivery history the dashboard reads (#841) ---
     app.include_router(_build_webhooks_router(delivery_ledger))
+
+    # --- live_sessions: the in-person lane's rows (internal tier only — see live_sessions/router.py) ---
+    if live_session_store is None:
+        live_session_store = _live_sessions.InMemoryLiveSessionStore()
+    app.include_router(_live_sessions.build_router(live_session_store))
 
     return app
 

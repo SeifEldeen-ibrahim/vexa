@@ -407,6 +407,15 @@ class DuplicateMeeting(Exception):
     concurrent insert (the DB-level backstop). Re-exported from ``service`` for the router's mapping."""
 
 
+#: Platform of the IN-PERSON lane's meeting rows (owned by ``meeting_api.live_sessions``). Declared
+#: here because both the SQL adapter and the in-memory fake must exclude those rows from the
+#: reconcile sweep IDENTICALLY: they have no bot and no runtime workload, so a live one is
+#: indistinguishable from an orphaned bot, and reaping it ends a meeting that is still happening.
+#: Kept as a literal rather than an import so this module stays free of that dependency, the same
+#: way ``browser_session`` is a literal in the bot-cap query.
+LIVE_PLATFORM = "in_person"
+
+
 # Statuses in which the bot has NOT yet reached the meeting. Their row goes quiet by DESIGN — a bot
 # parked in a waiting room reports `awaiting_admission` once and then polls silently for the whole
 # lobby budget the control plane handed it — so they carry their OWN (longer) reconcile window.

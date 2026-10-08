@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Nexus live meetings</title>
+  <link rel="stylesheet" href="panel.css">
+</head>
+<body>
+  <header class="top">
+    <img class="mark" src="assets/icons/icon32.png" alt="">
+    <div class="brand">
+      <div class="brand-name">Nexus</div>
+      <div class="brand-sub" id="account">live meetings</div>
+    </div>
+    <button class="ghost" id="account-btn" hidden>Sign out</button>
+  </header>
+
+  <nav class="tabs" id="tabs" hidden>
+    <button class="tab is-active" data-tab="call">New call</button>
+    <button class="tab" data-tab="history">History</button>
+  </nav>
+
+  <main id="main">
+    <!-- not connected -->
+    <section class="view" id="view-signin">
+      <h1>Capture the meeting you're in</h1>
+      <p class="muted">
+        Nexus listens to the room through your microphone, writes the transcript, and ticks off
+        your agenda as you cover it.
+      </p>
+      <button class="primary" id="signin">Sign in with Google</button>
+      <p class="muted small" id="signin-error" hidden></p>
+    </section>
+
+    <!-- new call: the checklist -->
+    <section class="view" id="view-new" hidden>
+      <label class="field">
+        <span class="label">What is this meeting?</span>
+        <input id="title" type="text" placeholder="e.g. Weekly standup" maxlength="120">
+      </label>
+
+      <div class="field" id="saved-wrap" hidden>
+        <span class="label">Start from a list you've used</span>
+        <div class="saved" id="saved"></div>
+      </div>
+
+      <label class="field">
+        <span class="label">What has to be covered</span>
+        <textarea id="agenda" rows="7" placeholder="One item per line:&#10;Confirm the Q3 budget&#10;Agree the launch timeline&#10;Pick an owner for the migration"></textarea>
+        <span class="hint" id="agenda-count">0 items</span>
+      </label>
+
+      <button class="primary" id="start">Start the call</button>
+      <p class="muted small" id="start-error" hidden></p>
+      <p class="muted small" id="mic-note" hidden>
+        Nexus needs your microphone. <button class="link" id="grant-mic">Allow it now</button>
+      </p>
+    </section>
+
+    <!-- live -->
+    <section class="view" id="view-live" hidden>
+      <div class="live-head">
+        <div>
+          <div class="live-title" id="live-title">Live meeting</div>
+          <div class="live-meta"><span id="clock">0:00</span> · <span id="progress">—</span></div>
+        </div>
+        <span class="dot" id="audio-dot" title=""></span>
+      </div>
+      <div class="audio-state" id="audio-state">Listening</div>
+
+      <ul class="checklist" id="checklist"></ul>
+
+      <details class="transcript">
+        <summary>What Nexus has heard</summary>
+        <div id="transcript" class="transcript-body muted small">…</div>
+      </details>
+
+      <button class="danger" id="stop">Stop the call</button>
+      <p class="muted small" id="live-error" hidden></p>
+    </section>
+
+    <!-- finished -->
+    <section class="view" id="view-done" hidden>
+      <div class="live-head">
+        <div>
+          <div class="live-title" id="done-title">Call finished</div>
+          <div class="live-meta" id="done-progress">—</div>
+        </div>
+      </div>
+      <ul class="checklist" id="done-checklist"></ul>
+      <button class="primary" id="new-call">New call</button>
+    </section>
+
+    <!-- history -->
+    <section class="view" id="view-history" hidden>
+      <div id="history-list"></div>
+    </section>
+  </main>
+
+  <p class="notice" id="notice" hidden></p>
+  <script type="module" src="panel.js"></script>
+</body>
+</html>

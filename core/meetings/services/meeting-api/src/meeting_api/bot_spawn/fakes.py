@@ -20,6 +20,7 @@ from typing import Any, Optional
 
 from ..lifecycle.machine import dominant_completion_reason
 from .ports import (
+    LIVE_PLATFORM,
     DuplicateMeeting,
     MaxBotsExceeded,
     MeetingStopped,
@@ -500,6 +501,10 @@ class InMemoryMeetingRepo:
                 continue
             row = self._meetings.get(mid)
             if row is None or row["status"] not in non_terminal:
+                continue
+            # Mirror the SQL adapter's in-person exclusion: a botless `in_person` session is not an
+            # orphan, and reaping it would end a meeting that is still happening.
+            if row.get("platform") == LIVE_PLATFORM:
                 continue
             upd = row.get("updated_at")
             try:

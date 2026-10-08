@@ -17,6 +17,7 @@ from typing import Optional
 from ..lifecycle.machine import dominant_completion_reason
 from ..sessions import new_session
 from .ports import (
+    LIVE_PLATFORM,
     DuplicateMeeting,
     MaxBotsExceeded,
     MeetingStopped,
@@ -428,6 +429,14 @@ class SqlAlchemyMeetingRepo:
                            MeetingSession.session_uid, Meeting.bot_container_id, Meeting.data)
                     .join(MeetingSession, MeetingSession.meeting_id == Meeting.id)
                     .where(Meeting.status.in_(non_terminal))
+                    # The in-person lane (`live_sessions`, platform `in_person`) has NO bot and no
+                    # runtime workload, so every one of its live rows looks exactly like an orphan
+                    # to this sweep: the reconcile would mark a meeting that is happening right now
+                    # `completed` the moment the room went quiet for longer than `active_grace`.
+                    # A live session is ended by its capture host (or the host's own idle janitor),
+                    # never by bot reconciliation. Excluded in the same spirit as the
+                    # `browser_session` exclusion from the bot cap in `create_meeting_guarded`.
+                    .where(Meeting.platform != LIVE_PLATFORM)
                     .order_by(MeetingSession.id.desc())
                 )
             ).all()

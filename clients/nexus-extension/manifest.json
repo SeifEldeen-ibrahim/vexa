@@ -1,0 +1,38 @@
+{
+  "manifest_version": 3,
+  "name": "Nexus live meetings",
+  "version": "0.1.0",
+  "description": "Capture the meeting you are in — in the room, through your microphone — and watch your agenda get ticked off as you cover it.",
+  "permissions": [
+    "storage",
+    "offscreen",
+    "sidePanel",
+    "identity",
+    "alarms"
+  ],
+  "host_permissions": [
+    "https://nexus.biami.io/*"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "side_panel": {
+    "default_path": "panel.html"
+  },
+  "action": {
+    "default_title": "Nexus live meetings"
+  },
+  "icons": {
+    "16": "assets/icons/icon16.png",
+    "32": "assets/icons/icon32.png",
+    "48": "assets/icons/icon48.png",
+    "128": "assets/icons/icon128.png"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["offscreen.html", "mic-permission.html", "nexus-pcm-worklet.js"],
+      "matches": ["https://nexus.biami.io/*"]
+    }
+  ]
+}

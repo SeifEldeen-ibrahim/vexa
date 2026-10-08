@@ -1,0 +1,129 @@
+/* The panel is narrow (Chrome side panel ~360px) and is read DURING a meeting — glanceable
+   first, pretty second. Dark by default, light when the user's Chrome is light. */
+:root {
+  color-scheme: dark light;
+  --bg: #0b0d10;
+  --panel: #12151a;
+  --line: #23262b;
+  --t1: #e6e8ea;
+  --t2: #b4bac1;
+  --t3: #868d96;
+  --accent: #2d6cdf;
+  --ok: #3ecf8e;
+  --warn: #e8b339;
+  --bad: #ef5f5f;
+}
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #ffffff; --panel: #f6f7f9; --line: #e3e6ea;
+    --t1: #15181c; --t2: #4a525c; --t3: #78818c;
+  }
+}
+
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--bg); color: var(--t1);
+  font: 13.5px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  display: flex; flex-direction: column; min-height: 100dvh;
+}
+
+/* header */
+.top { display: flex; align-items: center; gap: 10px; padding: 12px 14px; border-bottom: 1px solid var(--line); }
+.mark { width: 22px; height: 22px; }
+.brand { flex: 1; min-width: 0; }
+.brand-name { font-weight: 650; letter-spacing: .01em; }
+.brand-sub { font-size: 11.5px; color: var(--t3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* tabs */
+.tabs { display: flex; gap: 2px; padding: 8px 10px 0; border-bottom: 1px solid var(--line); }
+.tab {
+  flex: 1; padding: 8px 10px; font: inherit; font-weight: 600; font-size: 12.5px;
+  color: var(--t3); background: none; border: 0; border-bottom: 2px solid transparent;
+  cursor: pointer; border-radius: 6px 6px 0 0;
+}
+.tab:hover { color: var(--t1); background: var(--panel); }
+.tab.is-active { color: var(--t1); border-bottom-color: var(--accent); }
+
+main { flex: 1; padding: 14px; overflow-y: auto; }
+h1 { font-size: 16px; margin: 4px 0 8px; }
+.muted { color: var(--t2); }
+.small { font-size: 12px; }
+.hint { font-size: 11.5px; color: var(--t3); }
+
+/* form */
+.field { display: block; margin-bottom: 14px; }
+.label { display: block; font-size: 11px; font-weight: 650; text-transform: uppercase; letter-spacing: .06em; color: var(--t3); margin-bottom: 6px; }
+input[type=text], textarea {
+  width: 100%; padding: 9px 10px; font: inherit; color: var(--t1);
+  background: var(--panel); border: 1px solid var(--line); border-radius: 8px; outline: none; resize: vertical;
+}
+input[type=text]:focus, textarea:focus { border-color: var(--accent); }
+
+/* buttons */
+button.primary, button.danger {
+  width: 100%; padding: 11px 14px; font: inherit; font-weight: 650; border-radius: 9px;
+  border: 1px solid transparent; cursor: pointer; color: #fff; background: var(--accent);
+}
+button.danger { background: transparent; border-color: var(--bad); color: var(--bad); }
+button.primary:disabled { opacity: .55; cursor: default; }
+button.ghost {
+  padding: 5px 9px; font: inherit; font-size: 11.5px; color: var(--t3);
+  background: none; border: 1px solid var(--line); border-radius: 7px; cursor: pointer;
+}
+button.ghost:hover { color: var(--t1); }
+button.link { font: inherit; color: var(--accent); background: none; border: 0; padding: 0; cursor: pointer; text-decoration: underline; }
+
+/* saved checklists */
+.saved { display: flex; flex-direction: column; gap: 6px; }
+.saved-item {
+  text-align: left; padding: 8px 10px; font: inherit; color: var(--t1);
+  background: var(--panel); border: 1px solid var(--line); border-radius: 8px; cursor: pointer;
+}
+.saved-item:hover { border-color: var(--accent); }
+.saved-item b { font-weight: 600; }
+.saved-item span { display: block; font-size: 11.5px; color: var(--t3); }
+
+/* live */
+.live-head { display: flex; align-items: flex-start; gap: 10px; margin-bottom: 2px; }
+.live-title { font-weight: 650; }
+.live-meta { font-size: 12px; color: var(--t3); }
+.dot { width: 9px; height: 9px; border-radius: 50%; background: var(--ok); margin-top: 6px; flex: none; }
+.dot.warn { background: var(--warn); }
+.dot.bad { background: var(--bad); }
+.dot.ok { animation: pulse 2s ease-in-out infinite; }
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
+.audio-state { font-size: 12px; color: var(--t3); margin: 0 0 14px; }
+
+/* the checklist — the point of the whole thing */
+.checklist { list-style: none; margin: 0 0 16px; padding: 0; display: flex; flex-direction: column; gap: 7px; }
+.item {
+  display: flex; gap: 9px; padding: 9px 10px; border: 1px solid var(--line);
+  border-radius: 9px; background: var(--panel);
+}
+.item .box { flex: none; width: 17px; height: 17px; border-radius: 5px; border: 1.5px solid var(--line); display: grid; place-items: center; font-size: 11px; margin-top: 1px; }
+.item .text { flex: 1; min-width: 0; }
+.item .when { font-size: 11px; color: var(--t3); flex: none; margin-top: 2px; }
+.item .evidence { display: block; font-size: 11.5px; color: var(--t3); font-style: italic; margin-top: 3px; }
+.item.covered { border-color: color-mix(in srgb, var(--ok) 45%, var(--line)); }
+.item.covered .box { background: var(--ok); border-color: var(--ok); color: #06281a; }
+.item.covered .text { color: var(--t2); }
+.item.touched .box { border-color: var(--warn); color: var(--warn); }
+.item.touched .box::after { content: "·"; font-size: 20px; line-height: 0; }
+
+/* transcript */
+.transcript { margin-bottom: 16px; }
+.transcript summary { font-size: 12px; color: var(--t3); cursor: pointer; }
+.transcript-body { margin-top: 8px; max-height: 150px; overflow-y: auto; white-space: pre-wrap; }
+
+/* history */
+.history-item { padding: 10px 0; border-bottom: 1px solid var(--line); }
+.history-item:last-child { border-bottom: 0; }
+.history-top { display: flex; gap: 8px; align-items: baseline; }
+.history-title { font-weight: 600; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.history-when { font-size: 11.5px; color: var(--t3); flex: none; }
+.history-progress { font-size: 12px; color: var(--t2); margin-top: 2px; }
+.bar { height: 4px; border-radius: 3px; background: var(--line); margin-top: 7px; overflow: hidden; }
+.bar > i { display: block; height: 100%; background: var(--ok); }
+
+.notice { margin: 0; padding: 10px 14px; font-size: 11.5px; color: var(--t3); border-top: 1px solid var(--line); }
+.empty { color: var(--t3); font-size: 12.5px; padding: 18px 0; text-align: center; }

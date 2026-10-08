@@ -902,6 +902,69 @@ services:
 
   # The user-facing web UI (Next.js custom server). Proxies /ws → gateway and REST → agent-api/admin-api.
   # The terminal is the front door for humans; the gateway remains the API front door for programmatic use.
+  # ── nexus-live — the IN-PERSON meeting lane (Nexus Chrome extension) ─────────────────────────
+  #
+  # A meeting that happens in a ROOM: the extension streams the user's microphone here over an
+  # authenticated WebSocket; this service transcribes it, publishes the segments onto the SAME
+  # `transcription_segments` spine the bots use (so history, the live terminal view and the
+  # post-meeting notes all work with nothing else changed), and marks off the call's agenda
+  # checklist as it is covered.
+  #
+  # The ONLY port published beyond the terminal, and it is published on LOOPBACK like every other
+  # service: nginx fronts it at https://nexus.biami.io/live/ (REST + the `/live/ingest` upgrade).
+  # It authenticates the extension's Nexus API token through admin-api's internal oracle — the
+  # same door the gateway uses — so the token the terminal's Google sign-in mints is the only
+  # credential the extension ever holds.
+  live:
+    build:
+      # The repo root: @vexa/live's workspace deps live under core/meetings/modules/*, and the
+      # build bakes the turn-segmentation model from the bot's warm-hf-cache script.
+      context: ../..
+      dockerfile: core/meetings/services/live/Dockerfile
+    image: vexaai/v012-live:${IMAGE_TAG:-dev}
+    ports:
+      - "127.0.0.1:${LIVE_API_PORT:-18120}:8120"
+    environment:
+      - NEXUS_LIVE_PORT=8120
+      # What the extension is told to open. MUST match the nginx location below, because the
+      # browser connects to the public name, not to the compose network.
+      - NEXUS_LIVE_PUBLIC_INGEST_URL=${NEXUS_LIVE_PUBLIC_INGEST_URL:-wss://nexus.biami.io/live/ingest}
+      - REDIS_URL=redis://redis:6379/0
+      # Identity + the meeting rows, both over the internal tier. Unset INTERNAL_API_SECRET and
+      # this service refuses every request rather than defaulting to open — see src/auth.ts.
+      - ADMIN_API_URL=http://admin-api:8001
+      - MEETING_API_URL=http://meeting-api:8080
+      - INTERNAL_API_SECRET=${INTERNAL_API_SECRET}
+      # STT: the SAME hosted Whisper the bots transcribe with. Unset → no call can start (503),
+      # which is the honest failure: recording silence is worse than refusing.
+      - TRANSCRIPTION_SERVICE_URL=${TRANSCRIPTION_SERVICE_URL:-}
+      - TRANSCRIPTION_SERVICE_TOKEN=${TRANSCRIPTION_SERVICE_TOKEN:-}
+      - TRANSCRIPTION_MODEL=${TRANSCRIPTION_MODEL:-}
+      # The agenda-coverage evaluator. EMPTY BY DEFAULT = the STT base + token above, because an
+      # OpenAI-compatible endpoint that serves Whisper generally serves chat models too — so a
+      # deployment that can transcribe can also mark off an agenda with no new credential. Set
+      # these to point coverage at a different model or provider. With no model reachable the
+      # transcript is unaffected and the checklist simply does not tick by itself.
+      - NEXUS_LIVE_LLM_URL=${NEXUS_LIVE_LLM_URL:-}
+      - NEXUS_LIVE_LLM_TOKEN=${NEXUS_LIVE_LLM_TOKEN:-}
+      - NEXUS_LIVE_LLM_MODEL=${NEXUS_LIVE_LLM_MODEL:-openai/gpt-oss-120b}
+      - NEXUS_LIVE_COVERAGE_INTERVAL_MS=${NEXUS_LIVE_COVERAGE_INTERVAL_MS:-20000}
+      # How long a call may go without audio before the janitor finalizes it. This is what closes
+      # a call whose browser was simply shut: the in-person lane carries no bot, so meeting-api's
+      # reconcile sweep deliberately ignores it (bot_spawn.ports.LIVE_PLATFORM).
+      - NEXUS_LIVE_IDLE_TIMEOUT_MS=${NEXUS_LIVE_IDLE_TIMEOUT_MS:-600000}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+    init: true
+    depends_on:
+      redis:
+        condition: service_healthy
+      admin-api:
+        condition: service_healthy
+      meeting-api:
+        condition: service_healthy
+    networks: [vexa]
+    restart: unless-stopped
+
   terminal:
     build:
       context: ../../clients/terminal
@@ -974,6 +1037,11 @@ services:
       - MICROSOFT_CLIENT_SECRET=${MICROSOFT_CLIENT_SECRET:-}
       # Microsoft tenant: "common" = work/school + personal accounts; or a specific tenant id for org-only.
       - MICROSOFT_TENANT_ID=${MICROSOFT_TENANT_ID:-common}
+      # Which Chrome extension ids may obtain a token from /extension/connect (comma separated).
+      # Empty = any extension's OWN chromiumapp.org loopback — still never a web origin, since
+      # Chrome delivers that fragment only to the extension named in the hostname. Pin it once the
+      # extension has a stable id (a Web Store listing, or a `key` in its manifest).
+      - VEXA_EXTENSION_IDS=${VEXA_EXTENSION_IDS:-}
     healthcheck:
       test: ["CMD", "node", "-e", "require('http').get('http://localhost:3000/',r=>process.exit(r.statusCode<500?0:1)).on('error',()=>process.exit(1))"]
       interval: 10s

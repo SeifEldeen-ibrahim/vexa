@@ -106,6 +106,7 @@ def build_production_app():
     from .bot_spawn.adapters import HttpRuntimeClient, SqlAlchemyMeetingRepo
     from .collector.adapters import RedisStreamBus, SqlAlchemyTranscriptStore
     from .recordings.adapters import S3Storage, SqlAlchemyRecordingRepo
+    from .live_sessions import build_production_live_session_store
 
     database_url = _database_url()
     redis_url = os.getenv("REDIS_URL", "redis://redis:6379/0")
@@ -139,6 +140,9 @@ def build_production_app():
     from .service_authority import build_service_authority_from_env
 
     service_authority = build_service_authority_from_env()
+
+    # The in-person lane's row store (Nexus extension sessions — platform `in_person`).
+    live_session_store = build_production_live_session_store(session_factory)
 
     recording_repo = SqlAlchemyRecordingRepo(session_factory)
     storage = S3Storage(
@@ -242,6 +246,7 @@ def build_production_app():
         transcript_finalizer=_transcript_finalizer,
         calendar_sync_now=_calendar_sync_now,
         calendar_sync_status=_calendar_sync_status,
+        live_session_store=live_session_store,
     )
 
     _attach_background_loops(

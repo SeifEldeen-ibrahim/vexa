@@ -27,6 +27,32 @@ const reply = (status: number, body: unknown) => ({
 const apiOver = (f: { fetcher: (u: string, i: RequestInit) => Promise<Response> }) =>
   new NexusApi({ baseUrl: 'https://nexus.biami.io', token: 'tok', fetcher: f.fetcher.bind(f) as typeof fetch });
 
+/** The regression that cost an evening: the client used to keep the global `fetch` as a field
+ *  and call it as a method, which Chrome rejects with "Illegal invocation". Every other test here
+ *  injects a fetcher, so this is the ONE case that exercises the default — and it fails the way a
+ *  service worker does, by refusing a receiver that is not the global scope. */
+await test('the default fetch is called with the global as its receiver, not the client', async () => {
+  const realFetch = globalThis.fetch;
+  let seen = 0;
+  const strict = function (this: unknown): Promise<Response> {
+    // Chrome's own rule: the global function demands the global object (or nothing) as receiver.
+    if (this !== undefined && this !== globalThis) {
+      throw new TypeError("Failed to execute 'fetch' on 'WorkerGlobalScope': Illegal invocation");
+    }
+    seen++;
+    return Promise.resolve({ ok: true, status: 200, text: async () => '{"user_id":1,"email":"a@b.c"}' } as Response);
+  };
+  globalThis.fetch = strict as typeof fetch;
+  try {
+    // No `fetcher` — the production path.
+    const res = await new NexusApi({ baseUrl: 'https://nexus.biami.io', token: 'tok' }).me();
+    assert.equal(seen, 1);
+    assert.ok(res.ok, `the default fetch path failed: ${res.ok ? '' : res.error}`);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
 await test('calls go to the /live prefix carrying the API key', async () => {
   const f = reply(200, { user_id: 7, email: 'me@biami.io' });
   await apiOver(f).me();

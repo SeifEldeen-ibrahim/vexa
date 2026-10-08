@@ -97,6 +97,18 @@ function announce(): void {
  * Connect once, and Chrome hands the resulting fragment back to THIS extension only.
  */
 async function connect(): Promise<{ ok: boolean; error?: string }> {
+  const res = await attemptConnect();
+  if (!res.ok) {
+    // The reason has to live in STATE, not only in this reply. The panel re-renders from state
+    // immediately after the click, so an error held only here was painted and then wiped in the
+    // same breath — which is why a failing sign-in looked like a sign-in that did nothing.
+    lastError = res.error ?? 'Sign-in did not finish';
+    announce();
+  }
+  return res;
+}
+
+async function attemptConnect(): Promise<{ ok: boolean; error?: string }> {
   const s = await settings();
   const redirectUri = chrome.identity.getRedirectURL();
   const url = `${s.baseUrl.replace(/\/+$/, '')}${CONNECT_PATH}?redirect_uri=${encodeURIComponent(redirectUri)}`;
@@ -117,7 +129,12 @@ async function connect(): Promise<{ ok: boolean; error?: string }> {
   const params = new URLSearchParams(fragment);
   const token = params.get('token');
   const email = params.get('email');
-  if (!token) return { ok: false, error: 'Nexus did not return a credential' };
+  if (!token) {
+    // Name the parameters, never their values: one of them would be the credential.
+    const present = [...params.keys()].join(', ') || 'nothing at all';
+    log('connect: the redirect carried no token — parameters present:', present);
+    return { ok: false, error: `Nexus did not return a credential (the sign-in came back with ${present})` };
+  }
 
   await saveSettings({ token, email: email ?? null });
   // Prove it works now rather than at the start of a meeting.
@@ -129,7 +146,7 @@ async function connect(): Promise<{ ok: boolean; error?: string }> {
     return { ok: false, error: me.error };
   }
   log('connect: signed in as', me.value.email);
-  notices = me.value.capabilities.coverage
+  notices = me.value.capabilities?.coverage
     ? []
     : ['This deployment has no model configured for agenda coverage, so the checklist will not tick by itself.'];
   await saveSettings({ email: me.value.email });

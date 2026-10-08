@@ -33,7 +33,12 @@ export class NexusApi {
   constructor(opts: ApiOptions) {
     this.base = `${opts.baseUrl.replace(/\/+$/, '')}${LIVE_PREFIX}`;
     this.token = opts.token;
-    this.doFetch = opts.fetcher ?? fetch;
+    // NOT `?? fetch`. Storing the global function on `this` and calling `this.doFetch(...)`
+    // calls it as a METHOD, so its receiver is this client rather than the global scope — and a
+    // service worker answers that with "Failed to execute 'fetch' on 'WorkerGlobalScope':
+    // Illegal invocation". It threw on the first real call in Chrome while every test passed,
+    // because the tests all inject their own fetcher. The wrapper keeps the receiver global.
+    this.doFetch = opts.fetcher ?? ((input, init) => fetch(input, init));
     this.timeoutMs = opts.timeoutMs ?? 15000;
   }
 

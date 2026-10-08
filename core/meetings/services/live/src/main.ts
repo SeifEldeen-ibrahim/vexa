@@ -27,6 +27,7 @@ import { createApi, normalizePath } from './http.js';
 import { createHttpCompletion, noCompletion } from './llm.js';
 import { log, setLogLevel } from './log.js';
 import { createMeetingsClient } from './meetings-client.js';
+import { CORS } from './cors.js';
 import { createTemplatesClient } from './templates-client.js';
 import { createRegistry } from './registry.js';
 import { startSession, type SessionDeps } from './session.js';
@@ -34,15 +35,6 @@ import { startSession, type SessionDeps } from './session.js';
 const MAX_BODY_BYTES = 256 * 1024;
 const SWEEP_INTERVAL_MS = 5000;
 
-/** The headers the extension is allowed to send us. Same-origin rules do not apply to an
- *  extension, and this API carries no cookies — the bearer token is the whole authorization —
- *  so a permissive CORS policy here grants nothing a token holder does not already have. */
-const CORS = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers': 'X-API-Key, Authorization, Content-Type',
-  'Access-Control-Allow-Methods': 'GET, POST, PATCH, OPTIONS',
-  'Access-Control-Max-Age': '600',
-};
 
 async function readBody(req: http.IncomingMessage): Promise<{ ok: true; value: unknown } | { ok: false }> {
   const chunks: Buffer[] = [];

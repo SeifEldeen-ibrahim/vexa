@@ -20,12 +20,15 @@ export default async function ExtensionConnectPage({
   const one = (v: string | string[] | undefined): string => (Array.isArray(v) ? v[0] ?? "" : v ?? "");
   // launchWebAuthFlow's own loopback, which the extension passes in.
   const redirectUri = one(params.redirect_uri);
+  // Set when the POST bounced back (not signed in, bad loopback, admin-api down).
+  const error = one(params.error);
   const me = await currentUser();
 
   return (
     <ConnectPanel
       redirectUri={redirectUri}
       email={me.ok ? me.email : null}
+      error={error || null}
     />
   );
 }

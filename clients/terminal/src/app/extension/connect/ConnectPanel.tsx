@@ -1,6 +1,13 @@
 "use client";
-/** The connect surface: sign in, then one deliberate click to hand the extension a token. */
-import { useState } from "react";
+/** The connect surface: sign in, then one deliberate click to hand the extension a token.
+ *
+ *  The Connect control is a PLAIN FORM, posted to /api/extension/connect, which answers 303 to the
+ *  extension's loopback. That matters: `chrome.identity.launchWebAuthFlow` ends the flow when it
+ *  sees the window navigate to the redirect URL, and a server redirect is such a navigation
+ *  beyond doubt. Doing the same hop with fetch + `location.replace()` minted the token but never
+ *  ended the flow — the window just sat there and the extension waited forever. No JavaScript is
+ *  involved in the hop that carries the credential.
+ */
 import { signIn } from "next-auth/react";
 
 // Tokens only — globals.css is the one color source (see surfaces/__tests__/colorTokens.test.ts).
@@ -20,10 +27,15 @@ const button = {
 } as const;
 const muted = { fontSize: 12.5, color: "var(--t3)", lineHeight: 1.5 } as const;
 
-export function ConnectPanel({ redirectUri, email }: { redirectUri: string; email: string | null }) {
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
+export function ConnectPanel({
+  redirectUri,
+  email,
+  error,
+}: {
+  redirectUri: string;
+  email: string | null;
+  error?: string | null;
+}) {
   // Opened directly in a browser rather than by the extension: say so instead of showing a
   // Connect button that cannot work.
   if (!redirectUri) {
@@ -40,30 +52,6 @@ export function ConnectPanel({ redirectUri, email }: { redirectUri: string; emai
     );
   }
 
-  async function connect() {
-    setBusy(true);
-    setError(null);
-    try {
-      const res = await fetch("/api/extension/connect", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ redirect_uri: redirectUri }),
-      });
-      const body = (await res.json()) as { redirect?: string; error?: string };
-      if (!res.ok || !body.redirect) {
-        setError(body.error || `Could not connect (${res.status})`);
-        setBusy(false);
-        return;
-      }
-      // Chrome intercepts this navigation, closes the flow window, and hands the fragment to the
-      // extension that started it.
-      window.location.replace(body.redirect);
-    } catch (err) {
-      setError((err as Error)?.message || "Could not reach Nexus");
-      setBusy(false);
-    }
-  }
-
   return (
     <main style={page}>
       <div style={card}>
@@ -75,9 +63,12 @@ export function ConnectPanel({ redirectUri, email }: { redirectUri: string; emai
               able to record your in-person meetings and read your own meeting history. You can revoke
               it any time from API tokens in Nexus.
             </p>
-            <button style={{ ...button, opacity: busy ? 0.6 : 1 }} onClick={connect} disabled={busy}>
-              {busy ? "Connecting…" : "Connect"}
-            </button>
+            <form method="post" action="/api/extension/connect">
+              <input type="hidden" name="redirect_uri" value={redirectUri} />
+              <button style={button} type="submit">
+                Connect
+              </button>
+            </form>
           </>
         ) : (
           <>

@@ -45,3 +45,24 @@ export function validateRedirectUri(raw: unknown, allow: string[] = allowedExten
   }
   return { ok: true, redirectUri: raw.trim(), extensionId };
 }
+
+/** Is this POST the terminal's OWN form, rather than a form on somebody else's page?
+ *
+ *  Only the form path needs this. A `fetch` POST is already safe cross-site — the attacker
+ *  cannot read the JSON answer — but a form post ends in a NAVIGATION the browser follows, so a
+ *  page elsewhere could submit it in a signed-in user's browser and have the token delivered to
+ *  an extension of the attacker's choosing. Browsers label their own submissions `same-origin`;
+ *  `none` is a user-typed URL or a bookmark. Anything else is refused. Browsers too old to send
+ *  Sec-Fetch-Site fall back to Origin, which a cross-site form post also sets.
+ */
+export function isSameOriginPost(headers: Headers, requestUrl: string): boolean {
+  const site = headers.get("sec-fetch-site");
+  if (site) return site === "same-origin" || site === "none";
+  const origin = headers.get("origin");
+  if (!origin) return true;
+  try {
+    return origin === new URL(requestUrl).origin;
+  } catch {
+    return false;
+  }
+}

@@ -59,7 +59,18 @@ let current: ExtensionState | null = null;
 /** Shown after Stop until the user starts something else. */
 let showingFinished = false;
 
-const ask = <T,>(message: unknown): Promise<T> => chrome.runtime.sendMessage(message) as Promise<T>;
+/** Ask the worker something, and never throw. If the port closes mid-answer (Chrome restarted
+ *  the service worker while it was busy), an unhandled rejection would abandon the click handler
+ *  with the button still disabled and nothing on screen — which looks exactly like the extension
+ *  ignoring the click. A visible failure is the minimum. */
+const ask = async <T,>(message: unknown): Promise<T> => {
+  try {
+    return (await chrome.runtime.sendMessage(message)) as T;
+  } catch (err) {
+    const error = (err as Error)?.message || 'the Nexus background worker stopped responding';
+    return { ok: false, error } as T;
+  }
+};
 
 function show(view: keyof typeof el.views): void {
   for (const [name, node] of Object.entries(el.views)) node.hidden = name !== view;
@@ -271,11 +282,16 @@ async function loadTranscript(): Promise<void> {
 el.signin.addEventListener('click', async () => {
   el.signin.disabled = true;
   el.signin.textContent = 'Opening Google…';
-  const res = await ask<{ ok: boolean; error?: string }>({ type: 'connect' });
-  el.signin.disabled = false;
-  el.signin.textContent = 'Sign in with Google';
-  if (!res?.ok) setError(el.signinError, res?.error ?? 'Sign-in did not finish');
-  await refresh();
+  setError(el.signinError, null);
+  try {
+    const res = await ask<{ ok: boolean; error?: string }>({ type: 'connect' });
+    if (!res?.ok) setError(el.signinError, res?.error ?? 'Sign-in did not finish');
+  } finally {
+    // Restore the button whatever happened, so a failed attempt is retryable.
+    el.signin.disabled = false;
+    el.signin.textContent = 'Sign in with Google';
+    await refresh();
+  }
 });
 
 el.accountBtn.addEventListener('click', async () => {

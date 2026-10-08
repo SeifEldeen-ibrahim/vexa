@@ -3,7 +3,7 @@
  *  extension named in the hostname, so the pattern check is what stops a token being redirected
  *  to a web page. */
 import { describe, expect, it } from "vitest";
-import { validateRedirectUri } from "../extension/redirectTarget";
+import { isSameOriginPost, validateRedirectUri } from "../extension/redirectTarget";
 
 const ID = "a".repeat(32);
 const OTHER = "b".repeat(32);
@@ -45,5 +45,36 @@ describe("validateRedirectUri", () => {
 
   it("an empty allowlist means 'any extension loopback', not 'none'", () => {
     expect(validateRedirectUri(`https://${OTHER}.chromiumapp.org/`, []).ok).toBe(true);
+  });
+});
+
+/** The Connect control is a form whose answer is a 303 the browser FOLLOWS, so a cross-site
+ *  submission would hand a real token to whatever extension the attacker named. The fetch path
+ *  never needed this (a cross-site caller cannot read the answer); the navigation does. */
+describe("isSameOriginPost", () => {
+  const url = "https://nexus.biami.io/api/extension/connect";
+  const h = (init: Record<string, string>) => new Headers(init);
+
+  it("accepts the terminal's own form", () => {
+    expect(isSameOriginPost(h({ "sec-fetch-site": "same-origin" }), url)).toBe(true);
+  });
+
+  it("accepts a user-typed URL or bookmark, which has no initiating site", () => {
+    expect(isSameOriginPost(h({ "sec-fetch-site": "none" }), url)).toBe(true);
+  });
+
+  it("refuses a submission from another site", () => {
+    for (const site of ["cross-site", "same-site"]) {
+      expect(isSameOriginPost(h({ "sec-fetch-site": site }), url), site).toBe(false);
+    }
+  });
+
+  it("falls back to Origin when Sec-Fetch-Site is absent", () => {
+    expect(isSameOriginPost(h({ origin: "https://nexus.biami.io" }), url)).toBe(true);
+    expect(isSameOriginPost(h({ origin: "https://evil.example" }), url)).toBe(false);
+  });
+
+  it("treats a request with neither header as same-origin, as a non-browser caller", () => {
+    expect(isSameOriginPost(h({}), url)).toBe(true);
   });
 });

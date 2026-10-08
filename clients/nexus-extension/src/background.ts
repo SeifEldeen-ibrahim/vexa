@@ -18,6 +18,11 @@ import { encodeAudioFrame, MIC_CHANNEL } from './capture-codec.js';
 import { CONNECT_PATH, DEFAULTS, type Settings } from './config.js';
 import type { ExtensionState, SessionSnapshot, StartedSession } from './types.js';
 
+/** Worker-console breadcrumbs. Kept in the shipped build on purpose: when sign-in or a call fails
+ *  for a user, "chrome://extensions → service worker" is the only window into this process, and a
+ *  silent worker is the hardest thing to support. Never logs the token. */
+const log = (...parts: unknown[]): void => console.log('[nexus]', ...parts);
+
 const KEEPALIVE_ALARM = 'nexus-keepalive';
 const KEEPALIVE_MINUTES = 0.34; // ~20 s — the floor Chrome honours for a repeating alarm
 const POLL_MS = 4000;
@@ -96,13 +101,17 @@ async function connect(): Promise<{ ok: boolean; error?: string }> {
   const redirectUri = chrome.identity.getRedirectURL();
   const url = `${s.baseUrl.replace(/\/+$/, '')}${CONNECT_PATH}?redirect_uri=${encodeURIComponent(redirectUri)}`;
   let redirect: string | undefined;
+  log('connect: opening the sign-in window at', url);
   try {
     redirect = await chrome.identity.launchWebAuthFlow({ url, interactive: true });
   } catch (err) {
     const message = (err as Error)?.message || 'the sign-in window was closed';
+    log('connect: the flow failed —', message);
     return { ok: false, error: `Sign-in did not finish: ${message}` };
   }
   if (!redirect) return { ok: false, error: 'Sign-in did not finish' };
+  // The URL itself carries the token in its fragment, so log only its shape.
+  log('connect: the flow came back with a redirect, fragment present:', new URL(redirect).hash.length > 1);
 
   const fragment = new URL(redirect).hash.replace(/^#/, '');
   const params = new URLSearchParams(fragment);
@@ -115,9 +124,11 @@ async function connect(): Promise<{ ok: boolean; error?: string }> {
   const client = new NexusApi({ baseUrl: s.baseUrl, token });
   const me = await client.me();
   if (!me.ok) {
+    log('connect: the credential did not work against', s.baseUrl, '—', me.status, me.error);
     await saveSettings({ token: null, email: null });
     return { ok: false, error: me.error };
   }
+  log('connect: signed in as', me.value.email);
   notices = me.value.capabilities.coverage
     ? []
     : ['This deployment has no model configured for agenda coverage, so the checklist will not tick by itself.'];

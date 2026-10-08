@@ -24,10 +24,11 @@ The Chrome extension is NOT an image: `cd clients/nexus-extension && npm run pac
 produces `dist/` (load unpacked) and a zip. Its README covers install and the sign-in flow.
 
 nginx is the public front door and is NOT managed by compose. The tracked copy is
-`deploy/nginx/nexus.biami.io.conf`; installing it needs root:
+`deploy/nginx/nexus.biami.io.conf`. The real file is `/etc/nginx/sites-available/nexus.biami.io.conf`
+(`sites-enabled` is a symlink to it), so install over sites-available; this needs root:
 
 ```sh
-sudo cp deploy/nginx/nexus.biami.io.conf /etc/nginx/sites-enabled/nexus.biami.io.conf
+sudo cp deploy/nginx/nexus.biami.io.conf /etc/nginx/sites-available/nexus.biami.io.conf
 sudo nginx -t && sudo systemctl reload nginx
 ```
 

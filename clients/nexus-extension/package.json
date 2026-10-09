@@ -1,7 +1,7 @@
 {
   "name": "@nexus/extension",
-  "version": "0.1.1",
-  "description": "Nexus live meetings — the Chrome extension for in-person calls: sign in with Google, write the agenda, press Start, and watch the checklist tick as the room covers it.",
+  "version": "0.1.2",
+  "description": "Nexus live meetings \u2014 the Chrome extension for in-person calls: sign in with Google, write the agenda, press Start, and watch the checklist tick as the room covers it.",
   "private": true,
   "type": "module",
   "scripts": {

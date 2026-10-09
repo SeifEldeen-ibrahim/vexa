@@ -26,10 +26,25 @@ export function statusLabel(status: AgendaItem['status']): string {
 /** The header line: honest about the three states rather than a single percentage. */
 export function progressLine(progress: Progress): string {
   if (!progress.total) return 'No checklist for this call';
-  const parts = [`${progress.covered} of ${progress.total} covered`];
-  if (progress.touched) parts.push(`${progress.touched} started`);
-  if (progress.open) parts.push(`${progress.open} not yet`);
-  return parts.join(' · ');
+  // All three buckets, always — zeros included. Hiding an empty one made "0 of 11 covered" the
+  // whole story of a call where five points had been started, so the reader could not tell a
+  // meeting that got half way from one that never began. The categories are the answer.
+  return [
+    `${progress.covered} of ${progress.total} covered`,
+    `${progress.touched} started`,
+    `${progress.open} not yet`,
+  ].join(' · ');
+}
+
+/** The two widths of the progress bar: covered, then started, as percentages of the whole.
+ *
+ *  One bar fed only by `covered` is an EMPTY bar for a call where every point was raised and
+ *  none concluded — visually identical to a call that never happened. The started share is drawn
+ *  behind the covered one in a lighter tone, so the bar always shows how far the meeting got. */
+export function progressBars(progress: Progress): { covered: number; touched: number } {
+  if (!progress.total) return { covered: 0, touched: 0 };
+  const pct = (n: number) => Math.round((n / progress.total) * 100);
+  return { covered: pct(progress.covered), touched: pct(progress.touched) };
 }
 
 /** mm:ss — a meeting is minutes long, so hours are only shown when there are some. */

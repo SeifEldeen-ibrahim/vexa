@@ -6,10 +6,10 @@
  * click anything else, and this is a thing you glance at WHILE talking to people.
  */
 import {
-  audioHealth, clock, historyWhen, progressLine, sortForDisplay, whenCovered,
+  audioHealth, clock, historyWhen, progressBars, progressLine, sortForDisplay, whenCovered,
 } from './agenda-view.js';
 import type {
-  AgendaTemplate, ExtensionState, HistoryRow, SavedChecklist, SessionSnapshot,
+  AgendaTemplate, ExtensionState, HistoryRow, Progress, SavedChecklist, SessionSnapshot,
 } from './types.js';
 
 const $ = <T extends HTMLElement>(id: string): T => document.getElementById(id) as T;
@@ -380,6 +380,21 @@ async function loadTemplates(force = false): Promise<void> {
   renderTemplates();
 }
 
+/** The two-tone bar: how much was covered, and how much was at least started. */
+function progressBar(progress: Progress): HTMLElement {
+  const bar = document.createElement('div');
+  bar.className = 'bar';
+  const widths = progressBars(progress);
+  const started = document.createElement('i');
+  started.className = 'started';
+  started.style.width = `${widths.covered + widths.touched}%`;
+  const covered = document.createElement('i');
+  covered.className = 'covered';
+  covered.style.width = `${widths.covered}%`;
+  bar.append(started, covered);
+  return bar;
+}
+
 async function loadHistory(): Promise<void> {
   const res = await ask<{ ok: boolean; value?: HistoryRow[]; error?: string }>({ type: 'history' });
   el.historyList.replaceChildren();
@@ -418,14 +433,7 @@ async function loadHistory(): Promise<void> {
 
     wrap.append(top, progress);
 
-    if (row.progress.total) {
-      const bar = document.createElement('div');
-      bar.className = 'bar';
-      const fill = document.createElement('i');
-      fill.style.width = `${Math.round((row.progress.covered / row.progress.total) * 100)}%`;
-      bar.append(fill);
-      wrap.append(bar);
-    }
+    if (row.progress.total) wrap.append(progressBar(row.progress));
     el.historyList.append(wrap);
   }
 }

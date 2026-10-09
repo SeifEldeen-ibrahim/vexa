@@ -1,6 +1,8 @@
 /** L2 — the checklist's presentation. What a user sees is a product decision, so it is pinned. */
 import assert from 'node:assert/strict';
-import { audioHealth, clock, historyWhen, progressLine, sortForDisplay, statusLabel, whenCovered } from './agenda-view.js';
+import {
+  audioHealth, clock, historyWhen, progressBars, progressLine, sortForDisplay, statusLabel, whenCovered,
+} from './agenda-view.js';
 import type { Agenda } from './types.js';
 
 let passed = 0;
@@ -24,8 +26,20 @@ test('what is NOT dealt with comes first; the user\'s own order holds inside a g
 
 test('the header states the three groups rather than one percentage', () => {
   assert.equal(progressLine({ covered: 1, touched: 1, open: 2, total: 4 }), '1 of 4 covered · 1 started · 2 not yet');
-  assert.equal(progressLine({ covered: 4, touched: 0, open: 0, total: 4 }), '4 of 4 covered');
+  // Every bucket, including the empty ones: "0 of 11 covered" alone said nothing about the five
+  // points that HAD been started, so a half-finished meeting read as a meeting that never ran.
+  assert.equal(progressLine({ covered: 4, touched: 0, open: 0, total: 4 }), '4 of 4 covered · 0 started · 0 not yet');
+  assert.equal(progressLine({ covered: 0, touched: 5, open: 6, total: 11 }), '0 of 11 covered · 5 started · 6 not yet');
   assert.equal(progressLine({ covered: 0, touched: 0, open: 0, total: 0 }), 'No checklist for this call');
+});
+
+test('the bar shows the started share, not just the covered one', () => {
+  // A call where everything was raised and nothing concluded must not draw an EMPTY bar — that
+  // is the same picture as a call that never happened.
+  assert.deepEqual(progressBars({ covered: 0, touched: 5, open: 6, total: 11 }), { covered: 0, touched: 45 });
+  assert.deepEqual(progressBars({ covered: 11, touched: 0, open: 0, total: 11 }), { covered: 100, touched: 0 });
+  assert.deepEqual(progressBars({ covered: 1, touched: 1, open: 2, total: 4 }), { covered: 25, touched: 25 });
+  assert.deepEqual(progressBars({ covered: 0, touched: 0, open: 0, total: 0 }), { covered: 0, touched: 0 });
 });
 
 test('statuses are said in plain words', () => {

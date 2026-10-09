@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Nexus live meetings agenda",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Capture the meeting you are in \u2014 in the room, through your microphone \u2014 and watch your agenda get ticked off as you cover it.",
   "permissions": [
     "storage",

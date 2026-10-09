@@ -960,8 +960,19 @@ services:
       # a call whose browser was simply shut: the in-person lane carries no bot, so meeting-api's
       # reconcile sweep deliberately ignores it (bot_spawn.ports.LIVE_PLATFORM).
       - NEXUS_LIVE_IDLE_TIMEOUT_MS=${NEXUS_LIVE_IDLE_TIMEOUT_MS:-600000}
+    # SHUTDOWN NEEDS LONGER THAN DOCKER'S DEFAULT 10s. On SIGTERM the service finalizes the calls
+    # it is holding, and finalizing ONE means waiting for in-flight Whisper to settle, a last
+    # coverage pass and the end-of-call review — each with a 20s model timeout. At 10s the SIGKILL
+    # always won, so the meeting row was left `active` forever: the new process had never heard of
+    # the session (every reconnect refused 404) while the HTTP snapshot still read `active` off the
+    # row and told the extension its call was live. It then recorded nothing for 25 minutes of a
+    # real half-hour meeting and said nothing (id 84, 2026-10-09). The restart still costs the
+    # session — nothing can save audio the socket could not carry — but a finalized row is what
+    # lets the extension SAY so within seconds instead of retrying into the void.
+
       - LOG_LEVEL=${LOG_LEVEL:-info}
     init: true
+    stop_grace_period: 120s
     depends_on:
       redis:
         condition: service_healthy

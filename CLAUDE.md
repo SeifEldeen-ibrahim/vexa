@@ -20,6 +20,15 @@ docker compose -p vexa-v012 -f docker-compose.yml build terminal
 docker compose -p vexa-v012 -f docker-compose.yml up -d --no-deps --no-build terminal
 ```
 
+**Restarting `live` destroys every in-person call in flight.** The session lives in that
+container's memory, so the extension's socket dies, its reconnect is refused (the new process has
+never heard of the session), and the user is told nothing while their meeting goes unrecorded —
+this ate 25 minutes of a real half-hour meeting on 2026-10-09. ALWAYS check first, and wait:
+
+```sh
+curl -s https://nexus.biami.io/live/health   # live_sessions MUST be 0
+```
+
 The Chrome extension is NOT an image: `cd clients/nexus-extension && npm run package`
 produces `dist/` (load unpacked) and a zip. Its README covers install and the sign-in flow.
 

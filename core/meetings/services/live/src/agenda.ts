@@ -164,23 +164,65 @@ export function agendaProgress(agenda: Agenda): { covered: number; touched: numb
 // the two ways this feature can lie to a user: ticking a box because the agenda SAYS so (rather
 // than because anyone said so), and inventing an id.
 
+const SCALE = (
+  '  "covered" — the point was actually addressed: somebody reported on it, answered it, or ' +
+  'worked through it. A decision is NOT required — most agenda lines ask for an update, and an ' +
+  'update that was given is covered.\n' +
+  '  "touched" — it was raised but left unanswered: asked and deflected, promised for later, or ' +
+  'mentioned only in passing.\n'
+  // A rule for the half-answered line ("key wins AND missed opportunities" where only the wins
+  // were given) was tried here and measured: it changed nothing on the real fixture, so it is not
+  // in the prompt. eval/README.md has the numbers and the harness to retry the idea.
+);
+
+/** The two mistakes that make this feature lie, stated to the model because neither is
+ *  detectable in code: ticking a line because the AGENDA says so rather than because anyone
+ *  said so, and ticking a line that was merely announced as what comes next. */
+const HONESTY = (
+  'Judge only from the transcript. Leave a line out of your answer entirely when the transcript ' +
+  'says nothing about it. Never mark a line because its wording resembles the topic — somebody ' +
+  'must actually have talked about it — and never mark one because it was announced as the next ' +
+  'thing to discuss: being introduced is not being discussed. A line the transcript says was ' +
+  'SKIPPED, deferred, or not reached ("we did not get to the timeline") stays out of your answer ' +
+  'too: saying a thing was not discussed is not discussing it.\n'
+);
+
+const JSON_SHAPE = (
+  'Respond with ONLY this JSON object, no prose and no markdown fence:\n' +
+  '{"marks":[{"id":"<an id above>","status":"covered|touched",' +
+  '"evidence":"<up to 140 characters quoted from the transcript>"}]}\n' +
+  'Use an empty marks array when the transcript speaks to none of these lines.'
+);
+
 const COVERAGE_FRAME = (
   'You are tracking whether a live meeting has covered its agenda. The meeting is happening in a ' +
   'room right now; the transcript below is what the microphone has heard most recently, so it is ' +
   'rough, unpunctuated in places, and has no speaker names.\n\n' +
   'AGENDA — these are the only ids that exist:\n{items}\n\n' +
   'RECENT TRANSCRIPT:\n"""\n{transcript}\n"""\n\n' +
-  'For each agenda line, judge ONLY from the transcript above whether this excerpt moved it:\n' +
-  '  "covered" — it was genuinely discussed and reached a conclusion, decision or clear answer.\n' +
-  '  "touched" — it came up, or was started, but nothing was settled.\n' +
-  'Leave an item OUT of your answer entirely when this excerpt says nothing about it. Never mark ' +
-  'an item because the agenda wording resembles the topic — somebody must actually have talked ' +
-  'about it. Never mark an item because it was announced as the next topic; being introduced is ' +
-  'not being discussed.\n\n' +
-  'Respond with ONLY this JSON object, no prose and no markdown fence:\n' +
-  '{"marks":[{"id":"<an id above>","status":"covered|touched",' +
-  '"evidence":"<up to 140 characters quoted from the transcript>"}]}\n' +
-  'Use an empty marks array if this excerpt moved nothing.'
+  'For every agenda line this transcript speaks to, say where it now STANDS:\n' + SCALE + HONESTY +
+  // The unlock. The frame used to ask what this excerpt had MOVED, which the model read as "report
+  // only what is new" — and since each pass sees a window that overlaps the last one heavily, the
+  // honest answer to that question is almost always "nothing". A real 11-point sales 1:1 came out
+  // 0 covered / 5 started / 6 untouched across 14 passes that each saw the whole conversation.
+  // Asking for STANDING instead costs nothing, because `mergeMarks` already forbids a regression:
+  // a repeated judgement is a no-op, a withheld one is lost for good.
+  'Report a line\'s standing even if an earlier pass already reported it. Marks only ever move ' +
+  'forward, so repeating one costs nothing while withholding one loses it.\n\n' + JSON_SHAPE
+);
+
+/** The end-of-call review. Same scale, same honesty, but ONE pass over the whole meeting rather
+ *  than a sliding window — which is the only pass that can see a point raised at minute two and
+ *  answered at minute forty. The live passes exist for the live panel; this one is what the
+ *  stored record is judged on. */
+const REVIEW_FRAME = (
+  'A meeting has just ended. Below is what was said in it and the agenda the people in the room ' +
+  'set beforehand. Decide, line by line, what the meeting actually did with each one. This is the ' +
+  'record they will read afterwards, so it must match what a careful person would conclude from ' +
+  'reading the transcript themselves.\n\n' +
+  'AGENDA — these are the only ids that exist:\n{items}\n\n' +
+  'TRANSCRIPT:\n"""\n{transcript}\n"""\n\n' +
+  'For each line:\n' + SCALE + HONESTY + '\n' + JSON_SHAPE
 );
 
 /** Render the open part of the checklist for the prompt. Covered lines are omitted: they can
@@ -195,10 +237,19 @@ export function promptItems(agenda: Agenda): string {
 /** The full coverage prompt, or null when there is nothing to ask about (everything covered,
  *  or no speech since the last pass). Returning null is how the runner skips an LLM call. */
 export function buildCoveragePrompt(agenda: Agenda, transcript: string): string | null {
+  return fill(COVERAGE_FRAME, agenda, transcript);
+}
+
+/** The whole-meeting review prompt, or null when there is nothing left to judge. */
+export function buildReviewPrompt(agenda: Agenda, transcript: string): string | null {
+  return fill(REVIEW_FRAME, agenda, transcript);
+}
+
+function fill(frame: string, agenda: Agenda, transcript: string): string | null {
   const items = promptItems(agenda);
   const text = transcript.trim();
   if (!items || !text) return null;
-  return COVERAGE_FRAME.replace('{items}', items).replace('{transcript}', text);
+  return frame.replace('{items}', items).replace('{transcript}', text);
 }
 
 /**

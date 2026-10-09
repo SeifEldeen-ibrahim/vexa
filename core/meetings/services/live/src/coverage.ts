@@ -14,7 +14,7 @@
  *     the meeting still gets a chance to tick its box.
  */
 import {
-  buildCoveragePrompt, mergeMarks, parseCoverageReply, type Agenda,
+  buildCoveragePrompt, buildReviewPrompt, mergeMarks, parseCoverageReply, type Agenda,
 } from './agenda.js';
 import type { CompletionPort } from './llm.js';
 import { log } from './log.js';
@@ -43,6 +43,17 @@ export interface CoverageRunner {
   tick(): Promise<boolean>;
   /** End-of-call pass: due or not, as long as there is unjudged speech. */
   flush(): Promise<boolean>;
+  /** The whole-meeting review, judged against `transcript` rather than the sliding window.
+   *
+   *  A live pass can only ever see a window, so a point raised early and settled late is never in
+   *  one excerpt. This runs once, at the end, over the whole conversation. It can only RAISE a
+   *  mark (`mergeMarks`), so a review that sees less than the live passes did cannot undo them.
+   *
+   *  Honestly: eval/ shows this pass changing nothing on the one real fixture there is, in any
+   *  condition tested — because that meeting discusses each topic contiguously, inside a single
+   *  window, so it cannot exercise what the review is for. Kept for the long wandering meeting it
+   *  does address, at the price of one model call; see eval/README.md's "What is NOT proven". */
+  review(transcript: string): Promise<boolean>;
   agenda(): Agenda;
   /** Diagnostics for /live/health and the session's log line. */
   stats(): { passes: number; changes: number; failures: number; pendingChars: number };
@@ -60,8 +71,7 @@ export function createCoverageRunner(opts: CoverageRunnerOptions): CoverageRunne
   let changes = 0;
   let failures = 0;
 
-  async function run(): Promise<boolean> {
-    const prompt = buildCoveragePrompt(agenda, window);
+  async function run(prompt: string | null): Promise<boolean> {
     if (!prompt) {
       pendingChars = 0;
       return false;
@@ -114,12 +124,17 @@ export function createCoverageRunner(opts: CoverageRunnerOptions): CoverageRunne
       if (running) return false;
       if (pendingChars < minNewChars) return false;
       if (now() - lastRunAt < opts.intervalMs) return false;
-      return run();
+      return run(buildCoveragePrompt(agenda, window));
     },
 
     async flush() {
       if (running || pendingChars <= 0) return false;
-      return run();
+      return run(buildCoveragePrompt(agenda, window));
+    },
+
+    async review(transcript) {
+      if (running) return false;
+      return run(buildReviewPrompt(agenda, transcript));
     },
 
     agenda: () => agenda,

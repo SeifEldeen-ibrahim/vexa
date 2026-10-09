@@ -1,0 +1,304 @@
+{
+ "name": "sales-1to1",
+ "note": "A real BIAMI sales weekly 1:1 captured by the extension (meeting 75, 2026-10-09, 258s, 68 confirmed segments). `expected` is a hand label read off the transcript: `covered` where the point was actually addressed with substance, `touched` where it was raised or partly answered. The live run of this call marked 0 covered / 5 touched / 6 open, which is what this fixture exists to measure.",
+ "agenda": [
+  "Announcements, market news, product updates or changes in priorities.",
+  "Last Week’s sales results versus target",
+  "Last Week’s key wins and missed opportunities",
+  "Pipeline & Forecast",
+  "Progress on active deals",
+  "Deals expected to close this week",
+  "Blockers or customer issues",
+  "Support needed from the manager",
+  "This week's key activities",
+  "This week's top prospects and follow-ups",
+  "Agree next steps, owners and deadlines"
+ ],
+ "expected": {
+  "a1": "covered",
+  "a2": "covered",
+  "a3": "touched",
+  "a4": "covered",
+  "a5": "covered",
+  "a6": "covered",
+  "a7": "covered",
+  "a8": "covered",
+  "a9": "touched",
+  "a10": "touched",
+  "a11": "covered"
+ },
+ "segments": [
+  {
+   "start": 0,
+   "text": "Hey, how is it going?"
+  },
+  {
+   "start": 8.01,
+   "text": "Good."
+  },
+  {
+   "start": 9.49,
+   "text": "Ready when you are."
+  },
+  {
+   "start": 11.49,
+   "text": "So how was your week?"
+  },
+  {
+   "start": 15.08,
+   "text": "Pretty steady."
+  },
+  {
+   "start": 16.06,
+   "text": "Busy but manageable."
+  },
+  {
+   "start": 17.46,
+   "text": "Had a couple of strong check-ins with prospects."
+  },
+  {
+   "start": 20.42,
+   "text": "Good. So look, a few announcements. We just brought the next factory,"
+  },
+  {
+   "start": 26.9,
+   "text": "production mode into growth and operations lab this week."
+  },
+  {
+   "start": 33.66,
+   "text": "And"
+  },
+  {
+   "start": 34.0,
+   "text": "so that's new. And maybe tell me"
+  },
+  {
+   "start": 38.11,
+   "text": "how was your week? What were the sales results?"
+  },
+  {
+   "start": 44.14,
+   "text": "Let me check the latest figures."
+  },
+  {
+   "start": 46.34,
+   "text": "Yeah, so overall it's been a pretty steady week."
+  },
+  {
+   "start": 49.9,
+   "text": "I've had a couple of strong check ins with prospects and I've been focusing on keeping opportunities"
+  },
+  {
+   "start": 56.02,
+   "text": "moving through the pipeline."
+  },
+  {
+   "start": 57.35,
+   "text": "I don't have exact numbers at hand so I don't want to give you figures that I'm not sure are right but I'd be glad to pull the last report numbers if you'd like."
+  },
+  {
+   "start": 65.82,
+   "text": "And thanks for the update on 10x factory production moving into growth and operations lab."
+  },
+  {
+   "start": 70.82,
+   "text": "That's interesting and I'll definitely keep an eye on how that might impact our pipeline."
+  },
+  {
+   "start": 75.16,
+   "text": "Oh, look this is..."
+  },
+  {
+   "start": 76.66,
+   "text": "Look, sorry, this is a sales call so I need the exact numbers so I made them up and"
+  },
+  {
+   "start": 81.42,
+   "text": "and say what you want to say."
+  },
+  {
+   "start": 83.02,
+   "text": "This is a demo call."
+  },
+  {
+   "start": 85.82,
+   "text": "Sure."
+  },
+  {
+   "start": 85.91,
+   "text": "Sure. Understood. For this week, we generated 24 new leads, booked 12 meetings, and completed nine prospect calls."
+  },
+  {
+   "start": 94.93,
+   "text": "We moved five opportunities to the next stage and closed two deals, bringing in 18,000 pounds against a weekly target of 25,000."
+  },
+  {
+   "start": 104.82,
+   "text": "The biggest challenge right now, converting interested prospects into signed deals."
+  },
+  {
+   "start": 110.48,
+   "text": "On the positive side, the pipeline is active."
+  },
+  {
+   "start": 113.9,
+   "text": "We've got three promising opportunities that could close next week."
+  },
+  {
+   "start": 117.55,
+   "text": "Estimated combined value around 30,000 pounds."
+  },
+  {
+   "start": 121.33,
+   "text": "With the TEDx factory production moving into growth and operations lab,"
+  },
+  {
+   "start": 125.87,
+   "text": "I see a potential opportunity to strengthen our sales pipeline."
+  },
+  {
+   "start": 129.48,
+   "text": "My focus next week."
+  },
+  {
+   "start": 130.89,
+   "text": "Okay, so what are the deals that we're going to close next week? This week, I mean."
+  },
+  {
+   "start": 135.67,
+   "text": "O' Checking the latest list."
+  },
+  {
+   "start": 139.36,
+   "text": "Right. For the demo, the 3M targeting have a combined value of around 30,000 pounds."
+  },
+  {
+   "start": 144.71,
+   "text": "First, deal one, valued at 12,000. The prospect has shown strong interest and we are at the final proposal stage."
+  },
+  {
+   "start": 152.83,
+   "text": "Next step is to confirm commercial terms. Second, deal two, valued at 10,000. Discussions are done and the prospect is reviewing internally."
+  },
+  {
+   "start": 161.71,
+   "text": "I'm planning a follow-up to handle any questions and agree on a decision date."
+  },
+  {
+   "start": 166.33,
+   "text": "Third, deal three, valued at 8,000. We're further along in negotiations, working to finalize scope and confirm budget."
+  },
+  {
+   "start": 174.29,
+   "text": "My priority is to close deal one first since it's closest to a decision."
+  },
+  {
+   "start": 179.48,
+   "text": "Okay."
+  },
+  {
+   "start": 180.48,
+   "text": "Any blockers? Any issues?"
+  },
+  {
+   "start": 182.45,
+   "text": "Checking."
+  },
+  {
+   "start": 184.97,
+   "text": "Checking. Yeah, a few. For deal one, the blocker is final approval on commercial terms. For deal two, we're waiting on the prospect's internal timeline, so I'll follow up to get a hard date."
+  },
+  {
+   "start": 197.35,
+   "text": "Okay."
+  },
+  {
+   "start": 197.77,
+   "text": "For deal three."
+  },
+  {
+   "start": 198.88,
+   "text": "Any support you need from me?"
+  },
+  {
+   "start": 200.21,
+   "text": "one sec"
+  },
+  {
+   "start": 204.44,
+   "text": "yeah actually two things"
+  },
+  {
+   "start": 206.78,
+   "text": "if you could support escalation"
+  },
+  {
+   "start": 208.58,
+   "text": "on the final commercial approval"
+  },
+  {
+   "start": 210.24,
+   "text": "for deal one that would help us"
+  },
+  {
+   "start": 211.92,
+   "text": "close that 12,000 pound deal this week."
+  },
+  {
+   "start": 213.78,
+   "text": "And if you have any guidance on pricing or terms in case the prospect raises objections that would be useful."
+  },
+  {
+   "start": 221.54,
+   "text": "Okay."
+  },
+  {
+   "start": 221.96,
+   "text": "I can handle the rest."
+  },
+  {
+   "start": 222.87,
+   "text": "So look, I will..."
+  },
+  {
+   "start": 225.34,
+   "text": "Push for the commercials over the next two days and you take ownership of the rest of the actions."
+  },
+  {
+   "start": 235.23,
+   "text": "Got it."
+  },
+  {
+   "start": 235.53,
+   "text": "Got it. I'll handle the follow-ups, prep the final proposal language, and update you as each prospect moves."
+  },
+  {
+   "start": 242.91,
+   "text": "Okay, anything else we need to talk about?"
+  },
+  {
+   "start": 244.74,
+   "text": "Checking our agenda."
+  },
+  {
+   "start": 248.55,
+   "text": "I think we're good for now."
+  },
+  {
+   "start": 250.6,
+   "text": "I'll focus on those three deals, keep the CRM updated, and circle back with the progress"
+  },
+  {
+   "start": 256.01,
+   "text": "date."
+  },
+  {
+   "start": 256.67,
+   "text": "After you've heard of it."
+  },
+  {
+   "start": 257.18,
+   "text": "Cool, thanks. Bye-bye."
+  }
+ ]
+}

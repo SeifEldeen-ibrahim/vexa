@@ -156,6 +156,9 @@ export async function startSession(
   let samples = 0;
   let lastFrameAt: number | null = null;
   const recent: Array<{ text: string; at: number }> = [];
+  // The whole conversation, for the end-of-call review — `recent` is a capped tail for the panel
+  // and cannot serve as the record. Bounded by config for the same reason the prompt is.
+  let full = '';
   let totalLines = 0;
   let ended = false;
 
@@ -181,6 +184,21 @@ export async function startSession(
     };
   };
 
+  // RETRACT THE DRAFTS THAT DROPPED OUT. The pipeline republishes its pending tail as a
+  // full-replace block, and a draft confirms under a DIFFERENT id (`turn:6:p0` → `turn:6:0`), so
+  // nothing ever overwrites the draft row. Left alone, every sentence of the saved transcript
+  // appears twice — once half-heard, once finished — which is exactly what the first real calls
+  // produced. Diff the pending id set on each publish and withdraw whatever left it, the same
+  // reconciliation the meeting bots do (bot/src/pipeline.ts). One turn is open at a time, so a
+  // single set tracks the lane.
+  let pendingIds = new Set<string>();
+  const reconcilePending = (pending: readonly ChunkSegment[]): void => {
+    const next = new Set(pending.map((c) => `${sessionUid}-${c.segmentId}`));
+    const gone = [...pendingIds].filter((id) => !next.has(id));
+    pendingIds = next;
+    if (gone.length) void sink.retract(gone);
+  };
+
   const emit = (confirmed: ChunkSegment[], pending: ChunkSegment[]): void => {
     for (const c of confirmed) {
       const text = (c.text || '').trim();
@@ -189,10 +207,15 @@ export async function startSession(
       totalLines++;
       recent.push({ text, at: Math.round(relSeconds(c.startMs) * 1000) });
       while (recent.length > RECENT_LINES) recent.shift();
+      full = full ? `${full} ${text}` : text;
+      if (full.length > deps.cfg.coverageReviewChars) full = full.slice(full.length - deps.cfg.coverageReviewChars);
       // Only CONFIRMED text is judged: a pending draft is rewritten as the speaker keeps
       // talking, and re-judging each revision would spend a model call per keystroke of speech.
       coverage.addText(text);
     }
+    // Reconcile BEFORE publishing the survivors, so a draft that just confirmed is withdrawn
+    // rather than orphaned, and a draft still in the block is never retracted-then-republished.
+    reconcilePending(pending);
     for (const c of pending) {
       if ((c.text || '').trim()) void sink.publish(toSegment(c, false));
     }
@@ -204,7 +227,9 @@ export async function startSession(
     transcribe: deps.transcribe,
     publish: (_speaker, confirmed, pending) => emit(confirmed, pending),
     publishPending: (_speaker, pending) => emit([], pending),
-    clearPending: () => { /* the extension re-renders from the snapshot; nothing to retract */ },
+    // The turn's pending is gone (tail emptied, turn closed): withdraw it. The panel re-renders
+    // from the snapshot and would forget it anyway — but the durable store would not.
+    clearPending: () => { reconcilePending([]); },
     rename: (_old, _next, segs) => {
       // Nothing can be renamed in this lane (no identities), but a late re-publish of the same
       // ids is still the pipeline's way of correcting TEXT — forward it as confirmed.
@@ -218,6 +243,19 @@ export async function startSession(
   });
 
   log.info('session', `${sessionUid}: started for user ${req.identity.userId} → meeting ${meetingId} (${agenda0.items.length} checklist items)`);
+
+  // A judge that is being asked and is not answering looks exactly like a judge that has heard
+  // nothing worth marking — and for the first real calls it WAS the second explanation, silently,
+  // for a whole meeting (see llm.ts on the token budget). Say so instead: the panel shows
+  // warnings, so a broken judge now costs a user one glance rather than a transcript read
+  // afterwards and a shrug.
+  const coverageWarnings = (): string[] => {
+    const s = coverage.stats();
+    if (s.failures >= 2 && s.failures * 2 >= s.passes) {
+      return [`the agenda judge is not answering (${s.failures} of ${s.passes} passes) — the checklist may be behind`];
+    }
+    return [];
+  };
 
   const snapshot = (): SessionSnapshot => ({
     session_uid: sessionUid,
@@ -240,7 +278,7 @@ export async function startSession(
       changes: coverage.stats().changes,
       failures: coverage.stats().failures,
     },
-    warnings: [...warnings],
+    warnings: [...warnings, ...coverageWarnings()],
   });
 
   return {
@@ -288,10 +326,20 @@ export async function startSession(
         try {
           await transcriber.dispose();
         } catch { /* disposing a dead pipeline is not an error worth surfacing */ }
+        // Nothing may outlive the call as a draft: a pending tail the pipeline never got to
+        // confirm would otherwise sit in the transcript forever, unmarked, as if it were speech.
+        reconcilePending([]);
         try {
           await coverage.flush();
         } catch (err) {
           log.warn('session', `${sessionUid}: final coverage pass failed: ${(err as Error)?.message ?? err}`);
+        }
+        // Then judge the meeting WHOLE. Every live pass saw a window, so a point raised early and
+        // answered late was never in one excerpt; this is the pass the stored record is worth.
+        try {
+          await coverage.review(full);
+        } catch (err) {
+          log.warn('session', `${sessionUid}: end-of-call review failed: ${(err as Error)?.message ?? err}`);
         }
         agenda = coverage.agenda();
         // The durable record: the agenda, its coverage, and how the call ended.

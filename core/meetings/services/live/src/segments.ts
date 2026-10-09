@@ -51,6 +51,17 @@ export interface SegmentSinkOptions {
 
 export interface SegmentSink {
   publish(segment: Segment): Promise<void>;
+  /** Withdraw drafts published earlier, by id.
+   *
+   *  The pipeline republishes its PENDING tail as a full-replace block, and a draft's id is not
+   *  the id its text eventually confirms under (`turn:6:p0` → `turn:6:0`). The stream is
+   *  append-only and the store upserts by id, so an id that drops out of the block is not
+   *  replaced by anything — it stays in Postgres beside the confirmed line and the saved
+   *  transcript reads every sentence twice, once half-finished. That is not cosmetic: it is the
+   *  transcript the user reads, shares, and feeds to the copilot. The retraction is what deletes
+   *  it, and it is the same envelope the meeting bots send (`transcript_retract` → the
+   *  collector's `delete_segments`). */
+  retract(segmentIds: readonly string[]): Promise<void>;
   endSession(): Promise<void>;
 }
 
@@ -80,6 +91,29 @@ export function createSegmentSink(opts: SegmentSinkOptions): SegmentSink {
       }
       try {
         await redis.publish(channel, JSON.stringify({ type: 'transcript', meeting: { id: meetingId }, segment }));
+      } catch (err) {
+        report(err);
+      }
+    },
+
+    async retract(segmentIds) {
+      const ids = [...new Set(segmentIds.map((id) => String(id ?? '').trim()).filter(Boolean))];
+      if (!ids.length) return;
+      const payload = JSON.stringify({
+        type: 'transcript_retract',
+        meeting_id: meetingId,
+        native_meeting_id: nativeMeetingId,
+        segment_ids: ids,
+      });
+      try {
+        await redis.xAdd(TRANSCRIPTION_STREAM, '*', { payload });
+      } catch (err) {
+        report(err);
+      }
+      try {
+        await redis.publish(channel, JSON.stringify({
+          type: 'transcript_retract', meeting: { id: meetingId }, segment_ids: ids,
+        }));
       } catch (err) {
         report(err);
       }

@@ -179,9 +179,16 @@ async function main() {
   if (!coverageConfigured) {
     console.log('  – coverage model not configured on this deployment; skipping the model check');
   } else {
-    const { buildCoveragePrompt, parseCoverageReply } = await import(
-      join(here, '..', '..', '..', 'core/meetings/services/live/dist/agenda.js')
-    ).catch(() => ({}));   // built by `pnpm --filter @vexa/live build`
+    // The service's OWN modules, including its completion port. This check used to hand-roll the
+    // HTTP call with its own `max_tokens`, which is exactly how the deployment shipped a judge
+    // that never answered: the model spent the whole budget reasoning and returned nothing, in
+    // two places that each thought they knew the right number. There is one place now.
+    const [{ buildCoveragePrompt, parseCoverageReply }, { createHttpCompletion }, { loadConfig }] =
+      await Promise.all([
+        import(join(here, '..', '..', '..', 'core/meetings/services/live/dist/agenda.js')).catch(() => ({})),
+        import(join(here, '..', '..', '..', 'core/meetings/services/live/dist/llm.js')).catch(() => ({})),
+        import(join(here, '..', '..', '..', 'core/meetings/services/live/dist/config.js')).catch(() => ({})),
+      ]);   // built by `pnpm --filter @vexa/live build`
     const transcript =
       'right, so on the budget — we went through the numbers line by line and we are all agreed on '
       + 'forty thousand for the quarter. I will send the sheet round after this. The timeline we did not '
@@ -189,21 +196,13 @@ async function main() {
     const prompt = buildCoveragePrompt
       ? buildCoveragePrompt({ items: AGENDA.map((text, i) => ({ id: `a${i + 1}`, text, status: 'open' })), version: 0 }, transcript)
       : null;
-    if (!prompt) {
-      console.log('  – dist/agenda.js is not built (pnpm --filter @vexa/live build); skipping the model check');
+    if (!prompt || !createHttpCompletion || !loadConfig) {
+      console.log('  – dist/ is not built (pnpm --filter @vexa/live build); skipping the model check');
     } else {
-      const base = (cfg.NEXUS_LIVE_LLM_URL || cfg.TRANSCRIPTION_SERVICE_URL || '').replace(/\/+$/, '');
-      const key = cfg.NEXUS_LIVE_LLM_TOKEN || cfg.TRANSCRIPTION_SERVICE_TOKEN;
-      const model = cfg.NEXUS_LIVE_LLM_MODEL || 'openai/gpt-oss-120b';
-      const res = await fetch(`${base}/v1/chat/completions`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
-        body: JSON.stringify({ model, messages: [{ role: 'user', content: prompt }], temperature: 0, max_tokens: 512 }),
-      });
-      const body = await json(res);
-      const reply = body?.choices?.[0]?.message?.content ?? null;
-      if (!res.ok) {
-        bad('the coverage model answers', `${res.status} ${JSON.stringify(body).slice(0, 160)}`);
+      const llm = loadConfig(cfg).llm;
+      const reply = await createHttpCompletion(llm).complete(prompt);
+      if (reply === null) {
+        bad('the coverage model answers', 'the port declined — see the WARN line above for the reason');
       } else {
         const marks = parseCoverageReply(reply);
         const budget = marks.find((m) => m.id === 'a1');

@@ -9,6 +9,16 @@
  *
  * A failure here degrades ONE thing: the checklist stops advancing. It must never touch the
  * transcript, so every error is returned, never thrown.
+ *
+ * REASONING MODELS. The default judge (`openai/gpt-oss-120b`) thinks before it answers, and its
+ * thinking is billed against the SAME completion budget as its answer. At the original 1024-token
+ * cap a real 11-point agenda spent 1022 tokens reasoning, returned `finish_reason: "length"` and
+ * an EMPTY content — which the caller could only read as "the model saw nothing move". That is
+ * how a sales 1:1 whose every point was discussed came out 0-of-11 covered: the model never got
+ * to speak. So this module does three things about it: it asks for LOW reasoning effort (the
+ * judgement is a lookup in a transcript, not a puzzle — it cut reasoning from 1022 tokens to 321
+ * and the call from 3.3s to 1.4s), it leaves room for the answer, and it reports a truncated or
+ * empty reply as a FAILURE rather than as silence.
  */
 import { log } from './log.js';
 
@@ -25,6 +35,9 @@ export interface HttpCompletionOptions {
   timeoutMs?: number;
   /** 0 by default: this is a judgement about what was said, not a creative task. */
   temperature?: number;
+  /** Sent as `reasoning_effort` when set. Empty string omits the field entirely, for an
+   *  endpoint that rejects parameters it does not know. */
+  reasoningEffort?: string;
   fetcher?: typeof fetch;
 }
 
@@ -41,6 +54,7 @@ export function createHttpCompletion(opts: HttpCompletionOptions): CompletionPor
   const url = chatCompletionsUrl(opts.url);
   const doFetch = opts.fetcher ?? fetch;
   const timeoutMs = opts.timeoutMs ?? 20000;
+  const effort = (opts.reasoningEffort ?? 'low').trim();
 
   return {
     async complete(prompt: string): Promise<string | null> {
@@ -58,8 +72,9 @@ export function createHttpCompletion(opts: HttpCompletionOptions): CompletionPor
           body: JSON.stringify({
             model: opts.model,
             messages: [{ role: 'user', content: prompt }],
-            max_tokens: opts.maxTokens ?? 1024,
+            max_tokens: opts.maxTokens ?? 2048,
             temperature: opts.temperature ?? 0,
+            ...(effort ? { reasoning_effort: effort } : {}),
           }),
           signal: AbortSignal.timeout(timeoutMs),
         });
@@ -69,10 +84,18 @@ export function createHttpCompletion(opts: HttpCompletionOptions): CompletionPor
           return null;
         }
         const data = (await res.json()) as {
-          choices?: Array<{ message?: { content?: unknown } }>;
+          choices?: Array<{ finish_reason?: unknown; message?: { content?: unknown } }>;
         };
-        const content = data?.choices?.[0]?.message?.content;
-        return typeof content === 'string' ? content : null;
+        const choice = data?.choices?.[0];
+        const content = typeof choice?.message?.content === 'string' ? choice.message.content : '';
+        if (!content.trim()) {
+          // An empty answer is NOT "nothing moved" — the caller cannot tell those apart, and
+          // reading one as the other is what made a broken judge look like a cautious one.
+          // `length` names the cause: the reply was cut off, almost always by reasoning tokens.
+          log.warn('llm', `completion returned no content (finish_reason=${String(choice?.finish_reason ?? 'unknown')})`);
+          return null;
+        }
+        return content;
       } catch (err) {
         log.warn('llm', `completion failed: ${(err as Error)?.message ?? err}`);
         return null;

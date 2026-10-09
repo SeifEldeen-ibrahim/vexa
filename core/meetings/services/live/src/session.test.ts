@@ -227,4 +227,81 @@ await test('a deployment with no STT refuses to start a call rather than record 
   assert.ok(started.ok === false && /transcription is not configured/.test(started.error));
 });
 
+/** The duplicate-transcript bug, in the shape it actually appeared: a real 1:1 was stored with
+ *  90 rows for 68 lines of speech, every other row a half-finished draft of the line beside it.
+ *  Drafts carry their own ids (`turn:6:p0`), confirm under a different one (`turn:6:0`), and the
+ *  store upserts by id — so the draft is replaced by nothing and the saved transcript stutters. */
+await test('a draft that confirms is RETRACTED, so the stored transcript says it once', async () => {
+  const h = harness();
+  const s = (await startSession(h.deps, START, 'nx-1')) as { ok: true; session: import('./session.js').LiveSession };
+  s.session.feedAudio(1000, new Float32Array(1600), 1_700_000_000_000);
+
+  // The pipeline's real sequence: a draft, then the same speech confirmed under a new id.
+  h.publish([], [h.chunk({ segmentId: 'turn:6:p0', text: 'so look a few announce' })]);
+  h.publish([h.chunk({ segmentId: 'turn:6:0', text: 'so look, a few announcements.' })], []);
+  await new Promise((r) => setImmediate(r));
+
+  const retracts = h.adds.filter((a) => a.type === 'transcript_retract');
+  assert.equal(retracts.length, 1, 'the draft is withdrawn');
+  assert.deepEqual(retracts[0].segment_ids, ['nx-1-turn:6:p0']);
+  assert.equal(retracts[0].meeting_id, 77);
+  // And the live channel hears it too, so an open terminal drops the draft instead of keeping it.
+  assert.ok(h.pubs.some((p) => JSON.parse(p).type === 'transcript_retract'));
+});
+
+await test('a draft still in the pending block is not retracted and republished', async () => {
+  const h = harness();
+  const s = (await startSession(h.deps, START, 'nx-1')) as { ok: true; session: import('./session.js').LiveSession };
+  s.session.feedAudio(1000, new Float32Array(1600), 1_700_000_000_000);
+  h.publish([], [h.chunk({ segmentId: 'turn:6:p0', text: 'so look a few' })]);
+  h.publish([], [h.chunk({ segmentId: 'turn:6:p0', text: 'so look a few announcements' })]);
+  await new Promise((r) => setImmediate(r));
+  assert.equal(h.adds.filter((a) => a.type === 'transcript_retract').length, 0);
+});
+
+await test('no draft outlives the call', async () => {
+  const h = harness();
+  const s = (await startSession(h.deps, START, 'nx-1')) as { ok: true; session: import('./session.js').LiveSession };
+  s.session.feedAudio(1000, new Float32Array(1600), 1_700_000_000_000);
+  h.publish([], [h.chunk({ segmentId: 'turn:9:p0', text: 'and the last thing I wanted to' })]);
+  await s.session.end('stopped by the user');
+  const retracted = h.adds.filter((a) => a.type === 'transcript_retract')
+    .flatMap((a) => a.segment_ids as string[]);
+  assert.deepEqual(retracted, ['nx-1-turn:9:p0'], 'an unconfirmed tail is withdrawn, not left as speech');
+});
+
+/** The whole-meeting review is the pass the stored record is judged on, so it has to actually
+ *  run at the end of a call — and it has to be handed the conversation, not the live window. */
+await test('ending a call reviews the whole meeting', async () => {
+  const prompts: string[] = [];
+  const h = harness();
+  h.deps.completion = { async complete(p) { prompts.push(p); return '{"marks":[]}'; } };
+  const s = (await startSession(h.deps, START, 'nx-1')) as { ok: true; session: import('./session.js').LiveSession };
+  s.session.feedAudio(1000, new Float32Array(1600), 1_700_000_000_000);
+  h.publish([h.chunk({ segmentId: 'turn:1:0' })], []);
+  await new Promise((r) => setImmediate(r));
+  await s.session.end('stopped by the user');
+  assert.ok(prompts.length >= 1);
+  const review = prompts[prompts.length - 1];
+  assert.ok(/just ended/.test(review), 'the last pass is the end-of-call review');
+  assert.ok(review.includes('forty thousand for the quarter'), 'and it carries the transcript');
+});
+
+await test('a judge that stops answering is reported, not mistaken for a quiet one', async () => {
+  const h = harness({ reply: null });
+  const s = (await startSession(h.deps, START, 'nx-1')) as { ok: true; session: import('./session.js').LiveSession };
+  s.session.feedAudio(1000, new Float32Array(1600), 1_700_000_000_000);
+  assert.deepEqual(s.session.snapshot().warnings, [], 'nothing to report before anything is asked');
+  for (let i = 0; i < 3; i++) {
+    h.publish([h.chunk({ segmentId: `turn:${i}:0` })], []);
+    await new Promise((r) => setImmediate(r));
+    // The configured interval is 1ms, so the passes need distinct milliseconds to be due.
+    await new Promise((r) => setTimeout(r, 3));
+    await s.session.tick();
+  }
+  const warn = s.session.snapshot().warnings.join(' ');
+  assert.ok(/not answering/.test(warn), warn);
+  assert.ok(/checklist may be behind/.test(warn));
+});
+
 console.log(`\n${passed} passed`);

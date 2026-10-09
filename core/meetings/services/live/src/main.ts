@@ -93,6 +93,7 @@ export async function main(): Promise<void> {
         token: cfg.llm.token,
         model: cfg.llm.model,
         maxTokens: cfg.llm.maxTokens,
+        reasoningEffort: cfg.llm.reasoningEffort,
       })
     : noCompletion;
 

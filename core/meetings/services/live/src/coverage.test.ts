@@ -175,4 +175,44 @@ await test('the window keeps the TAIL of a long meeting, with overlap across pas
   assert.ok(!prompt.includes('x'.repeat(150)), 'the oldest speech is dropped');
 });
 
+await test('the end-of-call review judges the WHOLE meeting, not the window', async () => {
+  const clock = { t: 0 };
+  const m = model([COVERED]);
+  const r = createCoverageRunner({
+    agenda: buildAgenda(['Confirm the budget', 'Agree the timeline']), completion: m,
+    intervalMs: 20000, windowChars: 40, elapsedMs: () => clock.t, now: () => clock.t,
+  });
+  // The window holds 40 chars. The review is handed the whole conversation anyway — that is the
+  // point of it: a line raised in minute two and settled in minute forty is in no single window.
+  r.addText('x'.repeat(200));
+  assert.equal(await r.review(`so about the budget. ${'y'.repeat(300)}. ${SPEECH}`), true);
+  assert.equal(r.agenda().items[0].status, 'covered');
+  const prompt = m.prompts[0];
+  assert.ok(prompt.includes('agreed forty thousand'), 'the review sees text the window had dropped');
+  assert.ok(!prompt.includes('x'.repeat(50)), 'and it does NOT see the live window');
+  assert.ok(/just ended/.test(prompt), 'it is framed as a review of a finished meeting');
+});
+
+await test('a review cannot un-tick what the live passes marked', async () => {
+  const clock = { t: 100000 };
+  // The review is the one pass that sees less of the meeting than the live passes collectively
+  // did (it is bounded). If it could lower a mark, the user would watch a box they saw ticked
+  // during the call empty itself the moment they stopped recording.
+  const m = model([COVERED, '{"marks":[{"id":"a1","status":"touched","evidence":"we mentioned budget"}]}']);
+  const r = runnerOver(m, clock);
+  r.addText(SPEECH);
+  await r.tick();
+  assert.equal(r.agenda().items[0].status, 'covered');
+  assert.equal(await r.review('we mentioned budget briefly'), false, 'nothing moved');
+  assert.equal(r.agenda().items[0].status, 'covered');
+});
+
+await test('a review with nothing left to judge spends no call', async () => {
+  const clock = { t: 0 };
+  const m = model(['{"marks":[]}']);
+  const r = runnerOver(m, clock);
+  assert.equal(await r.review(''), false);
+  assert.equal(m.prompts.length, 0);
+});
+
 console.log(`\n${passed} passed`);

@@ -3,7 +3,7 @@
  *  user-visible failure it prevents. */
 import assert from 'node:assert/strict';
 import {
-  agendaProgress, buildAgenda, buildCoveragePrompt, mergeMarks, parseAgenda,
+  agendaProgress, buildAgenda, buildCoveragePrompt, buildReviewPrompt, mergeMarks, parseAgenda,
   parseCoverageReply, promptItems, MAX_ITEMS,
 } from './agenda.js';
 
@@ -104,6 +104,62 @@ test('the prompt carries the open items and the transcript', () => {
   const p = buildCoveragePrompt(buildAgenda(['Confirm the budget']), 'so about that budget, forty thousand');
   assert.ok(p && p.includes('[a1] (open) Confirm the budget'));
   assert.ok(p.includes('forty thousand'));
+});
+
+/** THE 0-OF-11 BUG. The frame used to ask what the excerpt had "moved", and the model answered
+ *  that question honestly: each pass sees a window overlapping the last one, so almost nothing
+ *  has newly moved, and a real 11-point sales 1:1 ended 0 covered after 14 passes. Asking for
+ *  STANDING is safe only because `mergeMarks` forbids a regression in code — so the prompt must
+ *  say out loud that a repeated judgement is welcome, or the next edit will quietly restore the
+ *  conservatism. */
+test('the prompt asks where each item STANDS, and invites a repeated judgement', () => {
+  const p = buildCoveragePrompt(buildAgenda(['Confirm the budget']), 'we agreed forty thousand')!;
+  assert.ok(/stands/i.test(p), 'it asks for standing, not for what changed');
+  assert.ok(/even if an earlier pass already reported it/i.test(p));
+  assert.ok(/only ever move forward/i.test(p), 'and says why repeating is free');
+});
+
+test('both frames refuse the two marks that would be lies', () => {
+  for (const p of [
+    buildCoveragePrompt(buildAgenda(['Confirm the budget']), 'we agreed forty thousand')!,
+    buildReviewPrompt(buildAgenda(['Confirm the budget']), 'we agreed forty thousand')!,
+  ]) {
+    assert.ok(/wording resembles the topic/i.test(p), 'the agenda is not evidence');
+    assert.ok(/being introduced is not being discussed/i.test(p));
+    assert.ok(/quoted from the transcript/i.test(p), 'evidence is demanded');
+  }
+});
+
+test('a line the room said it SKIPPED must stay out of the answer', () => {
+  // "the timeline we did not get to yet" is a mention of the timeline, and the looser frame
+  // marked it started. Saying a thing was not discussed is not discussing it.
+  for (const p of [
+    buildCoveragePrompt(buildAgenda(['Agree the timeline']), 'the timeline we did not get to yet')!,
+    buildReviewPrompt(buildAgenda(['Agree the timeline']), 'the timeline we did not get to yet')!,
+  ]) {
+    assert.ok(/SKIPPED, deferred, or not reached/.test(p));
+    assert.ok(/not discussing it/.test(p));
+  }
+});
+
+test('a covered item does not reach "covered" by decision alone', () => {
+  // Most agenda lines ask for an update, not a verdict. The old frame required "a conclusion,
+  // decision or clear answer", which no conversational line like "Announcements" ever meets.
+  const p = buildCoveragePrompt(buildAgenda(['Announcements']), 'we moved production into the lab')!;
+  assert.ok(/decision is NOT required/i.test(p));
+});
+
+test('the review frame is a finished meeting, and carries the transcript it is given', () => {
+  const p = buildReviewPrompt(buildAgenda(['Confirm the budget']), 'the whole conversation')!;
+  assert.ok(/just ended/i.test(p));
+  assert.ok(p.includes('the whole conversation'));
+  assert.ok(p.includes('[a1] (open) Confirm the budget'));
+});
+
+test('a review with nothing left open asks nothing', () => {
+  const a = mergeMarks(buildAgenda(['Budget']), [{ id: 'a1', status: 'covered', evidence: 'agreed' }], 10).agenda;
+  assert.equal(buildReviewPrompt(a, 'the whole conversation'), null);
+  assert.equal(buildReviewPrompt(buildAgenda(['Budget']), '  '), null);
 });
 
 // ── parseCoverageReply ─────────────────────────────────────────────────────────────────────

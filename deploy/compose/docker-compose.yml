@@ -948,6 +948,13 @@ services:
       - NEXUS_LIVE_LLM_URL=${NEXUS_LIVE_LLM_URL:-}
       - NEXUS_LIVE_LLM_TOKEN=${NEXUS_LIVE_LLM_TOKEN:-}
       - NEXUS_LIVE_LLM_MODEL=${NEXUS_LIVE_LLM_MODEL:-openai/gpt-oss-120b}
+      # Room for the answer after the model has finished thinking, and how hard it is asked to
+      # think. Both matter when the model is swapped: a REASONING model bills its thinking against
+      # the same budget as its reply (an 11-point agenda once spent 1022 of 1024 tokens thinking
+      # and returned nothing), while a NON-reasoning model rejects `reasoning_effort` outright as
+      # an unknown parameter — set it empty to omit the field entirely.
+      - NEXUS_LIVE_LLM_MAX_TOKENS=${NEXUS_LIVE_LLM_MAX_TOKENS:-4096}
+      - NEXUS_LIVE_LLM_REASONING_EFFORT=${NEXUS_LIVE_LLM_REASONING_EFFORT-low}
       - NEXUS_LIVE_COVERAGE_INTERVAL_MS=${NEXUS_LIVE_COVERAGE_INTERVAL_MS:-20000}
       # How long a call may go without audio before the janitor finalizes it. This is what closes
       # a call whose browser was simply shut: the in-person lane carries no bot, so meeting-api's

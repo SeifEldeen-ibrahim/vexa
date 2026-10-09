@@ -49,6 +49,19 @@ export interface StartRequest {
   title: string;
   agendaLines: string[] | string;
   language?: string;
+  /** ATTACH to a call that already has a meeting row, instead of claiming a new one.
+   *
+   *  A session lives in this process's memory, so a restart (a deploy, a crash, an OOM) used to
+   *  destroy it: the extension's reconnect was refused, and the room kept talking into nothing.
+   *  Resuming keeps the row, the checklist earned so far, and the call's own clock — so the
+   *  transcript continues where it stopped rather than starting a second meeting over the top. */
+  resume?: {
+    meetingId: number;
+    /** Wall-clock ms when the ORIGINAL call started, so timestamps stay on one timeline. */
+    startedAtMs: number;
+    /** The checklist as the row has it — ticks already earned must not be lost. */
+    agenda: Agenda;
+  };
 }
 
 /** What the extension polls while the call runs. */
@@ -80,6 +93,10 @@ export interface LiveSession {
   lines(limit?: number): Array<{ text: string; at: number }>;
   snapshot(): SessionSnapshot;
   tick(): Promise<void>;
+  /** Write the checklist to the durable row WITHOUT ending the call. What a process does on its
+   *  way out when it is handing the call over rather than finishing it — every tick earned so far
+   *  survives into whoever picks it up. */
+  persist(): Promise<void>;
   end(reason: string): Promise<SessionSnapshot>;
   readonly ended: boolean;
   lastFrameAt(): number | null;
@@ -94,7 +111,8 @@ export async function startSession(
 ): Promise<{ ok: true; session: LiveSession } | { ok: false; status: number; error: string }> {
   const now = deps.now ?? Date.now;
   const title = String(req.title ?? '').trim().slice(0, 512) || 'Live meeting';
-  const agenda0 = buildAgenda(req.agendaLines ?? []);
+  const resume = req.resume;
+  const agenda0 = resume ? resume.agenda : buildAgenda(req.agendaLines ?? []);
   const warnings: string[] = [];
   if (!deps.cfg.stt.url || !deps.cfg.stt.token) {
     // Without STT there is no transcript and therefore nothing to mark off. Refuse at the door:
@@ -103,19 +121,31 @@ export async function startSession(
     return { ok: false, status: 503, error: 'transcription is not configured on this deployment' };
   }
 
-  // 1. Claim the meetings row FIRST. No row, no session: every segment needs its id.
-  const created = await deps.meetings.createSession(req.identity.userId, sessionUid, {
-    title,
-    source: 'nexus-extension',
-    agenda: agenda0,
-    agenda_progress: agendaProgress(agenda0),
-  });
-  if (!created.ok) {
-    return { ok: false, status: created.status === 503 ? 503 : 502, error: `could not start the meeting: ${created.error}` };
+  // 1. Claim the meetings row FIRST. No row, no session: every segment needs its id. On a RESUME
+  //    the row already exists and is the whole point — claiming a second one would split the
+  //    meeting in two.
+  let meetingId: number;
+  let startedAt: number;
+  if (resume) {
+    meetingId = resume.meetingId;
+    startedAt = resume.startedAtMs;
+  } else {
+    const created = await deps.meetings.createSession(req.identity.userId, sessionUid, {
+      title,
+      source: 'nexus-extension',
+      agenda: agenda0,
+      agenda_progress: agendaProgress(agenda0),
+    });
+    if (!created.ok) {
+      return { ok: false, status: created.status === 503 ? 503 : 502, error: `could not start the meeting: ${created.error}` };
+    }
+    meetingId = created.value.id;
+    startedAt = now();
   }
-  const meetingId = created.value.id;
-  const startedAt = now();
   const startedWall = new Date(startedAt).toISOString();
+  // How far into the call this process picked it up. Everything it publishes is shifted by this,
+  // so a transcript resumed at minute 19 reads at minute 19 and not back at zero.
+  const resumeOffsetMs = resume ? Math.max(0, now() - startedAt) : 0;
 
   const sink: SegmentSink = createSegmentSink({
     redis: deps.redis,
@@ -162,16 +192,27 @@ export async function startSession(
   let totalLines = 0;
   let ended = false;
 
+  // Seconds from the start of the CALL, not of this process. On a resume the browser's clock
+  // starts afresh, so the offset is what keeps the resumed audio on the original timeline instead
+  // of overlaying it from zero.
   const relSeconds = (tsMs: number): number => {
-    if (firstFrameTs === null) return 0;
-    return Math.max(0, (tsMs - firstFrameTs) / 1000);
+    if (firstFrameTs === null) return resumeOffsetMs / 1000;
+    return Math.max(0, (resumeOffsetMs + (tsMs - firstFrameTs)) / 1000);
   };
+
+  // SEGMENT IDS MUST NOT COLLIDE ACROSS A RESUME. The pipeline numbers turns from scratch
+  // (`turn:0:0` again), and the store upserts by (meeting_id, segment_id) — so without this the
+  // resumed call would OVERWRITE the transcript it is meant to continue, line by line. The stamp
+  // is the elapsed second at which this process took over: unique per resume (reconnects are 20s
+  // apart), and legible in the id afterwards. An un-resumed session keeps the original format, so
+  // nothing already stored changes shape.
+  const idPrefix = resume ? `${sessionUid}-r${Math.round(resumeOffsetMs / 1000)}` : sessionUid;
 
   const toSegment = (c: ChunkSegment, completed: boolean): Segment => {
     const start = relSeconds(c.startMs);
     const end = Math.max(start, relSeconds(c.endMs));
     return {
-      segment_id: `${sessionUid}-${c.segmentId}`,
+      segment_id: `${idPrefix}-${c.segmentId}`,
       // No speaker identity exists for a room mic — see the header note.
       speaker: '',
       text: c.text,
@@ -193,7 +234,7 @@ export async function startSession(
   // single set tracks the lane.
   let pendingIds = new Set<string>();
   const reconcilePending = (pending: readonly ChunkSegment[]): void => {
-    const next = new Set(pending.map((c) => `${sessionUid}-${c.segmentId}`));
+    const next = new Set(pending.map((c) => `${idPrefix}-${c.segmentId}`));
     const gone = [...pendingIds].filter((id) => !next.has(id));
     pendingIds = next;
     if (gone.length) void sink.retract(gone);
@@ -242,7 +283,10 @@ export async function startSession(
     },
   });
 
-  log.info('session', `${sessionUid}: started for user ${req.identity.userId} → meeting ${meetingId} (${agenda0.items.length} checklist items)`);
+  log.info('session', resume
+    ? `${sessionUid}: RESUMED for user ${req.identity.userId} → meeting ${meetingId} at `
+      + `${Math.round(resumeOffsetMs / 1000)}s (${agendaProgress(agenda0).covered}/${agenda0.items.length} already covered)`
+    : `${sessionUid}: started for user ${req.identity.userId} → meeting ${meetingId} (${agenda0.items.length} checklist items)`);
 
   // A judge that is being asked and is not answering looks exactly like a judge that has heard
   // nothing worth marking — and for the first real calls it WAS the second explanation, silently,
@@ -310,6 +354,11 @@ export async function startSession(
       async tick() {
         if (ended) return;
         await coverage.tick();
+      },
+
+      async persist() {
+        if (ended) return;
+        await persistAgenda(coverage.agenda());
       },
 
       async end(reason) {

@@ -48,9 +48,15 @@ const meetingRow = (over: Partial<MeetingRow> = {}): MeetingRow => ({
   ...over,
 });
 
-const meetings = (rows: MeetingRow[] = []): MeetingsClient => ({
+const meetings = (rows: MeetingRow[] = [], ended: Array<[number, number]> = []): MeetingsClient & {
+  ended: Array<[number, number]>;
+} => ({
+  ended,
   async createSession() { throw new Error('not used'); },
-  async endSession() { throw new Error('not used'); },
+  async endSession(userId: number, meetingId: number) {
+    ended.push([userId, meetingId]);
+    return { ok: true, value: rows[0] ?? ({} as MeetingRow) };
+  },
   async patchSession() { throw new Error('not used'); },
   async getSession() { throw new Error('not used'); },
   async listSessions() { return { ok: true, value: rows }; },
@@ -103,27 +109,43 @@ const fakeSession = (uid: string, userId = 7, agenda: Agenda = buildAgenda(['Bud
   return self as unknown as LiveSession & { endCalls: string[]; ticks: number; frameAt: number | null };
 };
 
+const handoverStore = (seed: Array<{ uid: string; userId: number; meetingId: number; at: number }> = []) => {
+  const notes = new Map(seed.map((n) => [n.uid, n]));
+  return {
+    notes,
+    forgotten: [] as string[],
+    async record(n: { uid: string; userId: number; meetingId: number; at: number }) { notes.set(n.uid, n); },
+    async forget(uid: string) { notes.delete(uid); (this as { forgotten: string[] }).forgotten.push(uid); },
+    async due(nowMs: number, ttlMs: number) { return [...notes.values()].filter((n) => nowMs - n.at >= ttlMs); },
+  };
+};
+
 const apiOver = (opts: {
   rows?: MeetingRow[];
   identity?: typeof ME;
   start?: ApiStart;
   registry?: ReturnType<typeof createRegistry>;
   templates?: ReturnType<typeof templates>;
+  handover?: ReturnType<typeof handoverStore>;
   now?: () => number;
 }) => {
   const registry = opts.registry ?? createRegistry();
   const store = opts.templates ?? templates();
+  const notes = opts.handover ?? handoverStore();
+  const ended: Array<[number, number]> = [];
+  const store2 = meetings(opts.rows ?? [], ended);
   const api = createApi({
     cfg,
     auth: auth(opts.identity),
-    meetings: meetings(opts.rows ?? []),
+    meetings: store2,
     templates: store,
     registry,
+    handover: notes,
     startSession: opts.start ?? (async (_r, uid) => ({ ok: true, session: fakeSession(uid) })),
     newSessionUid: () => 'nx-new',
     now: opts.now,
   });
-  return { api, registry, store };
+  return { api, registry, store, notes, ended };
 };
 type ApiStart = (r: StartRequest, uid: string) =>
   Promise<{ ok: true; session: LiveSession } | { ok: false; status: number; error: string }>;
@@ -351,6 +373,115 @@ await test('an unsupported method on /templates says so instead of 404', async (
     method: 'PATCH', path: '/templates', query: {}, headers: { 'x-api-key': 'mine' }, body: {},
   });
   assert.equal(r.status, 405);
+});
+
+// ── resuming a call this process never saw ───────────────────────────────────────────────────
+// The gate on the whole feature. A capture socket must never be able to CREATE a meeting, revive
+// a finished one, or reach another person's call — it may only pick up a running call of its own.
+const ACTIVE = (over: Partial<MeetingRow> = {}) => meetingRow({
+  id: 701, native_meeting_id: 'nx-live', status: 'active', end_time: null,
+  start_time: new Date(Date.now() - 19 * 60 * 1000).toISOString(),
+  data: { title: 'Half-finished', agenda: buildAgenda(['Budget', 'Timeline']) },
+  ...over,
+});
+
+await test('an active row of my own is resumable, and carries its row and checklist', async () => {
+  const seen: StartRequest[] = [];
+  const { api, registry } = apiOver({
+    rows: [ACTIVE()],
+    start: async (r, uid) => { seen.push(r); return { ok: true, session: fakeSession(uid) }; },
+  });
+  const r = await api.resumeSession('nx-live', { userId: 7, email: 'me@biami.io', scopes: ['tx'] });
+  assert.equal(r.ok, true);
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].resume?.meetingId, 701);
+  assert.equal(seen[0].resume?.agenda.items.length, 2, 'the stored checklist comes back');
+  assert.ok((seen[0].resume?.startedAtMs ?? 0) > 0, 'and the original start time');
+  assert.ok(registry.byUid('nx-live'), 'the resumed session is registered');
+});
+
+await test('a FINISHED call is not resumable — a read transcript must not grow new speech', async () => {
+  const { api } = apiOver({ rows: [ACTIVE({ status: 'completed', end_time: '2026-10-01T09:30:00Z' })] });
+  const r = await api.resumeSession('nx-live', { userId: 7, email: 'me@biami.io', scopes: ['tx'] });
+  assert.equal(r.ok, false);
+  assert.equal(r.ok === false && r.status, 409);
+});
+
+await test('a socket cannot CREATE a call out of an unknown session', async () => {
+  const { api } = apiOver({ rows: [] });
+  const r = await api.resumeSession('nx-nope', { userId: 7, email: 'me@biami.io', scopes: ['tx'] });
+  assert.equal(r.ok === false && r.status, 404);
+});
+
+await test('a socket cannot resume somebody else\'s call', async () => {
+  const { api } = apiOver({ rows: [ACTIVE({ user_id: 9 })] });
+  const r = await api.resumeSession('nx-live', { userId: 7, email: 'me@biami.io', scopes: ['tx'] });
+  assert.equal(r.ok === false && r.status, 404);
+});
+
+await test('a session still held in memory is returned as-is, not resumed twice', async () => {
+  const registry = createRegistry();
+  const held = fakeSession('nx-live');
+  registry.add(held);
+  const starts: unknown[] = [];
+  const { api } = apiOver({
+    rows: [ACTIVE()], registry,
+    start: async (r, uid) => { starts.push(r); return { ok: true, session: fakeSession(uid) }; },
+  });
+  const r = await api.resumeSession('nx-live', { userId: 7, email: 'me@biami.io', scopes: ['tx'] });
+  assert.equal(r.ok && r.session === held, true);
+  assert.equal(starts.length, 0, 'no second session is built for a call we are already holding');
+});
+
+await test('one microphone is one call: another live session blocks a resume', async () => {
+  const registry = createRegistry();
+  registry.add(fakeSession('nx-other'));
+  const { api } = apiOver({ rows: [ACTIVE()], registry });
+  const r = await api.resumeSession('nx-live', { userId: 7, email: 'me@biami.io', scopes: ['tx'] });
+  assert.equal(r.ok === false && r.status, 409);
+});
+
+await test('a row with no start time cannot be resumed onto a timeline', async () => {
+  const { api } = apiOver({ rows: [ACTIVE({ start_time: '' })] });
+  const r = await api.resumeSession('nx-live', { userId: 7, email: 'me@biami.io', scopes: ['tx'] });
+  assert.equal(r.ok === false && r.status, 409);
+});
+
+/** The other half of a handover: a call nobody came back for. The session is in no process's
+ *  memory, so the janitor's own loop cannot see it, and the in-person lane is exempt from
+ *  meeting-api's reconcile sweep — without this the row stays `active` for good. */
+await test('a call nobody resumed is finalized after one idle timeout', async () => {
+  const notes = handoverStore([{ uid: 'nx-gone', userId: 7, meetingId: 701, at: 0 }]);
+  const { api, ended } = apiOver({ rows: [ACTIVE()], handover: notes, now: () => cfg.idleTimeoutMs + 1 });
+  await api.sweep();
+  assert.deepEqual(ended, [[7, 701]], 'the meeting is closed, under its own owner');
+  assert.equal(notes.notes.size, 0, 'and the note is spent');
+});
+
+await test('a fresh handover is left alone — the extension is still reconnecting', async () => {
+  // Half an idle timeout old: the extension reconnects every 20s, so this one still has a chance.
+  const notes = handoverStore([{ uid: 'nx-gone', userId: 7, meetingId: 701, at: 1000 }]);
+  const { api, ended } = apiOver({ rows: [ACTIVE()], handover: notes, now: () => 1000 + cfg.idleTimeoutMs / 2 });
+  await api.sweep();
+  assert.deepEqual(ended, [], 'not yet — it may still be picked up');
+  assert.equal(notes.notes.size, 1);
+});
+
+await test('a note for a call that WAS resumed never finalizes it', async () => {
+  const registry = createRegistry();
+  registry.add(fakeSession('nx-gone'));
+  const notes = handoverStore([{ uid: 'nx-gone', userId: 7, meetingId: 701, at: 0 }]);
+  const { api, ended } = apiOver({ rows: [ACTIVE()], registry, handover: notes, now: () => cfg.idleTimeoutMs + 1 });
+  await api.sweep();
+  assert.deepEqual(ended, [], 'it is live in this process — closing it would cut a running call');
+});
+
+await test('resuming a call spends its handover note', async () => {
+  const notes = handoverStore([{ uid: 'nx-live', userId: 7, meetingId: 701, at: 0 }]);
+  const { api } = apiOver({ rows: [ACTIVE()], handover: notes });
+  const r = await api.resumeSession('nx-live', { userId: 7, email: 'me@biami.io', scopes: ['tx'] });
+  assert.equal(r.ok, true);
+  assert.equal(notes.notes.size, 0, 'so the sweep cannot later finalize it');
 });
 
 console.log(`\n${passed} passed`);

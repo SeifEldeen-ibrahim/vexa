@@ -304,4 +304,87 @@ await test('a judge that stops answering is reported, not mistaken for a quiet o
   assert.ok(/checklist may be behind/.test(warn));
 });
 
+// ── resume ────────────────────────────────────────────────────────────────────────────────────
+// A session lives in this process's memory, so a restart loses it and the extension reconnects to
+// a process that never heard of the call. These are the two ways resuming could make things WORSE
+// than the 404 it replaces: overwriting the transcript it means to continue, and rewinding its
+// clock to zero.
+// A FIXED clock, because "19 minutes in" is the whole assertion: reading it off Date.now() made
+// the elapsed check depend on how long the test itself took (it failed by one millisecond).
+const NOW = 1_700_000_000_000;
+const NINETEEN_MIN = 19 * 60 * 1000;
+const RESUME = (over: Record<string, unknown> = {}) => ({
+  identity: IDENTITY,
+  title: 'Budget review',
+  agendaLines: [],
+  resume: {
+    meetingId: 77,
+    startedAtMs: NOW - NINETEEN_MIN,   // picked up 19 minutes in
+    agenda: { items: [
+      { id: 'a1', text: 'Confirm the budget', status: 'covered' as const, evidence: 'agreed 40k' },
+      { id: 'a2', text: 'Agree the timeline', status: 'open' as const },
+    ], version: 3 },
+  },
+  ...over,
+});
+
+await test('a resumed call keeps its row instead of claiming a second one', async () => {
+  const h = harness();
+  h.deps.now = () => NOW;
+  const created: unknown[] = [];
+  const inner = h.deps.meetings.createSession;
+  h.deps.meetings.createSession = async (...a: Parameters<typeof inner>) => { created.push(a); return inner(...a); };
+  const s = (await startSession(h.deps, RESUME(), 'nx-1')) as { ok: true; session: import('./session.js').LiveSession };
+  assert.equal(s.ok, true);
+  assert.equal(created.length, 0, 'no second meeting row');
+  assert.equal(s.session.meetingId, 77);
+});
+
+await test('a resumed call keeps the ticks already earned', async () => {
+  const h = harness();
+  h.deps.now = () => NOW;
+  const s = (await startSession(h.deps, RESUME(), 'nx-1')) as { ok: true; session: import('./session.js').LiveSession };
+  const snap = s.session.snapshot();
+  assert.equal(snap.progress.covered, 1, 'the covered item survives the restart');
+  assert.equal(snap.agenda.items[0].evidence, 'agreed 40k');
+});
+
+await test('resumed segment ids CANNOT collide with what is already stored', async () => {
+  // The pipeline numbers turns from scratch, and the store upserts by (meeting_id, segment_id):
+  // without a distinct prefix the resumed call would overwrite the transcript line by line.
+  const h = harness();
+  h.deps.now = () => NOW;
+  const s = (await startSession(h.deps, RESUME(), 'nx-1')) as { ok: true; session: import('./session.js').LiveSession };
+  s.session.feedAudio(1000, new Float32Array(1600), NOW);
+  h.publish([h.chunk({ segmentId: 'turn:0:0' })], []);
+  await new Promise((r) => setImmediate(r));
+  const seg = (h.adds[0].segments as Array<Record<string, unknown>>)[0];
+  assert.notEqual(seg.segment_id, 'nx-1-turn:0:0', 'must NOT reuse the original id');
+  assert.match(String(seg.segment_id), /^nx-1-r\d+-turn:0:0$/);
+});
+
+await test('a resumed transcript continues the call clock, it does not rewind to zero', async () => {
+  const h = harness();
+  h.deps.now = () => NOW;
+  const s = (await startSession(h.deps, RESUME(), 'nx-1')) as { ok: true; session: import('./session.js').LiveSession };
+  s.session.feedAudio(1000, new Float32Array(1600), NOW);
+  h.publish([h.chunk({ startMs: NOW, endMs: NOW + 4000 })], []);
+  await new Promise((r) => setImmediate(r));
+  const seg = (h.adds[0].segments as Array<Record<string, unknown>>)[0];
+  assert.equal(Number(seg.start), NINETEEN_MIN / 1000, 'the first resumed second is 19 minutes in, not 0');
+  assert.equal(s.session.snapshot().elapsed_ms, NINETEEN_MIN, 'and the call reads as 19 minutes old');
+  // The absolute stamp must agree, or the terminal would draw it at the wrong wall-clock time.
+  assert.equal(seg.absolute_start_time, new Date(NOW).toISOString());
+});
+
+await test('an un-resumed call keeps the original id shape', async () => {
+  const h = harness();
+  const s = (await startSession(h.deps, START, 'nx-1')) as { ok: true; session: import('./session.js').LiveSession };
+  s.session.feedAudio(1000, new Float32Array(1600), 1_700_000_000_000);
+  h.publish([h.chunk({ segmentId: 'turn:0:0' })], []);
+  await new Promise((r) => setImmediate(r));
+  const seg = (h.adds[0].segments as Array<Record<string, unknown>>)[0];
+  assert.equal(seg.segment_id, 'nx-1-turn:0:0', 'nothing already stored changes shape');
+});
+
 console.log(`\n${passed} passed`);

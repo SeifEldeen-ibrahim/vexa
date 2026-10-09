@@ -9,9 +9,10 @@
  * session uid is not a capability: it is checked against the caller's identity every time.
  */
 import { agendaProgress } from './agenda.js';
-import type { Authenticator } from './auth.js';
+import type { Authenticator, Identity } from './auth.js';
 import { capabilities, type LiveConfig } from './config.js';
 import { agendaOf, checklistsFromRows, titleOf } from './checklists.js';
+import type { HandoverStore } from './handover.js';
 import type { TemplatesClient } from './templates-client.js';
 import { log } from './log.js';
 import type { MeetingRow, MeetingsClient } from './meetings-client.js';
@@ -39,6 +40,8 @@ export interface ApiDeps {
   /** The user's saved agenda templates, which admin-api owns (see templates-client.ts). */
   templates: TemplatesClient;
   registry: SessionRegistry;
+  /** Calls a previous process left behind — see handover.ts. */
+  handover: HandoverStore;
   /** Injected so the HTTP layer never imports the pipeline (and the suite can fake a session). */
   startSession: (req: StartRequest, sessionUid: string) =>
     Promise<{ ok: true; session: LiveSession } | { ok: false; status: number; error: string }>;
@@ -268,7 +271,74 @@ export function createApi(deps: ApiDeps) {
       }
     }
     deps.registry.prune(10 * 60 * 1000, t);
+
+    // A call a previous process let go of, that nobody reconnected to. Without this it would stay
+    // `active` forever: the session is in no process's memory, so the loop above cannot see it,
+    // and the in-person lane is exempt from meeting-api's reconcile sweep. One idle timeout is
+    // the same patience the loop above shows a browser that was closed mid-call.
+    for (const note of await deps.handover.due(t, deps.cfg.idleTimeoutMs)) {
+      if (deps.registry.byUid(note.uid)) continue;   // resumed after all
+      log.info('sweep', `${note.uid}: nobody resumed it within ${Math.round(deps.cfg.idleTimeoutMs / 1000)}s — finalizing meeting ${note.meetingId}`);
+      const r = await deps.meetings.endSession(note.userId, note.meetingId);
+      if (!r.ok) {
+        log.warn('sweep', `${note.uid}: could not finalize meeting ${note.meetingId}: ${r.error}`);
+        continue;   // keep the note so the next sweep tries again
+      }
+      await deps.handover.forget(note.uid);
+    }
   }
 
-  return { handle, sweep };
+  /**
+   * Re-attach a reconnecting capture socket to a call this process never saw.
+   *
+   *  The session lives in memory, so a deploy, a crash or an OOM loses it — and the extension
+   *  then reconnects every 20s to a process that has never heard of its session. It used to be
+   *  refused 404 forever while the room kept talking: 25 minutes of a real half-hour meeting went
+   *  unrecorded, and nothing told the user, because the HTTP snapshot still read `active` off the
+   *  durable row. The row is the point: it holds the meeting id, the title, the start time and the
+   *  checklist as last persisted, which is everything needed to carry on.
+   *
+   *  What is NOT recovered, and cannot be: audio spoken while no socket was attached (it only ever
+   *  existed in the browser), and the transcript text the end-of-call review would have seen from
+   *  before the restart — the resumed process reviews what IT heard.
+   *
+   *  Refuses unless the row is the caller's own, in-person, and still `active`; and unless the
+   *  user has no other live call, since one microphone is one session (see registry.ts).
+   */
+  async function resumeSession(
+    uid: string,
+    identity: Identity,
+  ): Promise<{ ok: true; session: LiveSession } | { ok: false; status: number; error: string }> {
+    const held = deps.registry.byUid(uid);
+    if (held && !held.ended) return { ok: true, session: held };
+    const other = deps.registry.liveForUser(identity.userId);
+    if (other) return { ok: false, status: 409, error: 'another call is already live for this user' };
+
+    const rows = await deps.meetings.listSessions(identity.userId, 200);
+    if (!rows.ok) return { ok: false, status: rows.status, error: rows.error };
+    const row = rows.value.find((r) => r.native_meeting_id === uid);
+    if (!row) return { ok: false, status: 404, error: 'no such session' };
+    if (row.user_id !== identity.userId) return { ok: false, status: 404, error: 'no such session' };
+    // Only a call still believed to be running may be resumed. A `completed` row is a finished
+    // meeting, and re-opening it would append new speech to a transcript someone has already read.
+    if (row.status !== 'active') return { ok: false, status: 409, error: 'that call has already finished' };
+
+    const startedAtMs = Date.parse(row.start_time ?? '');
+    if (!Number.isFinite(startedAtMs)) return { ok: false, status: 409, error: 'that call has no start time to resume from' };
+
+    const started = await deps.startSession({
+      identity,
+      title: titleOf(row),
+      agendaLines: [],
+      resume: { meetingId: row.id, startedAtMs, agenda: agendaOf(row) },
+    }, uid);
+    if (started.ok) {
+      deps.registry.add(started.session);
+      // Picked up: the note is spent, so the sweep must not later finalize a running call.
+      await deps.handover.forget(uid);
+    }
+    return started;
+  }
+
+  return { handle, sweep, resumeSession };
 }

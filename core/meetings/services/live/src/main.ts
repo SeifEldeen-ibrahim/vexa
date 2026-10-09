@@ -29,6 +29,7 @@ import { log, setLogLevel } from './log.js';
 import { createMeetingsClient } from './meetings-client.js';
 import { CORS } from './cors.js';
 import { createTemplatesClient } from './templates-client.js';
+import { createHandoverStore, type HandoverRedis } from './handover.js';
 import { createRegistry } from './registry.js';
 import { startSession, type SessionDeps } from './session.js';
 
@@ -113,12 +114,15 @@ export async function main(): Promise<void> {
   };
 
   const registry = createRegistry();
+  // Calls a previous process left mid-flight. Redis, because the whole point is to outlive us.
+  const handover = createHandoverStore(redisClient as unknown as HandoverRedis);
   const api = createApi({
     cfg,
     auth,
     meetings,
     templates,
     registry,
+    handover,
     startSession: (req, uid) => startSession(sessionDeps, req, uid),
     // The session uid is the meeting's native id. Opaque and unguessable: it names a meeting in
     // the user's history, and a guessable one would be an invitation to probe for other calls.
@@ -180,12 +184,22 @@ export async function main(): Promise<void> {
       if (!authed.ok) return refuse(authed.status === 401 ? 401 : 503, 'Unauthorized');
 
       const uid = (url.searchParams.get('session') || '').trim();
-      const session = uid ? registry.byUid(uid) : undefined;
-      // The session must exist, be the caller's, and still be running. A socket is an attachment
-      // to a call that was STARTED over the control plane — never a way to create one.
-      if (!session || session.userId !== authed.identity.userId || session.ended) {
-        return refuse(404, 'Not Found');
-      }
+      if (!uid) return refuse(404, 'Not Found');
+      const held = registry.byUid(uid);
+      if (held && (held.userId !== authed.identity.userId || held.ended)) return refuse(404, 'Not Found');
+      // Held in memory → attach. NOT held → this process may simply be younger than the call (a
+      // deploy, a crash, an OOM), so ask the durable row whether it is still running and carry on
+      // from it. A socket still never CREATES a call: resumeSession refuses anything that is not
+      // an active in-person row of this caller's.
+      const session = held ?? await (async () => {
+        const r = await api.resumeSession(uid, authed.identity);
+        if (!r.ok) {
+          log.warn('ingest', `${uid}: cannot resume (${r.status} ${r.error})`);
+          return undefined;
+        }
+        return r.session;
+      })();
+      if (!session) return refuse(404, 'Not Found');
 
       wss.handleUpgrade(req, socket, head, (ws) => {
         attach(ws, session.sessionUid);
@@ -245,13 +259,24 @@ export async function main(): Promise<void> {
   const shutdown = async (signal: string): Promise<void> => {
     if (closing) return;
     closing = true;
-    log.info('shutdown', `${signal}: finalizing ${registry.liveCount()} live session(s)`);
+    const live = registry.all().filter((s) => !s.ended);
+    log.info('shutdown', `${signal}: handing over ${live.length} live session(s)`);
     clearInterval(sweep);
     server.close();
     for (const client of wss.clients) client.close(1001, 'server shutting down');
-    await Promise.allSettled(
-      registry.all().filter((s) => !s.ended).map((s) => s.end(`server shutting down (${signal})`)),
-    );
+    // HAND OVER, do not finalize. The room is still talking: the extension reconnects every 20s,
+    // and the next process can pick the call up off its own row and carry the transcript on — one
+    // meeting with a gap of seconds, instead of a meeting that ends mid-sentence and a second one
+    // the user has to start by hand. Ending them here was the kinder of the two WRONG answers (it
+    // at least told the user), and it stops being necessary now that resumeSession exists.
+    //
+    // The note is what bounds the risk: if nobody reconnects, the next process's sweep finalizes
+    // the row after one idle timeout. Persisting the checklist first means a resume — or a reader
+    // of the finished meeting — sees every tick the call had earned.
+    await Promise.allSettled(live.map(async (s) => {
+      await s.persist().catch((err) => log.warn('shutdown', `${s.sessionUid}: could not persist: ${(err as Error)?.message ?? err}`));
+      await handover.record({ uid: s.sessionUid, userId: s.userId, meetingId: s.meetingId, at: Date.now() });
+    }));
     await redisClient.quit().catch(() => { /* already gone */ });
     log.info('shutdown', 'done');
     process.exit(0);

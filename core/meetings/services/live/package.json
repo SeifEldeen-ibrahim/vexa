@@ -10,7 +10,7 @@
     "dev": "tsx watch src/main.ts",
     "start": "node dist/main.js",
     "typecheck": "tsc --noEmit",
-    "test": "tsx src/agenda.test.ts && tsx src/auth.test.ts && tsx src/llm.test.ts && tsx src/coverage.test.ts && tsx src/segments.test.ts && tsx src/checklists.test.ts && tsx src/cors.test.ts && tsx src/http.test.ts && tsx src/session.test.ts"
+    "test": "tsx src/agenda.test.ts && tsx src/auth.test.ts && tsx src/llm.test.ts && tsx src/handover.test.ts && tsx src/coverage.test.ts && tsx src/segments.test.ts && tsx src/checklists.test.ts && tsx src/cors.test.ts && tsx src/http.test.ts && tsx src/session.test.ts"
   },
   "dependencies": {
     "@vexa/capture-codec": "workspace:*",

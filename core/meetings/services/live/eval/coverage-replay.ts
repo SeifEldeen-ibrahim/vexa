@@ -48,7 +48,7 @@ const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms
  *  tokens-per-minute limit — and a 429 is indistinguishable from "the model saw nothing", so an
  *  unpaced run silently measures the rate limit instead of the prompt. Hold a floor between calls
  *  and retry a declined one once, slowly. Production needs neither: its passes are 20s apart. */
-function paced(inner: CompletionPort, gapMs: number): CompletionPort {
+function paced(inner: CompletionPort, gapMs: number, spend: { prompts: number; chars: number }): CompletionPort {
   let last = 0;
   return {
     async complete(prompt) {
@@ -56,6 +56,8 @@ function paced(inner: CompletionPort, gapMs: number): CompletionPort {
         const wait = last + gapMs - Date.now();
         if (wait > 0) await sleep(wait);
         last = Date.now();
+        spend.prompts++;
+        spend.chars += prompt.length;
         const reply = await inner.complete(prompt);
         if (reply !== null) return reply;
       }
@@ -66,6 +68,7 @@ function paced(inner: CompletionPort, gapMs: number): CompletionPort {
 
 async function replay(fx: Fixture, model: string, withFinal: boolean) {
   const cfg = loadConfig();
+  const spend = { prompts: 0, chars: 0 };
   // A live pass can be LOST — a rate limit, a timeout, a truncated reply — and the end-of-call
   // review is the only thing that can recover what that pass would have marked. `--drop-rate`
   // is how that claim gets tested instead of asserted.
@@ -74,7 +77,7 @@ async function replay(fx: Fixture, model: string, withFinal: boolean) {
   const completion = paced(createHttpCompletion({
     url: cfg.llm.url, token: cfg.llm.token, model, maxTokens: cfg.llm.maxTokens,
     reasoningEffort: cfg.llm.reasoningEffort,
-  }), Number(arg('gap-ms', '16000')) || 16000);
+  }), Number(arg('gap-ms', '16000')) || 16000, spend);
   const judge: CompletionPort = dropRate <= 0 ? completion : {
     async complete(prompt) {
       // Deterministic: drop every Nth LIVE pass. The review (a different frame) never drops.
@@ -91,7 +94,7 @@ async function replay(fx: Fixture, model: string, withFinal: boolean) {
   const runner = createCoverageRunner({
     agenda: agenda0,
     completion: judge,
-    intervalMs: cfg.coverageIntervalMs,
+    intervalMs: Number(arg('interval-ms', String(cfg.coverageIntervalMs))) || cfg.coverageIntervalMs,
     windowChars: Number(arg('window-chars', String(cfg.coverageWindowChars))) || cfg.coverageWindowChars,
     minNewChars: cfg.coverageMinNewChars,
     elapsedMs: () => clock,
@@ -113,7 +116,7 @@ async function replay(fx: Fixture, model: string, withFinal: boolean) {
     if (want === item.status) exact++;
     return { id: item.id, want, got: item.status, text: item.text, evidence: item.evidence ?? '' };
   });
-  return { rows, exact, progress: agendaProgress(agenda), stats: runner.stats() };
+  return { rows, exact, progress: agendaProgress(agenda), stats: runner.stats(), spend };
 }
 
 const fx = JSON.parse(readFileSync(join(here, 'fixtures', `${arg('fixture', 'sales-1to1')}.json`), 'utf8')) as Fixture;
@@ -126,7 +129,9 @@ console.log(`fixture ${fx.name} · ${fx.segments.length} segments · model ${mod
 for (let r = 1; r <= runs; r++) {
   const out = await replay(fx, model, withFinal);
   console.log(`\n── run ${r} ─ ${out.progress.covered} covered · ${out.progress.touched} started · ${out.progress.open} not yet ` +
-    `(passes ${out.stats.passes}, failures ${out.stats.failures}) → ${out.exact}/${out.rows.length} exact`);
+    `(passes ${out.stats.passes}, failures ${out.stats.failures}) → ${out.exact}/${out.rows.length} exact\n` +
+    `   sent ${out.spend.prompts} prompts, ${out.spend.chars} chars ≈ ${Math.round(out.spend.chars / 4)} prompt tokens ` +
+    `(≈ ${Math.round(out.spend.chars / 4 / out.spend.prompts)} per pass)`);
   for (const row of out.rows) {
     const mark = row.want === row.got ? ' ' : '✗';
     console.log(`${mark} ${row.id.padEnd(4)} want ${row.want.padEnd(8)} got ${row.got.padEnd(8)} ${row.text.slice(0, 44).padEnd(46)}${row.evidence.slice(0, 60)}`);

@@ -54,7 +54,7 @@ await test('low reasoning effort is asked for, and room is left for the answer',
   }) as unknown as typeof fetch;
   await port(spy).complete('judge this');
   assert.equal(body.reasoning_effort, 'low');
-  assert.equal(body.max_tokens, 2048);
+  assert.equal(body.max_tokens, 4096);
   assert.equal(body.temperature, 0, 'a judgement is not a creative task');
 });
 
@@ -66,6 +66,25 @@ await test('an endpoint that rejects reasoning_effort can have it omitted', asyn
   }) as unknown as typeof fetch;
   await port(spy, { reasoningEffort: '' }).complete('judge this');
   assert.ok(!('reasoning_effort' in body));
+});
+
+await test('a rate limit is named as a quota, not reported as a broken judge', async () => {
+  const limited = (async () => new Response('{"error":{"message":"rate limit"}}', {
+    status: 429,
+    headers: { 'retry-after': '7', 'x-ratelimit-remaining-tokens': '12', 'x-ratelimit-limit-tokens': '8000' },
+  })) as unknown as typeof fetch;
+  const lines: string[] = [];
+  const spy = console.error;   // log.warn writes to stderr
+  console.error = (...a: unknown[]) => { lines.push(a.join(' ')); };
+  try {
+    assert.equal(await port(limited).complete('x'), null);
+  } finally {
+    console.error = spy;
+  }
+  const said = lines.join(' ');
+  assert.ok(/rate limited/.test(said), said);
+  assert.ok(/retry-after 7s/.test(said), said);
+  assert.ok(/12 of 8000 tokens left/.test(said), said);
 });
 
 await test('an unconfigured port, an HTTP error and a throw all decline quietly', async () => {

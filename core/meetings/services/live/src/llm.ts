@@ -72,7 +72,7 @@ export function createHttpCompletion(opts: HttpCompletionOptions): CompletionPor
           body: JSON.stringify({
             model: opts.model,
             messages: [{ role: 'user', content: prompt }],
-            max_tokens: opts.maxTokens ?? 2048,
+            max_tokens: opts.maxTokens ?? 4096,
             temperature: opts.temperature ?? 0,
             ...(effort ? { reasoning_effort: effort } : {}),
           }),
@@ -80,7 +80,15 @@ export function createHttpCompletion(opts: HttpCompletionOptions): CompletionPor
         });
         if (!res.ok) {
           const body = (await res.text().catch(() => '')).slice(0, 200);
-          log.warn('llm', `completion returned ${res.status}${body ? `: ${body}` : ''}`);
+          // 429 is a quota, not a fault: the deployment is asking faster than its plan allows.
+          // Naming it is the difference between "upgrade the endpoint" and "the judge is broken",
+          // and the two look identical from the checklist's side.
+          const why = res.status === 429
+            ? `rate limited by the model endpoint (retry-after ${res.headers.get('retry-after') ?? '?'}s, `
+              + `${res.headers.get('x-ratelimit-remaining-tokens') ?? '?'} of `
+              + `${res.headers.get('x-ratelimit-limit-tokens') ?? '?'} tokens left this minute)`
+            : `completion returned ${res.status}${body ? `: ${body}` : ''}`;
+          log.warn('llm', why);
           return null;
         }
         const data = (await res.json()) as {

@@ -74,8 +74,11 @@ export function loadConfig(env: Env = process.env): LiveConfig {
       // the smaller models save.
       model: str('NEXUS_LIVE_LLM_MODEL', 'openai/gpt-oss-120b'),
       // Room for the answer AFTER the model has finished thinking — see llm.ts's header for the
-      // 1024-token cap that silently swallowed every judgement on a real agenda.
-      maxTokens: num('NEXUS_LIVE_LLM_MAX_TOKENS', 2048),
+      // 1024-token cap that silently swallowed every judgement on a real agenda. A measured pass
+      // over an 11-point agenda spends ~500 completion tokens at low effort, so 4096 is headroom
+      // for a long checklist rather than a number anything is expected to reach. It is a CAP, not
+      // a reservation: the endpoint's per-minute budget is charged what the call actually uses.
+      maxTokens: num('NEXUS_LIVE_LLM_MAX_TOKENS', 4096),
       // 'low' unless overridden; '' omits the parameter for an endpoint that rejects it.
       reasoningEffort: (env.NEXUS_LIVE_LLM_REASONING_EFFORT ?? 'low').trim(),
     },

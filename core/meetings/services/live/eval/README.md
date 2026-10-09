@@ -12,7 +12,7 @@ NEXUS_LIVE_LLM_URL=$TRANSCRIPTION_SERVICE_URL NEXUS_LIVE_LLM_TOKEN=$TRANSCRIPTIO
 ```
 
 It calls the real model and costs tokens. Flags: `--model=`, `--no-final` (skip the end-of-call
-review), `--runs=N`, `--fixture=`, `--window-chars=` (shrink the live window to simulate a meeting longer than it), `--gap-ms=` (the floor between calls — the replay fires a
+review), `--runs=N`, `--fixture=`, `--window-chars=` (shrink the live window to simulate a meeting longer than it), `--interval-ms=` (the pass cadence — the lever on token spend), `--drop-rate=` (lose that share of live passes, to test what the review recovers), `--gap-ms=` (the floor between calls — the replay fires a
 meeting's worth of passes in seconds and would otherwise measure the endpoint's per-minute rate
 limit rather than the prompt).
 
@@ -74,3 +74,30 @@ live window ever holds whole — and this fixture, where each topic is discussed
 inside a single window, cannot contain that case. So it is motivated but untested, it costs one
 model call per meeting, and `mergeMarks` means it can only ever raise a mark. A fixture from a
 long meeting that wanders would settle it.
+
+## What a meeting costs, and what the endpoint allows
+
+Measured on the fixture (`--interval-ms` is the lever; quality was identical at every cadence):
+
+| cadence | passes | prompt tokens | exact |
+|---|---|---|---|
+| 20s (default) | 10 | 8 929 (≈ 890/pass) | 8/11 |
+| 40s | 6 | 5 904 | 8/11 |
+| 60s | 5 | 5 495 | 8/11 |
+
+So a 4-minute meeting with an 11-point agenda spends ≈ 9k prompt + ≈ 5k completion tokens on
+coverage. The default stays at 20s because the live panel ticking promptly IS the product; 40s is
+the dial to turn (`NEXUS_LIVE_COVERAGE_INTERVAL_MS`) when the budget matters more than latency,
+and it costs nothing measurable here.
+
+This deployment's Groq account is on the FREE tier, which the response headers state outright:
+8 000 tokens/minute, 1 000 requests/day, 200 000 tokens/day for `openai/gpt-oss-120b`. The
+per-minute cap is not the binding one — 10 passes over 4 minutes is ≈ 2 200 TPM. **200 000
+tokens/day is**, at roughly 14k tokens a meeting: about a dozen meetings a day on the whole
+organisation, since Groq's limits are per-org and extra keys do not add capacity.
+
+`max_tokens` is NOT reserved against that budget — a 4 096-cap call and a 5-cap call move
+`x-ratelimit-remaining-tokens` by the same amount, so the cap is headroom and costs nothing until
+used. The durable fix for the daily ceiling is the Developer plan (usage-based, no subscription
+fee), not a smaller prompt: at $0.15/M in and $0.60/M out, the numbers above are well under a
+cent of judging per meeting.

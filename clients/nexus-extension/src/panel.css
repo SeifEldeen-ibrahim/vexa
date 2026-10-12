@@ -28,6 +28,14 @@ body {
 }
 
 /* header */
+/* `hidden` has to WIN. The browser's own rule is `[hidden] { display: none }` — a single
+   attribute selector with no class — so ANY `display:` on a class beats it and the element stays
+   on screen while the code believes it is gone. That bit four places here: the History detail
+   (`.checklist` is a flex column, so every past call was permanently expanded), the tab bar on
+   the sign-in screen, and the two empty pickers on the New call screen. `!important` is right
+   for exactly this: `hidden` is not a style preference, it is a statement of fact. */
+[hidden] { display: none !important; }
+
 .top { display: flex; align-items: center; gap: 10px; padding: 12px 14px; border-bottom: 1px solid var(--line); }
 .mark { width: 22px; height: 22px; }
 .brand { flex: 1; min-width: 0; }

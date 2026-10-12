@@ -1,0 +1,44 @@
+{
+ "name": "sales-1to1-short",
+ "note": "The SAME 11-point sales 1:1 agenda as sales-1to1, against a call that barely started — a dozen sentences, about 90 seconds, reported by a colleague on 2026-10-12 as scoring 9 of 11 covered. It is the precision fixture: sales-1to1 catches a judge that marks nothing, this one catches a judge that marks everything. A thin call is the normal case for the live panel (every call is thin for its first two minutes), so a judge that cannot be thin here is wrong for most of every meeting.\n\n`expected` is a hand label read off the transcript below, counting only what was actually said: 3 covered, 5 touched, 3 open. The debatable ones, stated so a later reader can disagree with the label rather than with the measurement: a2 is open because a pipeline number down from last week is not sales results against a target (no target and no results are ever mentioned); a6 is touched because \"the three deals closest to closing\" names no deal and \"push for decisions\" is not an expectation that they close; a7 is touched because a deal that slipped is an outcome, not a stated blocker.",
+ "agenda": [
+  "Announcements, market news, product updates or changes in priorities.",
+  "Last Week’s sales results versus target",
+  "Last Week’s key wins and missed opportunities",
+  "Pipeline & Forecast",
+  "Progress on active deals",
+  "Deals expected to close this week",
+  "Blockers or customer issues",
+  "Support needed from the manager",
+  "This week's key activities",
+  "This week's top prospects and follow-ups",
+  "Agree next steps, owners and deadlines"
+ ],
+ "expected": {
+  "a1": "open",
+  "a2": "open",
+  "a3": "touched",
+  "a4": "covered",
+  "a5": "touched",
+  "a6": "touched",
+  "a7": "touched",
+  "a8": "open",
+  "a9": "covered",
+  "a10": "touched",
+  "a11": "covered"
+ },
+ "segments": [
+  { "start": 0,  "text": "Hey, John, how's it going?" },
+  { "start": 4,  "text": "Going well. Thanks." },
+  { "start": 9,  "text": "So for this week's one-on-one pipelines at about 480k down from 520 last week." },
+  { "start": 18, "text": "Two big deals slipped, one pushed to next month." },
+  { "start": 26, "text": "Okay. What do you feel about coverage?" },
+  { "start": 33, "text": "Okay, okay, okay." },
+  { "start": 38, "text": "is there anything we can do to recover?" },
+  { "start": 45, "text": "Let me check. Yep, okay." },
+  { "start": 52, "text": "So with 480k in the pipe, I'd push to pull about 100k forward." },
+  { "start": 62, "text": "I focus on the three deals closest to closing and push for decisions this week." },
+  { "start": 73, "text": "Plus, let's target 50k in new ups." },
+  { "start": 81, "text": "I'll have a cleaner read by Friday." }
+ ]
+}

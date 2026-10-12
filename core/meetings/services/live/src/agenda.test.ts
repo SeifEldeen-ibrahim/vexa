@@ -88,6 +88,71 @@ test('merging returns a new agenda and leaves the caller\'s copy alone', () => {
   assert.equal(after.items[0].status, 'covered');
 });
 
+// ── one remark covers one line ─────────────────────────────────────────────────────────────
+/** THE 9-OF-11 BUG, the mirror of the 0-of-11 one below. A colleague ran a sales 1:1 and the
+ *  panel said 9 of 11 covered after a dozen sentences. The transcript had not covered nine
+ *  points; one sentence about two slipped deals had been offered as the evidence for four of
+ *  them, and a pipeline figure for three more. Capping the repeats took that call from 9 covered
+ *  to 5 (hand label: 3) and the full meeting from 11 to 10 (hand label: 8) — eval/README.md has
+ *  both runs. */
+test('the same remark cannot cover a second line — it is capped at started', () => {
+  const a = buildAgenda(['Missed opportunities', 'Progress on deals', 'Blockers']);
+  const quote = 'Two big deals slipped, one pushed to next month';
+  const r = mergeMarks(a, [
+    { id: 'a1', status: 'covered', evidence: quote },
+    { id: 'a2', status: 'covered', evidence: quote },
+    { id: 'a3', status: 'covered', evidence: quote },
+  ], 1000).agenda;
+  assert.deepEqual(r.items.map((i) => i.status), ['covered', 'touched', 'touched']);
+  // Capped, not dropped: the topic really did come up, and the quote stays so the user can judge.
+  assert.equal(r.items[1].evidence, quote);
+});
+
+test('a remark re-clipped by a later pass is still the same remark', () => {
+  const first = mergeMarks(buildAgenda(['Missed opportunities', 'Blockers']),
+    [{ id: 'a1', status: 'covered', evidence: 'Two big deals slipped, one pushed to next month' }], 1000).agenda;
+  // A different pass, a different clip of the same sentence, different punctuation and case.
+  const second = mergeMarks(first,
+    [{ id: 'a2', status: 'covered', evidence: 'two big deals slipped — one pushed to next month!' }], 9000).agenda;
+  assert.equal(second.items[1].status, 'touched');
+});
+
+test('a line capped on a shared remark can still be covered later on its own quote', () => {
+  const shared = 'Two big deals slipped, one pushed to next month';
+  let a = mergeMarks(buildAgenda(['Missed opportunities', 'Blockers']),
+    [{ id: 'a1', status: 'covered', evidence: shared }, { id: 'a2', status: 'covered', evidence: shared }], 1000).agenda;
+  assert.equal(a.items[1].status, 'touched');
+  a = mergeMarks(a, [{ id: 'a2', status: 'covered', evidence: 'procurement has frozen every new vendor until April' }], 60000).agenda;
+  assert.equal(a.items[1].status, 'covered');
+  assert.equal(a.items[1].coveredMs, 60000);
+  // ...and the first touch still records when the topic actually arose, not when it was settled.
+  assert.equal(a.items[1].firstTouchedMs, 1000);
+});
+
+test('a passing remark may honestly touch several lines — only covered is capped', () => {
+  const quote = 'we will come back to pricing and the timeline together';
+  const r = mergeMarks(buildAgenda(['Pricing', 'Timeline']), [
+    { id: 'a1', status: 'touched', evidence: quote },
+    { id: 'a2', status: 'touched', evidence: quote },
+  ], 10).agenda;
+  assert.deepEqual(r.items.map((i) => i.status), ['touched', 'touched']);
+});
+
+test('two different remarks about one topic both count', () => {
+  const r = mergeMarks(buildAgenda(['Last week results', 'Pipeline']), [
+    { id: 'a1', status: 'covered', evidence: 'we closed two deals, 18,000 pounds against a 15,000 target' },
+    { id: 'a2', status: 'covered', evidence: 'the pipeline is at 480k, down from 520 last week' },
+  ], 10).agenda;
+  assert.deepEqual(r.items.map((i) => i.status), ['covered', 'covered']);
+});
+
+test('a line re-marked on its OWN earlier quote is not capped against itself', () => {
+  const quote = 'the budget is agreed at forty thousand';
+  let a = mergeMarks(buildAgenda(['Budget']), [{ id: 'a1', status: 'touched', evidence: quote }], 10).agenda;
+  a = mergeMarks(a, [{ id: 'a1', status: 'covered', evidence: quote }], 20).agenda;
+  assert.equal(a.items[0].status, 'covered');
+});
+
 // ── the prompt ─────────────────────────────────────────────────────────────────────────────
 test('covered lines leave the prompt — they can never move again', () => {
   const a = mergeMarks(buildAgenda(['Budget', 'Timeline']), [{ id: 'a1', status: 'covered', evidence: 'agreed' }], 10).agenda;

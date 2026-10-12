@@ -31,6 +31,16 @@ off the transcript, and the distinction it draws is the one the product promises
 * `covered` — the point was addressed. Somebody reported on it, answered it, or worked through it.
 * `touched` — it was raised and left: asked and deflected, or mentioned in passing.
 
+`fixtures/sales-1to1-short.json` — the SAME agenda against a call that had barely started: a
+dozen sentences, ~90 seconds (meeting 90, 2026-10-12). It exists because the two ways this
+feature lies are opposites, and a single fixture can only catch one of them. sales-1to1 catches a
+judge that marks NOTHING; this one catches a judge that marks EVERYTHING. Keep both green or the
+fix for one failure silently buys the other — which is exactly what happened between
+2026-10-09 and 2026-10-12.
+
+A thin call is not an edge case, either: every meeting is thin for its first two minutes, so a
+judge that cannot be honest here is wrong for most of the time the live panel is on screen.
+
 A new fixture is worth adding whenever a real meeting is judged wrongly; that is the only kind of
 evidence this directory accepts.
 
@@ -65,6 +75,43 @@ ask for two things where the meeting gave one — "key wins AND missed opportuni
 prospects AND follow-ups". A prompt rule for exactly that case was written, measured, and
 **removed**: it changed none of the three. The harness is here so the next idea gets the same
 treatment.
+
+## The over-marking it then bought (2026-10-12)
+
+Fixing 0-of-11 moved the judge straight past the answer: the same agenda against a call a minute
+and a half old came back **9 of 11 covered**, reported from the field as "he had said nothing and
+8 were marked yes". The cause is visible in the evidence column — ONE sentence, "two big deals
+slipped, one pushed to next month", was the quote for FOUR separate lines (last week's misses,
+progress on deals, deals closing this week, blockers), and a pipeline figure for three more.
+Nothing was fabricated; every quote was real speech, spent over and over.
+
+Three changes, each measured on both fixtures:
+
+1. **The one-remark cap** (`mergeMarks`, code). A `covered` whose quote is the same piece of
+   speech that already earned another line is capped at `touched` — the topic did come up, but a
+   remark only counts once. Cross-pass, so only the merge can see it; trigram containment ≥ 0.6
+   recognises the same sentence re-clipped by a later pass.
+2. **`SEPARATION`** (prompt). The within-pass half of the same rule, which the merge cannot do
+   alone because each pass is judged in isolation and neither answer is wrong by itself.
+3. **Substance in the quote** (prompt). The quote must itself carry what the line asked for — the
+   figures, the facts, the decision — or the line is `touched`. It makes the evidence the test the
+   decision has to survive rather than a citation attached afterwards.
+
+| variant | thin call (label 3 covered) | full meeting (label 8 covered) |
+|---|---|---|
+| after the 0-of-11 fix | 9 covered · 0 started → 5/11 | 11 covered · 0 started → 8/11 |
+| \+ `SEPARATION` | 7 covered · 2 started → 6/11 | — |
+| \+ the one-remark cap | 5 covered · 3 started → 7/11 | 10 covered · 1 started → **9/11** |
+| \+ substance in the quote | **4–5 covered · 2–3 started → 6–7/11** | 10 covered · 1 started → **9/11** |
+
+The full meeting got BETTER on the way (8/11 → 9/11): a3's quote there was the same remark as
+a2's, so the cap put it back to `touched`, which is what the hand label says.
+
+What the last row is really saying is that the bias is gone rather than that the score jumped.
+At 9 covered every single error was generous; now they fall on both sides of the label — a9 and
+a10 land `touched` or `open` on one run and `covered` on another. Two consecutive runs of the thin
+call disagree on three lines, so **±1 covered is model noise, not a regression**. Judge a future
+change by the direction of its errors and by both fixtures, never by one run of one of them.
 
 ### What is NOT proven
 

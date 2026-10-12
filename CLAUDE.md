@@ -23,12 +23,18 @@ docker compose -p vexa-v012 -f docker-compose.yml up -d --no-deps --no-build ter
 **Restarting `live` interrupts every in-person call in flight.** The session lives in that
 container's memory. Since `e185d826` the call is HANDED OVER rather than dropped — the row stays
 `active`, a note goes into redis (`nexus:live:handover`), and the extension's next reconnect
-resumes it — so a restart now costs seconds of audio instead of the rest of the meeting. Still
-check before restarting, because those seconds are somebody's meeting:
+resumes it — so a restart costs ~20s of audio instead of the rest of the meeting. Those seconds
+are still somebody's meeting, and the audio spoken into them is gone for good. So deploy `live`
+with the script, which refuses rather than warns, and checks again AFTER the build because the
+build takes minutes and a call can start inside it:
 
 ```sh
-curl -s https://nexus.biami.io/live/health   # live_sessions should be 0
+deploy/compose/restart-live.sh            # refuses with exit 2 if a call is live
+deploy/compose/restart-live.sh --force    # only when the lost audio is acceptable
 ```
+
+A check that PRINTS is not a check: `curl .../live/health && docker compose up -d live` happily
+prints `live_sessions: 1` and restarts anyway. That cut a colleague's call twice in one morning.
 
 The Chrome extension is NOT an image: `cd clients/nexus-extension && npm run package`
 produces `dist/` (load unpacked) and a zip. Its README covers install and the sign-in flow.

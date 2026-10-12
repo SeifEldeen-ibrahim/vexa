@@ -119,6 +119,34 @@ async function replay(fx: Fixture, model: string, withFinal: boolean) {
   return { rows, exact, progress: agendaProgress(agenda), stats: runner.stats(), spend };
 }
 
+/**
+ * REFUSE TO RUN WHILE A MEETING IS LIVE. The deployment's model quota is per-organisation, so a
+ * replay and a real call draw on the same 8 000 tokens a minute — and the replay fires a
+ * meeting's worth of passes in the time a real one spends on two. On 2026-10-12 a run of this
+ * harness refused five of a live call's coverage passes (`WARN [llm] rate limited`), and a
+ * refused pass is a checklist that silently stops advancing for somebody sitting in a meeting.
+ * `--force` is there for a deployment with its own quota, and should be reached for knowingly.
+ */
+async function refuseIfSomeoneIsInAMeeting(): Promise<void> {
+  if (flag('force')) return;
+  const url = (process.env.NEXUS_LIVE_HEALTH_URL ?? 'https://nexus.biami.io/live/health').trim();
+  if (!url) return;
+  try {
+    const res = await fetch(url, { signal: AbortSignal.timeout(5000) });
+    const live = Number(((await res.json()) as { live_sessions?: unknown })?.live_sessions ?? 0);
+    if (live > 0) {
+      console.error(`REFUSING: ${live} call(s) live on ${url}.\n`
+        + 'This harness would take model quota the live checklist needs. Wait for the call to end,\n'
+        + 'or pass --force if this deployment has its own quota.');
+      process.exit(2);
+    }
+  } catch {
+    // Health unreachable is not a reason to block a local run — it is a reason to say so.
+    console.error(`(could not reach ${url} to check for live calls — continuing)`);
+  }
+}
+await refuseIfSomeoneIsInAMeeting();
+
 const fx = JSON.parse(readFileSync(join(here, 'fixtures', `${arg('fixture', 'sales-1to1')}.json`), 'utf8')) as Fixture;
 const model = arg('model', loadConfig().llm.model);
 const withFinal = !flag('no-final');

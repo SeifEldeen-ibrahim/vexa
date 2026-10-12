@@ -76,7 +76,7 @@ async function replay(fx: Fixture, model: string, withFinal: boolean) {
   let live = 0;
   const completion = paced(createHttpCompletion({
     url: cfg.llm.url, token: cfg.llm.token, model, maxTokens: cfg.llm.maxTokens,
-    reasoningEffort: cfg.llm.reasoningEffort,
+    maxTokensParam: cfg.llm.maxTokensParam, reasoningEffort: cfg.llm.reasoningEffort,
   }), Number(arg('gap-ms', '16000')) || 16000, spend);
   const judge: CompletionPort = dropRate <= 0 ? completion : {
     async complete(prompt) {

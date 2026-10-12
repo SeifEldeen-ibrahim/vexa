@@ -191,3 +191,50 @@ organisation, since Groq's limits are per-org and extra keys do not add capacity
 used. The durable fix for the daily ceiling is the Developer plan (usage-based, no subscription
 fee), not a smaller prompt: at $0.15/M in and $0.60/M out, the numbers above are well under a
 cent of judging per meeting.
+
+## Moving the judge off Groq (2026-10-12)
+
+Groq's free tier caps `openai/gpt-oss-120b` at **200 000 tokens/day**, about 125 passes, about one
+and a half long meetings. That ceiling is not a budget problem, it is a CORRECTNESS problem: a
+judge out of quota reports every point as not covered, which looks exactly like a meeting that
+covered nothing. On 2026-10-12 a colleague ran six test calls and four of them scored 0 of 11 with
+every single pass refused (`passes: 10, changes: 0, failures: 10` in meeting 97's stored stats).
+Groq's paid Developer tier was closed to new signups at the time, so the judge moved to OpenAI's
+`gpt-6-luna`. Whisper stayed on Groq — separate model, separate meter, never the thing running out.
+
+Measured on all three fixtures, one run each:
+
+| fixture (hand label) | gpt-oss-120b | gpt-6-luna |
+|---|---|---|
+| sales-1to1-short (3 covered) | 5 covered · 6/11 | **2 covered · 7/11** |
+| sales-1to1-scripted (7 covered) | 8 covered · 10/11 | 8 covered · 9/11 |
+| sales-1to1 (8 covered) | 10 covered · 9/11 | 11 covered · 8/11 |
+
+Exact match is a wash (25/33 against 24/33). The useful difference is in the DIRECTION of the
+errors: luna is far more honest on a thin call (2 covered where Groq says 5) and more generous on a
+long one. Since the thin call is the failure that actually reached a customer-facing demo, and
+every meeting is thin for its first minutes, that is the better trade — but it is a trade, and the
+long-meeting generosity is the thing to watch.
+
+The decisive evidence was not a fixture. Replayed over meeting 97 — a real 3-minute sales 1:1 that
+the quota-starved judge had scored 0 of 11 — luna returned **4 covered · 1 started · 6 not yet**,
+agreeing line for line with an independent read by ChatGPT on 9 of the 11 points, and correctly
+leaving blockers, manager support, top prospects and next steps open.
+
+Cost: ~1 100 prompt + ~900 completion tokens per pass (of which ~700 reasoning), so ~2 000 tokens
+a pass against Groq's ~1 600. There is no daily cap.
+
+### Dialects
+
+"OpenAI-compatible" is a family, not a contract, and the differences are not discoverable in
+advance:
+
+| | Groq gpt-oss-120b | OpenAI gpt-6-luna |
+|---|---|---|
+| token limit parameter | `max_tokens` | `max_completion_tokens` (400s on the other) |
+| `temperature: 0` | fine | rejected — only the default is allowed |
+| `reasoning_effort: low` | fine | fine |
+
+Each endpoint names what it wants in its 400, so `llm.ts` reads that and corrects itself once per
+process. `NEXUS_LIVE_LLM_MAX_TOKENS_PARAM` sets the opening guess; a wrong guess costs one request,
+not every checklist in the deployment.

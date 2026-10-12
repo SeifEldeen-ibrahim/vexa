@@ -20,7 +20,10 @@ export interface LiveConfig {
   meetingApiUrl: string;
   internalSecret: string;
   stt: { url: string; token: string; model: string };
-  llm: { url: string; token: string; model: string; maxTokens: number; reasoningEffort: string };
+  llm: {
+    url: string; token: string; model: string; maxTokens: number;
+    maxTokensParam: 'max_tokens' | 'max_completion_tokens'; reasoningEffort: string;
+  };
   /** How often the coverage evaluator may run, per session. */
   coverageIntervalMs: number;
   /** Transcript characters carried into each coverage pass (sliding window). */
@@ -79,6 +82,9 @@ export function loadConfig(env: Env = process.env): LiveConfig {
       // for a long checklist rather than a number anything is expected to reach. It is a CAP, not
       // a reservation: the endpoint's per-minute budget is charged what the call actually uses.
       maxTokens: num('NEXUS_LIVE_LLM_MAX_TOKENS', 4096),
+      // Only a starting guess: llm.ts corrects it from what the endpoint says it wants.
+      maxTokensParam: env.NEXUS_LIVE_LLM_MAX_TOKENS_PARAM === 'max_completion_tokens'
+        ? ('max_completion_tokens' as const) : ('max_tokens' as const),
       // 'low' unless overridden; '' omits the parameter for an endpoint that rejects it.
       reasoningEffort: (env.NEXUS_LIVE_LLM_REASONING_EFFORT ?? 'low').trim(),
     },

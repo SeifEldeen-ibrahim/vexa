@@ -954,6 +954,9 @@ services:
       # and returned nothing), while a NON-reasoning model rejects `reasoning_effort` outright as
       # an unknown parameter — set it empty to omit the field entirely.
       - NEXUS_LIVE_LLM_MAX_TOKENS=${NEXUS_LIVE_LLM_MAX_TOKENS:-4096}
+      # max_tokens (Groq, older OpenAI) or max_completion_tokens (OpenAI reasoning models).
+      # Only a starting guess: llm.ts corrects it from the 400 the endpoint sends back.
+      - NEXUS_LIVE_LLM_MAX_TOKENS_PARAM=${NEXUS_LIVE_LLM_MAX_TOKENS_PARAM:-max_tokens}
       - NEXUS_LIVE_LLM_REASONING_EFFORT=${NEXUS_LIVE_LLM_REASONING_EFFORT-low}
       - NEXUS_LIVE_COVERAGE_INTERVAL_MS=${NEXUS_LIVE_COVERAGE_INTERVAL_MS:-20000}
       # How long a call may go without audio before the janitor finalizes it. This is what closes

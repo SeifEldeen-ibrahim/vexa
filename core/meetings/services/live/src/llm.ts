@@ -10,6 +10,12 @@
  * A failure here degrades ONE thing: the checklist stops advancing. It must never touch the
  * transcript, so every error is returned, never thrown.
  *
+ * DIALECTS. "OpenAI-compatible" is a family, not a contract. Groq's gpt-oss takes `max_tokens`
+ * and `temperature: 0`; OpenAI's newer reasoning models reject BOTH — `max_tokens` must be
+ * `max_completion_tokens`, and temperature must be left at its default. Neither is discoverable
+ * ahead of time, but each endpoint says exactly what it wants in the 400 it sends back, so this
+ * module reads that and corrects itself once per process rather than making an operator guess.
+ *
  * REASONING MODELS. The default judge (`openai/gpt-oss-120b`) thinks before it answers, and its
  * thinking is billed against the SAME completion budget as its answer. At the original 1024-token
  * cap a real 11-point agenda spent 1022 tokens reasoning, returned `finish_reason: "length"` and
@@ -33,7 +39,11 @@ export interface HttpCompletionOptions {
   model: string;
   maxTokens?: number;
   timeoutMs?: number;
-  /** 0 by default: this is a judgement about what was said, not a creative task. */
+  /** `max_tokens` (Groq, older OpenAI) or `max_completion_tokens` (OpenAI reasoning models).
+   *  Wrong guesses are self-correcting — the endpoint names the right one in its 400. */
+  maxTokensParam?: 'max_tokens' | 'max_completion_tokens';
+  /** 0 by default: this is a judgement about what was said, not a creative task. Some models
+   *  accept only their default, and say so; then it is dropped. */
   temperature?: number;
   /** Sent as `reasoning_effort` when set. Empty string omits the field entirely, for an
    *  endpoint that rejects parameters it does not know. */
@@ -56,6 +66,27 @@ export function createHttpCompletion(opts: HttpCompletionOptions): CompletionPor
   const timeoutMs = opts.timeoutMs ?? 20000;
   const effort = (opts.reasoningEffort ?? 'low').trim();
 
+  // The dialect this endpoint turns out to speak. Starts as configured and is corrected by the
+  // endpoint's own complaints, so a model swap needs no new setting and a wrong setting costs one
+  // request rather than every checklist in the deployment.
+  let tokensParam = opts.maxTokensParam ?? 'max_tokens';
+  let sendTemperature = true;
+
+  /** Does this 400 tell us which parameter it wanted instead? Adjust and say so, once. */
+  const learnFrom = (body: string): boolean => {
+    if (/max_completion_tokens/.test(body) && tokensParam !== 'max_completion_tokens') {
+      tokensParam = 'max_completion_tokens';
+      log.info('llm', 'endpoint wants max_completion_tokens — switching for the rest of this process');
+      return true;
+    }
+    if (/temperature/.test(body) && sendTemperature) {
+      sendTemperature = false;
+      log.info('llm', 'endpoint rejects an explicit temperature — leaving it at the default');
+      return true;
+    }
+    return false;
+  };
+
   return {
     async complete(prompt: string): Promise<string | null> {
       if (!url || !opts.token || !opts.model) {
@@ -63,23 +94,32 @@ export function createHttpCompletion(opts: HttpCompletionOptions): CompletionPor
         return null;
       }
       try {
-        const res = await doFetch(url, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${opts.token}`,
-          },
-          body: JSON.stringify({
-            model: opts.model,
-            messages: [{ role: 'user', content: prompt }],
-            max_tokens: opts.maxTokens ?? 4096,
-            temperature: opts.temperature ?? 0,
-            ...(effort ? { reasoning_effort: effort } : {}),
-          }),
-          signal: AbortSignal.timeout(timeoutMs),
-        });
+        // At most three goes, and only ever after the endpoint has NAMED what it wants: one for
+        // the token parameter, one for the temperature, one that works.
+        let res: Response;
+        let body = '';
+        for (let attempt = 0; ; attempt++) {
+          res = await doFetch(url, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${opts.token}`,
+            },
+            body: JSON.stringify({
+              model: opts.model,
+              messages: [{ role: 'user', content: prompt }],
+              [tokensParam]: opts.maxTokens ?? 4096,
+              ...(sendTemperature ? { temperature: opts.temperature ?? 0 } : {}),
+              ...(effort ? { reasoning_effort: effort } : {}),
+            }),
+            signal: AbortSignal.timeout(timeoutMs),
+          });
+          if (res.ok || res.status !== 400 || attempt >= 2) break;
+          body = (await res.text().catch(() => '')).slice(0, 300);
+          if (!learnFrom(body)) break;
+        }
         if (!res.ok) {
-          const body = (await res.text().catch(() => '')).slice(0, 200);
+          body = body || (await res.text().catch(() => '')).slice(0, 200);
           // 429 is a quota, not a fault: the deployment is asking faster than its plan allows.
           // Naming it is the difference between "upgrade the endpoint" and "the judge is broken",
           // and the two look identical from the checklist's side.

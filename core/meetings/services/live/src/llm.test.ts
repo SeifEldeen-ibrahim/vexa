@@ -93,4 +93,65 @@ await test('an unconfigured port, an HTTP error and a throw all decline quietly'
   assert.equal(await port((async () => { throw new Error('offline'); }) as unknown as typeof fetch).complete('x'), null);
 });
 
+// ── dialects: "OpenAI-compatible" is a family, not a contract ───────────────────────────────
+/** A judge is swapped by changing three environment variables, so the client has to survive an
+ *  endpoint whose parameter names differ. Both of these 400s are real: Groq's gpt-oss takes
+ *  `max_tokens` and `temperature: 0`, OpenAI's gpt-6-luna rejects both and says which it wants. */
+await test('a 400 naming max_completion_tokens is obeyed, and the call then succeeds', async () => {
+  const sent: any[] = [];
+  const port = createHttpCompletion({
+    url: 'https://api.example.com', token: 'k', model: 'reasoner',
+    fetcher: (async (_u: any, init: any) => {
+      const body = JSON.parse(init.body);
+      sent.push(body);
+      if ('max_tokens' in body) {
+        return new Response(JSON.stringify({ error: { message: "Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead." } }), { status: 400 });
+      }
+      return new Response(JSON.stringify({ choices: [{ message: { content: '{"marks":[]}' } }] }), { status: 200 });
+    }) as any,
+  });
+  assert.equal(await port.complete('judge this'), '{"marks":[]}');
+  assert.equal(sent.length, 2);
+  assert.equal(sent[0].max_tokens, 4096);
+  assert.equal(sent[1].max_completion_tokens, 4096);
+  assert.ok(!('max_tokens' in sent[1]));
+  // Learned for the process: the next call must not spend a request rediscovering it.
+  assert.equal(await port.complete('again'), '{"marks":[]}');
+  assert.equal(sent.length, 3);
+  assert.equal(sent[2].max_completion_tokens, 4096);
+});
+
+await test('a model that refuses an explicit temperature gets none', async () => {
+  const sent: any[] = [];
+  const port = createHttpCompletion({
+    url: 'https://api.example.com', token: 'k', model: 'reasoner',
+    maxTokensParam: 'max_completion_tokens',
+    fetcher: (async (_u: any, init: any) => {
+      const body = JSON.parse(init.body);
+      sent.push(body);
+      if ('temperature' in body) {
+        return new Response(JSON.stringify({ error: { message: "Unsupported value: 'temperature' does not support 0 with this model. Only the default (1) value is supported." } }), { status: 400 });
+      }
+      return new Response(JSON.stringify({ choices: [{ message: { content: 'ok' } }] }), { status: 200 });
+    }) as any,
+  });
+  assert.equal(await port.complete('judge this'), 'ok');
+  assert.equal(sent.length, 2);
+  assert.equal(sent[0].temperature, 0);
+  assert.ok(!('temperature' in sent[1]));
+});
+
+await test('a 400 that explains nothing is NOT retried forever', async () => {
+  let calls = 0;
+  const port = createHttpCompletion({
+    url: 'https://api.example.com', token: 'k', model: 'm',
+    fetcher: (async () => {
+      calls++;
+      return new Response(JSON.stringify({ error: { message: 'your prompt is unacceptable' } }), { status: 400 });
+    }) as any,
+  });
+  assert.equal(await port.complete('x'), null);
+  assert.equal(calls, 1);
+});
+
 console.log(`\n${passed} passed`);

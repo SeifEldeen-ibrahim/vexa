@@ -221,9 +221,8 @@ const SCALE = (
   'the names, the reasons, the answer. A decision is NOT required — most agenda lines ask for an ' +
   'update, and an update that was given is covered.\n' +
   '  "touched" — the point came up but was not worked through: raised and left unanswered, asked ' +
-  'and deflected, promised for later, mentioned in passing, or merely implied by a remark that ' +
-  'was really about something else. When you can tell the topic arose but not what the meeting ' +
-  'said about it, this is the honest answer.\n' +
+  'and deflected, promised for later, or mentioned in passing. When you can tell the topic arose ' +
+  'but not what the meeting said about it, this is the honest answer.\n' +
   // Makes the evidence do double duty: it stops being a citation the model attaches after
   // deciding, and becomes the thing the decision has to survive. A reader of the record applies
   // exactly this test — "does that quote show they dealt with it?" — so the judge should too.
@@ -244,7 +243,16 @@ const HONESTY = (
   'must actually have talked about it — and never mark one because it was announced as the next ' +
   'thing to discuss: being introduced is not being discussed. A line the transcript says was ' +
   'SKIPPED, deferred, or not reached ("we did not get to the timeline") stays out of your answer ' +
-  'too: saying a thing was not discussed is not discussing it.\n'
+  'too: saying a thing was not discussed is not discussing it.\n' +
+  // This clause used to sit in SCALE, on the "touched" side, as a reason TO mark — and it
+  // contradicted the sentence above it. On a written 1:1 where nobody asked for help, "support
+  // needed from the manager" was marked on "I will chase the pricing note with marketing", a
+  // remark made while agreeing next steps. The manager was indeed offering support; nobody had
+  // raised the agenda line. Implication has to mean leave it out, or "never mark on resemblance"
+  // means nothing.
+  'A line that is only IMPLIED — something a remark made for another purpose would let you infer, ' +
+  'rather than something the meeting raised — stays out of your answer as well. Somebody has to ' +
+  'have put the subject on the table.\n'
 );
 
 /** The over-marking guard, and the mirror image of HONESTY's under-marking one. Measured, not

@@ -41,6 +41,22 @@ fix for one failure silently buys the other — which is exactly what happened b
 A thin call is not an edge case, either: every meeting is thin for its first two minutes, so a
 judge that cannot be honest here is wrong for most of the time the live panel is on screen.
 
+`fixtures/sales-1to1-scripted.json` — the same agenda again, against a 1:1 that was WRITTEN to a
+designed outcome (40 segments, 238s, manager and rep, short sentences, no speaker labels) rather
+than captured. Both other fixtures are labelled by reading somebody's real meeting, so every
+disagreement can be argued about; here the ground truth is known by construction and the traps are
+deliberate:
+
+| line | trap | aimed at |
+|---|---|---|
+| a2 / a3 | two points covered by adjacent but separate remarks | the one-remark cap over-firing |
+| a6 | explicitly parked, never returned to | `SCALE` (promised for later) vs `HONESTY` (deferred stays out) |
+| a7 | asked twice, deflected both times | reading a deflection as an answer |
+| a8 | never mentioned in any form | marking from the agenda's own wording |
+| a10 | mentioned in passing, then announced for Thursday | "being introduced is not being discussed" |
+
+Designed outcome: 7 covered, 3 started, 1 not yet.
+
 A new fixture is worth adding whenever a real meeting is judged wrongly; that is the only kind of
 evidence this directory accepts.
 
@@ -107,7 +123,34 @@ Three changes, each measured on both fixtures:
 The full meeting got BETTER on the way (8/11 → 9/11): a3's quote there was the same remark as
 a2's, so the cap put it back to `touched`, which is what the hand label says.
 
-What the last row is really saying is that the bias is gone rather than that the score jumped.
+### The contradiction the scripted fixture found (2026-10-12)
+
+On its first run the scripted meeting scored 8/11 and 9/11, with 9 covered against a designed 7.
+Three traps passed outright — a3 was NOT over-capped, a6 came back `touched`, a10 `touched` — but
+**a8, which nobody mentions anywhere in the transcript, was marked in both runs**: `touched` on a
+remark about customers, then `covered` on "I will chase the pricing note with marketing", said
+while agreeing next steps. The manager was genuinely offering support; nobody had raised the
+agenda line.
+
+The cause was in the prompt, and it was a contradiction rather than an omission. `SCALE` listed
+"merely implied by a remark that was really about something else" as a reason to mark a line
+`touched`, two lines above `HONESTY`'s "never mark a line because its wording resembles the
+topic". The first licensed exactly what the second forbade. The clause now sits on the DON'T
+side — a line only implied by a remark made for another purpose stays out of the answer, because
+somebody has to have put the subject on the table — and that single move took the scripted meeting
+to **10/11 with 8 covered**, a8 correctly `not yet`, at no cost to the other two fixtures.
+
+Worth keeping in mind when reading a judge's output: a mark can be wrong because the prompt is
+missing a rule, or wrong because the prompt holds two rules that disagree. The second kind only
+shows up as an inconsistent result, which is why it needs a fixture whose answer is known in
+advance.
+
+The one remaining disagreement there is a7: "any blockers? nothing major" is read as covered where
+the label says started. That one is genuinely arguable — "nothing major" IS an answer — and it is
+left alone rather than tuned away.
+
+What the measurement table is really saying is that the bias is gone rather than that the score
+jumped.
 At 9 covered every single error was generous; now they fall on both sides of the label — a9 and
 a10 land `touched` or `open` on one run and `covered` on another. Two consecutive runs of the thin
 call disagree on three lines, so **±1 covered is model noise, not a regression**. Judge a future

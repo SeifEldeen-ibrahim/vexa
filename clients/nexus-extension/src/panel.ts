@@ -9,7 +9,7 @@ import {
   audioHealth, clock, historyWhen, progressBars, progressLine, sortForDisplay, whenCovered,
 } from './agenda-view.js';
 import type {
-  AgendaTemplate, ExtensionState, HistoryRow, Progress, SavedChecklist, SessionSnapshot,
+  Agenda, AgendaTemplate, ExtensionState, HistoryRow, Progress, SavedChecklist, SessionSnapshot,
 } from './types.js';
 
 const $ = <T extends HTMLElement>(id: string): T => document.getElementById(id) as T;
@@ -102,16 +102,23 @@ function setError(node: HTMLElement, message: string | null): void {
 }
 
 // ── the checklist ──────────────────────────────────────────────────────────────────────────
-function renderChecklist(into: HTMLElement, snapshot: SessionSnapshot): void {
+/** The checklist, rendered the same way wherever it appears — live, finished, or read back out
+ *  of History weeks later. One renderer, because the quote under a tick is the whole reason the
+ *  tick can be trusted, and a reader of the record needs it at least as much as the room did.
+ *
+ *  `order` is the one difference between those surfaces. Live, the question is "what have we not
+ *  dealt with", so open items come first. In the record the question is "what did this meeting
+ *  do", and the answer reads best down the agenda as the user wrote it. */
+function renderChecklist(into: HTMLElement, agenda: Agenda, order: 'todo' | 'agenda' = 'todo'): void {
   into.replaceChildren();
-  if (!snapshot.agenda.items.length) {
+  if (!agenda.items.length) {
     const empty = document.createElement('li');
     empty.className = 'empty';
     empty.textContent = 'No checklist for this call — Nexus is just recording.';
     into.append(empty);
     return;
   }
-  for (const item of sortForDisplay(snapshot.agenda)) {
+  for (const item of order === 'todo' ? sortForDisplay(agenda) : agenda.items) {
     const li = document.createElement('li');
     li.className = `item ${item.status}`;
 
@@ -128,6 +135,12 @@ function renderChecklist(into: HTMLElement, snapshot: SessionSnapshot): void {
       quote.className = 'evidence';
       quote.textContent = `“${item.evidence}”`;
       text.append(quote);
+    } else if (item.status === 'open') {
+      // Say it in words. A box that is merely not ticked could as well mean "we never checked".
+      const none = document.createElement('em');
+      none.className = 'evidence none';
+      none.textContent = 'nothing in the transcript about this';
+      text.append(none);
     }
 
     li.append(box, text);
@@ -184,7 +197,7 @@ function render(state: ExtensionState): void {
     el.audioDot.className = `dot ${health.tone}`;
     el.audioDot.title = health.text;
     el.audioState.textContent = health.text;
-    renderChecklist(el.checklist, s);
+    renderChecklist(el.checklist, s.agenda);
     return;
   }
 
@@ -192,7 +205,7 @@ function render(state: ExtensionState): void {
     show('done');
     el.doneTitle.textContent = `${state.session.title} — finished`;
     el.doneProgress.textContent = progressLine(state.session.progress);
-    renderChecklist(el.doneChecklist, state.session);
+    renderChecklist(el.doneChecklist, state.session.agenda);
     return;
   }
 
@@ -395,6 +408,9 @@ function progressBar(progress: Progress): HTMLElement {
   return bar;
 }
 
+/** Which calls the user has opened in History, by meeting id. */
+const expandedCalls = new Set<number>();
+
 async function loadHistory(): Promise<void> {
   const res = await ask<{ ok: boolean; value?: HistoryRow[]; error?: string }>({ type: 'history' });
   el.historyList.replaceChildren();
@@ -417,6 +433,13 @@ async function loadHistory(): Promise<void> {
     const wrap = document.createElement('div');
     wrap.className = 'history-item';
 
+    // The summary is a BUTTON, because "9 of 11 covered" is a claim and the only useful next
+    // question is "which nine, and what did they say?". That answer is already in this row —
+    // every mark carries its quote — so opening it costs no request and no round trip.
+    const head = document.createElement('button');
+    head.className = 'history-head';
+    head.type = 'button';
+
     const top = document.createElement('div');
     top.className = 'history-top';
     const title = document.createElement('span');
@@ -425,15 +448,43 @@ async function loadHistory(): Promise<void> {
     const when = document.createElement('span');
     when.className = 'history-when';
     when.textContent = row.status === 'active' ? 'live now' : historyWhen(row.started_at);
-    top.append(title, when);
+    const chevron = document.createElement('span');
+    chevron.className = 'chevron';
+    chevron.textContent = '›';
+    top.append(title, when, chevron);
 
     const progress = document.createElement('div');
     progress.className = 'history-progress';
     progress.textContent = progressLine(row.progress);
 
-    wrap.append(top, progress);
+    head.append(top, progress);
+    if (row.progress.total) head.append(progressBar(row.progress));
+    wrap.append(head);
 
-    if (row.progress.total) wrap.append(progressBar(row.progress));
+    if (!row.agenda.items.length) {
+      head.disabled = true;
+      el.historyList.append(wrap);
+      continue;
+    }
+
+    const detail = document.createElement('ul');
+    detail.className = 'checklist history-detail';
+    renderChecklist(detail, row.agenda, 'agenda');
+    const open = expandedCalls.has(row.meeting_id);
+    detail.hidden = !open;
+    head.setAttribute('aria-expanded', String(open));
+    wrap.classList.toggle('open', open);
+    head.addEventListener('click', () => {
+      const nowOpen = detail.hidden;
+      detail.hidden = !nowOpen;
+      head.setAttribute('aria-expanded', String(nowOpen));
+      wrap.classList.toggle('open', nowOpen);
+      // Remembered across re-renders: the History tab reloads every time it is opened, and a
+      // call the user had expanded closing itself behind their back is just a lost place.
+      if (nowOpen) expandedCalls.add(row.meeting_id);
+      else expandedCalls.delete(row.meeting_id);
+    });
+    wrap.append(detail);
     el.historyList.append(wrap);
   }
 }
